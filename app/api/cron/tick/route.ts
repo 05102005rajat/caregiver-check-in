@@ -16,9 +16,14 @@ function formatAppointments(appts: Appointment[]): string {
   return appts.map((a) => a.title).join(", ");
 }
 
-async function getCaregiverName(db: ReturnType<typeof createAdminClient>, caregiverId: string): Promise<string> {
-  const { data } = await db.from("caregivers").select("name").eq("id", caregiverId).single();
-  return data?.name ?? "your family";
+function groupByParentId<T extends { parent_id: string }>(rows: T[]): Map<string, T[]> {
+  const map = new Map<string, T[]>();
+  for (const row of rows) {
+    const bucket = map.get(row.parent_id);
+    if (bucket) bucket.push(row);
+    else map.set(row.parent_id, [row]);
+  }
+  return map;
 }
 
 /** Fires the actual Vapi call and records the outcome on an already-created `calls` row. */
@@ -85,18 +90,10 @@ async function processRetries(
   caregiverName: string,
   rules: EscalationRules,
   medications: Medication[],
-  appointments: Appointment[]
+  appointments: Appointment[],
+  noAnswerCalls: Call[]
 ) {
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-  const { data: pastCalls } = await db
-    .from("calls")
-    .select("*")
-    .eq("parent_id", parent.id)
-    .eq("status", "no_answer")
-    .gte("scheduled_for", oneDayAgo.toISOString());
-
-  for (const call of (pastCalls ?? []) as Call[]) {
+  for (const call of noAnswerCalls) {
     if (!call.called_at) continue;
     const minutesSinceCalled = minutesBetween(new Date(), new Date(call.called_at));
     if (minutesSinceCalled < rules.retry_after_minutes) continue;
@@ -136,19 +133,21 @@ async function processRetries(
   }
 }
 
-async function processParent(db: ReturnType<typeof createAdminClient>, parent: Parent, now: Date): Promise<number> {
-  const [medsRes, apptsRes, rulesRes] = await Promise.all([
-    db.from("medications").select("*").eq("parent_id", parent.id).eq("active", true),
-    db.from("appointments").select("*").eq("parent_id", parent.id),
-    db.from("escalation_rules").select("*").eq("parent_id", parent.id).single(),
-  ]);
+interface ParentContext {
+  caregiverName: string;
+  medications: Medication[];
+  appointments: Appointment[];
+  rules: EscalationRules | null;
+  noAnswerCalls: Call[];
+}
 
-  const medications = (medsRes.data ?? []) as Medication[];
-  const appointments = (apptsRes.data ?? []) as Appointment[];
-  const rules = rulesRes.data as EscalationRules | null;
-
-  const caregiverName = await getCaregiverName(db, parent.caregiver_id);
-  const due = medsDueNow(medications, parent.timezone, now);
+async function processParent(
+  db: ReturnType<typeof createAdminClient>,
+  parent: Parent,
+  now: Date,
+  ctx: ParentContext
+): Promise<number> {
+  const due = medsDueNow(ctx.medications, parent.timezone, now);
   const distinctSlotTimes = [...new Set(due.map((m) => m.time_of_day))];
 
   let callsTriggered = 0;
@@ -159,16 +158,16 @@ async function processParent(db: ReturnType<typeof createAdminClient>, parent: P
     const dialed = await scheduleAndDial(
       db,
       parent,
-      caregiverName,
+      ctx.caregiverName,
       medsForSlot,
-      appointmentsToday(appointments, parent.timezone, now),
+      appointmentsToday(ctx.appointments, parent.timezone, now),
       scheduledFor
     );
     if (dialed) callsTriggered += 1;
   }
 
-  if (rules) {
-    await processRetries(db, parent, caregiverName, rules, medications, appointments);
+  if (ctx.rules) {
+    await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls);
   }
 
   return callsTriggered;
@@ -188,10 +187,45 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: parentsError.message }, { status: 500 });
   }
 
-  // Each parent's work is independent, so process them concurrently rather than
-  // one at a time — keeps total tick duration flat as the caregiver count grows.
+  const parentList = (parents ?? []) as Parent[];
+  if (parentList.length === 0) {
+    return NextResponse.json({ ok: true, callsTriggered: 0 });
+  }
+
+  const parentIds = parentList.map((p) => p.id);
+  const caregiverIds = [...new Set(parentList.map((p) => p.caregiver_id))];
+  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  // One batch of queries for all parents instead of per-parent round-trips, so tick
+  // latency stays roughly constant as the number of caregivers grows.
+  const [caregiversRes, medsRes, apptsRes, rulesRes, noAnswerRes] = await Promise.all([
+    db.from("caregivers").select("id, name").in("id", caregiverIds),
+    db.from("medications").select("*").in("parent_id", parentIds).eq("active", true),
+    db.from("appointments").select("*").in("parent_id", parentIds),
+    db.from("escalation_rules").select("*").in("parent_id", parentIds),
+    db.from("calls").select("*").in("parent_id", parentIds).eq("status", "no_answer").gte("scheduled_for", oneDayAgo.toISOString()),
+  ]);
+
+  const caregiverNameById = new Map<string, string>(
+    (caregiversRes.data ?? []).map((c) => [c.id as string, c.name as string])
+  );
+  const medsByParent = groupByParentId((medsRes.data ?? []) as Medication[]);
+  const apptsByParent = groupByParentId((apptsRes.data ?? []) as Appointment[]);
+  const rulesByParent = new Map<string, EscalationRules>(
+    ((rulesRes.data ?? []) as EscalationRules[]).map((r) => [r.parent_id, r])
+  );
+  const noAnswerByParent = groupByParentId((noAnswerRes.data ?? []) as Call[]);
+
   const counts = await Promise.all(
-    ((parents ?? []) as Parent[]).map((parent) => processParent(db, parent, now))
+    parentList.map((parent) =>
+      processParent(db, parent, now, {
+        caregiverName: caregiverNameById.get(parent.caregiver_id) ?? "your family",
+        medications: medsByParent.get(parent.id) ?? [],
+        appointments: apptsByParent.get(parent.id) ?? [],
+        rules: rulesByParent.get(parent.id) ?? null,
+        noAnswerCalls: noAnswerByParent.get(parent.id) ?? [],
+      })
+    )
   );
   const callsTriggered = counts.reduce((sum, n) => sum + n, 0);
 
