@@ -32,15 +32,21 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: caregiverError.message }, { status: 500 });
   }
 
+  // v1 supports one parent per caregiver (spec section 10). Resubmitting the form
+  // updates that same parent + fully replaces their meds/appointments/contacts,
+  // rather than creating a second parent (and duplicate scheduled calls).
   const { data: parent, error: parentError } = await db
     .from("parents")
-    .insert({
-      caregiver_id: user.id,
-      name: payload.parent.name,
-      phone: payload.parent.phone,
-      timezone: payload.parent.timezone,
-      preferred_voice: payload.parent.assistant_name,
-    })
+    .upsert(
+      {
+        caregiver_id: user.id,
+        name: payload.parent.name,
+        phone: payload.parent.phone,
+        timezone: payload.parent.timezone,
+        preferred_voice: payload.parent.assistant_name,
+      },
+      { onConflict: "caregiver_id" }
+    )
     .select()
     .single();
   if (parentError || !parent) {
@@ -48,6 +54,15 @@ export async function POST(request: Request) {
   }
 
   const parentId = parent.id as string;
+
+  const [delMeds, delAppts, delContacts] = await Promise.all([
+    db.from("medications").delete().eq("parent_id", parentId),
+    db.from("appointments").delete().eq("parent_id", parentId),
+    db.from("family_contacts").delete().eq("parent_id", parentId),
+  ]);
+  for (const { error } of [delMeds, delAppts, delContacts]) {
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 
   if (payload.medications.length > 0) {
     const { error } = await db.from("medications").insert(
@@ -89,7 +104,7 @@ export async function POST(request: Request) {
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  const { error: rulesError } = await db.from("escalation_rules").insert({
+  const { error: rulesError } = await db.from("escalation_rules").upsert({
     parent_id: parentId,
     retry_after_minutes: payload.rules.retry_after_minutes,
     max_retries: payload.rules.max_retries,

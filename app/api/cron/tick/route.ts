@@ -16,28 +16,20 @@ function formatAppointments(appts: Appointment[]): string {
   return appts.map((a) => a.title).join(", ");
 }
 
-async function callParentNow(
+async function getCaregiverName(db: ReturnType<typeof createAdminClient>, caregiverId: string): Promise<string> {
+  const { data } = await db.from("caregivers").select("name").eq("id", caregiverId).single();
+  return data?.name ?? "your family";
+}
+
+/** Fires the actual Vapi call and records the outcome on an already-created `calls` row. */
+async function dialAndRecord(
   db: ReturnType<typeof createAdminClient>,
+  callId: string,
   parent: Parent,
   caregiverName: string,
   medsDue: Medication[],
-  todaysAppointments: Appointment[],
-  scheduledFor: Date
+  todaysAppointments: Appointment[]
 ) {
-  const { data: callRow, error: insertError } = await db
-    .from("calls")
-    .insert({
-      parent_id: parent.id,
-      scheduled_for: scheduledFor.toISOString(),
-      status: "scheduled",
-    })
-    .select()
-    .single();
-  if (insertError || !callRow) {
-    console.error("Failed to create calls row", insertError);
-    return;
-  }
-
   try {
     const vapiCall = await triggerVapiCall({
       toNumber: parent.phone,
@@ -53,60 +45,82 @@ async function callParentNow(
     await db
       .from("calls")
       .update({ status: "in_progress", called_at: new Date().toISOString(), vapi_call_id: vapiCall.id })
-      .eq("id", callRow.id);
+      .eq("id", callId);
   } catch (err) {
     console.error("Vapi call trigger failed", err);
-    await db.from("calls").update({ status: "failed" }).eq("id", callRow.id);
+    await db.from("calls").update({ status: "failed" }).eq("id", callId);
   }
 }
 
-async function processRetries(db: ReturnType<typeof createAdminClient>, parent: Parent, rules: EscalationRules) {
-  const startOfDay = new Date();
-  startOfDay.setUTCHours(0, 0, 0, 0);
+/** Creates the initial calls row for a due med slot and dials, skipping if already scheduled today. */
+async function scheduleAndDial(
+  db: ReturnType<typeof createAdminClient>,
+  parent: Parent,
+  caregiverName: string,
+  medsForSlot: Medication[],
+  todaysAppointments: Appointment[],
+  scheduledFor: Date
+) {
+  // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
+  // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
+  const { data: callRow, error: insertError } = await db
+    .from("calls")
+    .insert({ parent_id: parent.id, scheduled_for: scheduledFor.toISOString(), status: "scheduled" })
+    .select()
+    .single();
+
+  if (insertError) {
+    if (insertError.code === "23505") return; // already scheduled this slot, nothing to do
+    console.error("Failed to create calls row", insertError);
+    return;
+  }
+  if (!callRow) return;
+
+  await dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments);
+}
+
+async function processRetries(
+  db: ReturnType<typeof createAdminClient>,
+  parent: Parent,
+  rules: EscalationRules,
+  medications: Medication[],
+  appointments: Appointment[]
+) {
+  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   const { data: pastCalls } = await db
     .from("calls")
     .select("*")
     .eq("parent_id", parent.id)
-    .gte("created_at", startOfDay.toISOString());
+    .eq("status", "no_answer")
+    .gte("scheduled_for", oneDayAgo.toISOString());
 
-  const calls = (pastCalls ?? []) as Call[];
-  const noAnswer = calls.filter((c) => c.status === "no_answer" && c.called_at);
-  // Prior attempts today = rows we've already marked 'failed' as part of this retry chain,
-  // since we flip a no_answer row to 'failed' the moment we spin up its retry (see below).
-  const priorAttempts = calls.filter((c) => c.status === "failed").length;
-
-  for (const call of noAnswer) {
-    const minutesSinceCalled = minutesBetween(new Date(), new Date(call.called_at!));
+  for (const call of (pastCalls ?? []) as Call[]) {
+    if (!call.called_at) continue;
+    const minutesSinceCalled = minutesBetween(new Date(), new Date(call.called_at));
     if (minutesSinceCalled < rules.retry_after_minutes) continue;
 
-    await db.from("calls").update({ status: "failed" }).eq("id", call.id);
-
-    if (priorAttempts >= rules.max_retries) {
-      // Max retries reached. Miss-alert SMS to family_contacts (notify_on_miss) ships in Evening 3.
+    if (call.retry_count >= rules.max_retries) {
+      // Retries exhausted for this slot. Miss-alert SMS to family_contacts (notify_on_miss) ships in Evening 3.
+      await db.from("calls").update({ status: "failed" }).eq("id", call.id);
       continue;
     }
 
-    const [meds, appts, caregiverName] = await Promise.all([
-      db.from("medications").select("*").eq("parent_id", parent.id).eq("active", true),
-      db.from("appointments").select("*").eq("parent_id", parent.id),
-      getCaregiverName(db, parent.caregiver_id),
-    ]);
+    await db
+      .from("calls")
+      .update({ status: "in_progress", retry_count: call.retry_count + 1 })
+      .eq("id", call.id);
 
-    await callParentNow(
+    const caregiverName = await getCaregiverName(db, parent.caregiver_id);
+    await dialAndRecord(
       db,
+      call.id,
       parent,
       caregiverName,
-      (meds.data ?? []) as Medication[],
-      appointmentsToday((appts.data ?? []) as Appointment[], parent.timezone),
-      new Date()
+      medications,
+      appointmentsToday(appointments, parent.timezone)
     );
   }
-}
-
-async function getCaregiverName(db: ReturnType<typeof createAdminClient>, caregiverId: string): Promise<string> {
-  const { data } = await db.from("caregivers").select("name").eq("id", caregiverId).single();
-  return data?.name ?? "your family";
 }
 
 export async function GET(request: Request) {
@@ -137,16 +151,18 @@ export async function GET(request: Request) {
     const rules = rulesRes.data as EscalationRules | null;
 
     const due = medsDueNow(medications, parent.timezone, now);
-    if (due.length > 0) {
+    const distinctSlotTimes = [...new Set(due.map((m) => m.time_of_day))];
+
+    for (const slotTime of distinctSlotTimes) {
       const caregiverName = await getCaregiverName(db, parent.caregiver_id);
-      const slotTime = due[0].time_of_day;
+      const medsForSlot = due.filter((m) => m.time_of_day === slotTime);
       const scheduledFor = scheduledForToday(slotTime, parent.timezone, now);
 
-      await callParentNow(
+      await scheduleAndDial(
         db,
         parent,
         caregiverName,
-        due,
+        medsForSlot,
         appointmentsToday(appointments, parent.timezone, now),
         scheduledFor
       );
@@ -154,7 +170,7 @@ export async function GET(request: Request) {
     }
 
     if (rules) {
-      await processRetries(db, parent, rules);
+      await processRetries(db, parent, rules, medications, appointments);
     }
   }
 

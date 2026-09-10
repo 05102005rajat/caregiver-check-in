@@ -62,6 +62,7 @@ export interface Call {
   called_at: string | null;
   status: "scheduled" | "in_progress" | "completed" | "no_answer" | "failed" | null;
   vapi_call_id: string | null;
+  retry_count: number;
   transcript: string | null;
   summary: string | null;
   meds_confirmed: Record<string, unknown> | null;

@@ -311,6 +311,8 @@ export default function SetupPage() {
             <Field label="Phone">
               <input
                 placeholder="+15551234567"
+                pattern="^\+[1-9]\d{6,14}$"
+                title="E.164 format, e.g. +15551234567"
                 className="input"
                 value={contact.phone}
                 onChange={(e) => updateContact(i, { phone: e.target.value })}
