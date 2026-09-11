@@ -2,12 +2,15 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
-import type { Call, Parent } from "@/types/db";
+import { scanForConcernKeywords } from "@/lib/safety";
+import type { Call, EscalationRules, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
 // Vapi endedReason values that mean the call never actually connected to a person.
 const NO_ANSWER_REASONS = new Set(["customer-did-not-answer", "customer-busy", "voicemail", "no-answer"]);
+
+const DEFAULT_CONCERN_KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
 export async function POST(request: Request) {
   const secretHeader = request.headers.get("x-webhook-secret");
@@ -44,14 +47,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  const { data: rulesRow } = await db
+    .from("escalation_rules")
+    .select("*")
+    .eq("parent_id", call.parent_id)
+    .single();
+  const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
+
+  // Deterministic backstop, run independent of whether Claude succeeds: catches an
+  // emergency mention even if the LLM call fails or under-classifies the transcript.
+  const keywordMatches = scanForConcernKeywords(transcript, concernKeywords);
+
   let extracted;
   try {
     extracted = await summarizeCall(transcript);
   } catch (err) {
     console.error("Claude summarization failed", err);
-    await db.from("calls").update({ status: "completed", transcript }).eq("id", call.id);
+    await db.from("calls").update({ status: "completed", transcript, concerns: keywordMatches }).eq("id", call.id);
+
+    if (keywordMatches.length > 0) {
+      const { data: parentRow } = await db.from("parents").select("*").eq("id", call.parent_id).single();
+      const parentName = (parentRow as Parent | null)?.name ?? "your family member";
+      const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
+      await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body);
+    }
     return NextResponse.json({ ok: true });
   }
+
+  const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches]));
 
   await db
     .from("calls")
@@ -60,12 +83,11 @@ export async function POST(request: Request) {
       transcript,
       summary: extracted.summary,
       meds_confirmed: { confirmed: extracted.meds_confirmed, missed: extracted.meds_missed },
-      concerns: extracted.concerns,
+      concerns,
     })
     .eq("id", call.id);
 
-  const hasConcern =
-    extracted.concerns.length > 0 || extracted.mood === "concerning" || extracted.meds_missed.length > 0;
+  const hasConcern = concerns.length > 0 || extracted.mood === "concerning" || extracted.meds_missed.length > 0;
 
   if (hasConcern) {
     const { data: parentRow } = await db.from("parents").select("*").eq("id", call.parent_id).single();
@@ -75,8 +97,8 @@ export async function POST(request: Request) {
     if (extracted.meds_missed.length > 0) {
       lines.push(`Not confirmed taken: ${extracted.meds_missed.join(", ")}.`);
     }
-    if (extracted.concerns.length > 0) {
-      lines.push(`Concerns noted: ${extracted.concerns.join(", ")}.`);
+    if (concerns.length > 0) {
+      lines.push(`Concerns noted: ${concerns.join(", ")}.`);
     }
 
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join(" "));
