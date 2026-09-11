@@ -41,6 +41,13 @@ export async function POST(request: Request) {
   }
   const call = callRow as Call;
 
+  // Webhook providers can redeliver the same event (e.g. if our response was lost in
+  // transit). A completed/failed call was already fully processed — reprocessing would
+  // call Claude again and could send a duplicate concern/miss-alert SMS to family.
+  if (call.status === "completed" || call.status === "failed") {
+    return NextResponse.json({ ok: true });
+  }
+
   if (NO_ANSWER_REASONS.has(endedReason)) {
     await db.from("calls").update({ status: "no_answer" }).eq("id", call.id);
     // The next cron tick retries (or, once retries are exhausted, sends the miss-alert SMS).
