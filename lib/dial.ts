@@ -17,6 +17,9 @@ export async function dialAndRecord(
     vapiCall = await triggerVapiCall({
       toNumber: parent.phone,
       variableValues: {
+        // Referenced by the record_consent Tool's Static Body Field ({{parent_id}}) so the
+        // consent webhook knows which parent to update without depending on Vapi's call id.
+        parent_id: parent.id,
         parent_name: parent.name,
         assistant_name: parent.preferred_voice,
         meds_due: formatMeds(medsDue),
