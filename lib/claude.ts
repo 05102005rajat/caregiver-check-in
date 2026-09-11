@@ -30,6 +30,24 @@ function extractJson(text: string): string {
   return text.slice(start, end + 1);
 }
 
+const MOODS: CallSummary["mood"][] = ["good", "okay", "low", "concerning"];
+
+// Claude can truncate at max_tokens or drift from the requested shape; every field is
+// defaulted so callers can trust the arrays/mood exist without their own validation.
+function normalize(raw: unknown): CallSummary {
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+
+  return {
+    summary: typeof obj.summary === "string" ? obj.summary : "",
+    meds_confirmed: asStringArray(obj.meds_confirmed),
+    meds_missed: asStringArray(obj.meds_missed),
+    concerns: asStringArray(obj.concerns),
+    mood: MOODS.includes(obj.mood as CallSummary["mood"]) ? (obj.mood as CallSummary["mood"]) : "okay",
+    appointments_acknowledged: asStringArray(obj.appointments_acknowledged),
+  };
+}
+
 export async function summarizeCall(transcript: string): Promise<CallSummary> {
   const message = await anthropic.messages.create({
     model: "claude-sonnet-5",
@@ -42,5 +60,5 @@ export async function summarizeCall(transcript: string): Promise<CallSummary> {
     .map((block) => block.text)
     .join("");
 
-  return JSON.parse(extractJson(text)) as CallSummary;
+  return normalize(JSON.parse(extractJson(text)));
 }

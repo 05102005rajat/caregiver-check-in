@@ -34,8 +34,9 @@ async function dialAndRecord(
   medsDue: Medication[],
   todaysAppointments: Appointment[]
 ) {
+  let vapiCall;
   try {
-    const vapiCall = await triggerVapiCall({
+    vapiCall = await triggerVapiCall({
       toNumber: parent.phone,
       variableValues: {
         parent_name: parent.name,
@@ -45,14 +46,21 @@ async function dialAndRecord(
         family_setup_by: caregiverName,
       },
     });
-
-    await db
-      .from("calls")
-      .update({ status: "in_progress", called_at: new Date().toISOString(), vapi_call_id: vapiCall.id })
-      .eq("id", callId);
   } catch (err) {
     console.error("Vapi call trigger failed", err);
     await db.from("calls").update({ status: "failed" }).eq("id", callId);
+    return;
+  }
+
+  const { error } = await db
+    .from("calls")
+    .update({ status: "in_progress", called_at: new Date().toISOString(), vapi_call_id: vapiCall.id })
+    .eq("id", callId);
+  if (error) {
+    // The call was actually placed — don't mark this 'failed', that would misreport a
+    // successful dial and orphan the row from the webhook's vapi_call_id lookup for no reason
+    // beyond our own bookkeeping hiccup. Leave status as-is and just log for investigation.
+    console.error(`Failed to record vapi_call_id ${vapiCall.id} for calls row ${callId}`, error);
   }
 }
 
@@ -117,9 +125,10 @@ async function processRetries(
 
     if (!claimed) continue; // lost the race to another cron invocation
 
+    const scheduledFor = new Date(call.scheduled_for);
+    const medsForSlot = medsAtLocalTime(medications, scheduledFor, parent.timezone);
+
     if (nextStatus === "failed") {
-      const scheduledFor = new Date(call.scheduled_for);
-      const medsForSlot = medsAtLocalTime(medications, scheduledFor, parent.timezone);
       const time = formatLocalTime(scheduledFor, parent.timezone);
       const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. Their ${formatMeds(medsForSlot)} was scheduled.`;
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body);
@@ -131,7 +140,7 @@ async function processRetries(
       call.id,
       parent,
       caregiverName,
-      medications,
+      medsForSlot,
       appointmentsToday(appointments, parent.timezone)
     );
   }

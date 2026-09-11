@@ -55,14 +55,18 @@ export async function POST(request: Request) {
 
   const parentId = parent.id as string;
 
-  const [delMeds, delAppts, delContacts] = await Promise.all([
-    db.from("medications").delete().eq("parent_id", parentId),
-    db.from("appointments").delete().eq("parent_id", parentId),
-    db.from("family_contacts").delete().eq("parent_id", parentId),
+  // Capture the previous rows' ids before touching anything. New rows are inserted first;
+  // the old ones are only deleted once every insert below has succeeded, so a failure
+  // partway through (e.g. medications insert fails) leaves the prior data intact instead
+  // of losing appointments/family_contacts that had already been deleted.
+  const [oldMeds, oldAppts, oldContacts] = await Promise.all([
+    db.from("medications").select("id").eq("parent_id", parentId),
+    db.from("appointments").select("id").eq("parent_id", parentId),
+    db.from("family_contacts").select("id").eq("parent_id", parentId),
   ]);
-  for (const { error } of [delMeds, delAppts, delContacts]) {
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  const oldMedIds = (oldMeds.data ?? []).map((r) => r.id as string);
+  const oldApptIds = (oldAppts.data ?? []).map((r) => r.id as string);
+  const oldContactIds = (oldContacts.data ?? []).map((r) => r.id as string);
 
   if (payload.medications.length > 0) {
     const { error } = await db.from("medications").insert(
@@ -112,6 +116,13 @@ export async function POST(request: Request) {
   if (rulesError) {
     return NextResponse.json({ error: rulesError.message }, { status: 500 });
   }
+
+  // Everything new is in. Now it's safe to remove what this resubmission replaced.
+  await Promise.all([
+    oldMedIds.length > 0 ? db.from("medications").delete().in("id", oldMedIds) : Promise.resolve(),
+    oldApptIds.length > 0 ? db.from("appointments").delete().in("id", oldApptIds) : Promise.resolve(),
+    oldContactIds.length > 0 ? db.from("family_contacts").delete().in("id", oldContactIds) : Promise.resolve(),
+  ]);
 
   return NextResponse.json({ parent_id: parentId }, { status: 201 });
 }
