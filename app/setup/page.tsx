@@ -50,6 +50,22 @@ export default function SetupPage() {
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
 
+  const [testCallStatus, setTestCallStatus] = useState<"idle" | "calling" | "called" | "error">("idle");
+  const [testCallError, setTestCallError] = useState("");
+
+  async function handleTestCall() {
+    setTestCallStatus("calling");
+    setTestCallError("");
+    const res = await fetch("/api/parents/test-call", { method: "POST" });
+    if (res.ok) {
+      setTestCallStatus("called");
+    } else {
+      const body = await res.json().catch(() => ({}));
+      setTestCallError(body.error ?? "Couldn't place the test call.");
+      setTestCallStatus("error");
+    }
+  }
+
   useEffect(() => {
     const supabase = createClient();
     supabase.auth.getUser().then(({ data }) => {
@@ -108,12 +124,29 @@ export default function SetupPage() {
       .join(" and ");
 
     return (
-      <div className="max-w-lg mx-auto mt-24 text-center space-y-3">
+      <div className="max-w-lg mx-auto mt-24 text-center space-y-4">
         <h1 className="text-xl font-semibold">You&apos;re all set</h1>
         <p className="text-gray-600">
           {assistantName || "Rosie"} will call {parentName || "your parent"}
           {times ? ` today at ${times}` : ""}.
         </p>
+
+        <div>
+          <button
+            type="button"
+            onClick={handleTestCall}
+            disabled={testCallStatus === "calling"}
+            className="bg-black text-white rounded px-4 py-2 disabled:opacity-50"
+          >
+            {testCallStatus === "calling" ? "Calling..." : "Call now to test"}
+          </button>
+          {testCallStatus === "called" && (
+            <p className="text-sm text-gray-600 mt-2">
+              {parentName || "Your parent"}&apos;s phone should be ringing now.
+            </p>
+          )}
+          {testCallStatus === "error" && <p className="text-sm text-red-600 mt-2">{testCallError}</p>}
+        </div>
       </div>
     );
   }
