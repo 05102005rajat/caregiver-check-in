@@ -19,7 +19,7 @@ type Medication = SetupFormPayload["medications"][number];
 type Appointment = SetupFormPayload["appointments"][number];
 type FamilyContact = SetupFormPayload["family_contacts"][number];
 
-const emptyMed = (): Medication => ({ name: "", dose: "", time_of_day: "", notes: "" });
+const emptyMed = (): Medication => ({ name: "", dose: "", time_of_day: "", notes: "", description: "" });
 const emptyAppt = (): Appointment => ({ title: "", starts_at: "", location: "", notes: "" });
 const emptyContact = (): FamilyContact => ({
   name: "",
@@ -230,6 +230,16 @@ export default function SetupPage() {
               >
                 Remove
               </button>
+            </div>
+            <div className="col-span-2 sm:col-span-4">
+              <Field label="How to recognize it (optional)">
+                <input
+                  className="input"
+                  placeholder="e.g. small blue tablet, bitter, the one in the left drawer"
+                  value={med.description}
+                  onChange={(e) => updateMed(i, { description: e.target.value })}
+                />
+              </Field>
             </div>
           </div>
         ))}

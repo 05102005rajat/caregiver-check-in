@@ -14,8 +14,8 @@ export interface CallSummary {
 const PROMPT_PREFIX = `You are analyzing a check-in call transcript with an elderly person.
 Return ONLY a JSON object (no markdown fences, no commentary) with these fields:
 - summary: 2-3 sentences for family, plain language, no medical jargon
-- meds_confirmed: array of med names they confirmed taking
-- meds_missed: array of med names they said they skipped
+- meds_confirmed: array of med names they clearly confirmed already taking (or taking right now) during this call
+- meds_missed: array of med names that were NOT clearly confirmed as taken — this includes explicitly skipping it, saying they'll take it later, deferring, making excuses, saying they can't find it, or refusing. Be inclusive here: if in doubt whether it was actually taken, count it as missed rather than confirmed.
 - concerns: array of short strings for anything worth flagging (fall, pain, confusion, loneliness, aide problem, scam call, not eating)
 - mood: one of [good, okay, low, concerning]
 - appointments_acknowledged: array of appointment titles they remembered

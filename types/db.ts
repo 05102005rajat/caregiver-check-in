@@ -24,6 +24,8 @@ export interface Medication {
   dose: string | null;
   time_of_day: string;
   notes: string | null;
+  /** How to recognize it by appearance/taste/location, e.g. "small blue tablet, in the left drawer". */
+  description: string | null;
   active: boolean;
 }
 
@@ -96,6 +98,7 @@ export interface SetupFormPayload {
     dose: string;
     time_of_day: string;
     notes: string;
+    description: string;
   }>;
   appointments: Array<{
     title: string;

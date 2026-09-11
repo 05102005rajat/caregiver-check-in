@@ -2,7 +2,14 @@ import type { Appointment, Medication } from "@/types/db";
 
 export function formatMeds(meds: Medication[]): string {
   if (meds.length === 0) return "none";
-  return meds.map((m) => (m.dose ? `${m.name} (${m.dose})` : m.name)).join(", ");
+  return meds
+    .map((m) => {
+      const base = m.dose ? `${m.name} (${m.dose})` : m.name;
+      // The description helps Rosie describe the pill by appearance/taste/location for a
+      // parent who may not recognize it by name, e.g. "the small blue tablet in the left drawer".
+      return m.description ? `${base} — ${m.description}` : base;
+    })
+    .join(", ");
 }
 
 export function formatAppointments(appts: Appointment[]): string {

@@ -76,6 +76,7 @@ export async function POST(request: Request) {
         dose: m.dose || null,
         time_of_day: m.time_of_day,
         notes: m.notes || null,
+        description: m.description || null,
       }))
     );
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });

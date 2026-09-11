@@ -70,9 +70,16 @@ export async function POST(request: Request) {
   if (hasConcern) {
     const { data: parentRow } = await db.from("parents").select("*").eq("id", call.parent_id).single();
     const parentName = (parentRow as Parent | null)?.name ?? "your family member";
-    const concernText = extracted.concerns.length > 0 ? extracted.concerns.join(", ") : "none specified";
-    const body = `Heads up from ${parentName}'s check-in: ${extracted.summary} Concerns noted: ${concernText}.`;
-    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body);
+
+    const lines = [`Heads up from ${parentName}'s check-in: ${extracted.summary}`];
+    if (extracted.meds_missed.length > 0) {
+      lines.push(`Not confirmed taken: ${extracted.meds_missed.join(", ")}.`);
+    }
+    if (extracted.concerns.length > 0) {
+      lines.push(`Concerns noted: ${extracted.concerns.join(", ")}.`);
+    }
+
+    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join(" "));
   }
   // Healthy call, no concerns: log silently, no text. No news is good news (spec section 7).
 
