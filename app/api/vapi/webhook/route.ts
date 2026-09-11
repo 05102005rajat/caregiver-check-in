@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { scanForConcernKeywords } from "@/lib/safety";
+import { isAlreadyProcessed } from "@/lib/webhook-utils";
 import type { Call, EscalationRules, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
@@ -109,7 +110,7 @@ export async function POST(request: Request) {
   // Webhook providers can redeliver the same event (e.g. if our response was lost in
   // transit). A completed/failed call was already fully processed — reprocessing would
   // call Claude again and could send a duplicate concern/miss-alert SMS to family.
-  if (call.status === "completed" || call.status === "failed") {
+  if (isAlreadyProcessed(call.status)) {
     return NextResponse.json({ ok: true });
   }
 

@@ -23,7 +23,7 @@ Return ONLY a JSON object (no markdown fences, no commentary) with these fields:
 Transcript:
 `;
 
-function extractJson(text: string): string {
+export function extractJson(text: string): string {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("No JSON object found in Claude's response");
@@ -34,7 +34,7 @@ const MOODS: CallSummary["mood"][] = ["good", "okay", "low", "concerning"];
 
 // Claude can truncate at max_tokens or drift from the requested shape; every field is
 // defaulted so callers can trust the arrays/mood exist without their own validation.
-function normalize(raw: unknown): CallSummary {
+export function normalize(raw: unknown): CallSummary {
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
 
