@@ -62,3 +62,24 @@ export function scheduledForToday(timeOfDay: string, timezone: string, now: Date
 export function minutesBetween(a: Date, b: Date): number {
   return Math.abs(a.getTime() - b.getTime()) / 60000;
 }
+
+/** "9:05am"-style rendering of a UTC instant in the parent's timezone. */
+export function formatLocalTime(date: Date, timezone: string): string {
+  const local = toZonedTime(date, timezone);
+  const hours = local.getHours();
+  const minutes = local.getMinutes();
+  const period = hours >= 12 ? "pm" : "am";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, "0")}${period}`;
+}
+
+/**
+ * Medications whose time_of_day matches the local hour:minute of `scheduledFor`.
+ * A call row's scheduled_for keeps its original slot time across retries (only
+ * called_at/retry_count change), so this recovers "which meds were this call for".
+ */
+export function medsAtLocalTime(medications: Medication[], scheduledFor: Date, timezone: string): Medication[] {
+  const local = toZonedTime(scheduledFor, timezone);
+  const key = `${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}`;
+  return medications.filter((m) => m.time_of_day.startsWith(key));
+}

@@ -1,20 +1,19 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { triggerVapiCall } from "@/lib/vapi";
-import { appointmentsToday, medsDueNow, minutesBetween, scheduledForToday } from "@/lib/schedule";
+import {
+  appointmentsToday,
+  formatLocalTime,
+  medsAtLocalTime,
+  medsDueNow,
+  minutesBetween,
+  scheduledForToday,
+} from "@/lib/schedule";
+import { formatAppointments, formatMeds } from "@/lib/format";
+import { notifyFamilyContacts } from "@/lib/notify";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
-
-function formatMeds(meds: Medication[]): string {
-  if (meds.length === 0) return "none";
-  return meds.map((m) => (m.dose ? `${m.name} (${m.dose})` : m.name)).join(", ");
-}
-
-function formatAppointments(appts: Appointment[]): string {
-  if (appts.length === 0) return "none";
-  return appts.map((a) => a.title).join(", ");
-}
 
 function groupByParentId<T extends { parent_id: string }>(rows: T[]): Map<string, T[]> {
   const map = new Map<string, T[]>();
@@ -116,9 +115,14 @@ async function processRetries(
       .select()
       .maybeSingle();
 
-    if (!claimed || nextStatus === "failed") {
-      // Either lost the race, or retries are exhausted for this slot: miss-alert SMS
-      // to family_contacts (notify_on_miss) ships in Evening 3.
+    if (!claimed) continue; // lost the race to another cron invocation
+
+    if (nextStatus === "failed") {
+      const scheduledFor = new Date(call.scheduled_for);
+      const medsForSlot = medsAtLocalTime(medications, scheduledFor, parent.timezone);
+      const time = formatLocalTime(scheduledFor, parent.timezone);
+      const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. Their ${formatMeds(medsForSlot)} was scheduled.`;
+      await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body);
       continue;
     }
 
