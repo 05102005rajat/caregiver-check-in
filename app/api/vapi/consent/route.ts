@@ -47,7 +47,18 @@ export async function POST(request: Request) {
 
   if (consented) {
     // Don't clobber an existing timestamp (e.g. a duplicate tool invocation).
-    await db.from("parents").update({ consent_given_at: new Date().toISOString() }).eq("id", parentId).is("consent_given_at", null);
+    const { error } = await db
+      .from("parents")
+      .update({ consent_given_at: new Date().toISOString() })
+      .eq("id", parentId)
+      .is("consent_given_at", null);
+    if (error) {
+      console.error(`Failed to persist consent for parent ${parentId}`, error);
+      return NextResponse.json(
+        { ok: false, result: "Sorry, something went wrong on our end — could you say that again?" },
+        { status: 500 }
+      );
+    }
   }
 
   return NextResponse.json({ ok: true, result: consented ? "Consent recorded, thank you." : "Understood." });

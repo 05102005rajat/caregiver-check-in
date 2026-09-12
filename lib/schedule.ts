@@ -1,4 +1,4 @@
-import { toZonedTime } from "date-fns-tz";
+import { fromZonedTime, toZonedTime } from "date-fns-tz";
 import type { Appointment, Medication } from "@/types/db";
 
 function minutesSinceMidnight(date: Date): number {
@@ -49,18 +49,24 @@ export function appointmentsToday(
   });
 }
 
-/** The UTC instant representing "today at this time_of_day" in the parent's timezone. */
+/**
+ * The UTC instant representing "today at this time_of_day" in the parent's timezone.
+ *
+ * Uses fromZonedTime to resolve the UTC offset AT THE TARGET TIME, not at `now`. An
+ * earlier version borrowed now's offset and applied it to the target — wrong whenever
+ * now and the target fall on opposite sides of a same-day DST transition (e.g. now is
+ * 1am pre-transition, target is 9am post-transition): the two instants can have
+ * different UTC offsets, and reusing now's would shift the result by an hour. Verified
+ * against both the spring-forward and fall-back transition days, under a UTC system
+ * clock (matching Vercel's runtime) where the bug was actually reproducible.
+ */
 export function scheduledForToday(timeOfDay: string, timezone: string, now: Date = new Date()): Date {
   const local = toZonedTime(now, timezone);
   const [h, m] = timeOfDay.split(":").map(Number);
-  const localTarget = new Date(local);
-  localTarget.setHours(h, m, 0, 0);
 
-  // localTarget's clock fields are correct for the zone but its epoch value is wrong
-  // (it was built from a Date already offset into that zone). Recover the real UTC
-  // instant by reapplying the same zone offset used to produce `local`.
-  const offsetMs = local.getTime() - now.getTime();
-  return new Date(localTarget.getTime() - offsetMs);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const localDateTime = `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}T${pad(h)}:${pad(m)}:00`;
+  return fromZonedTime(localDateTime, timezone);
 }
 
 export function minutesBetween(a: Date, b: Date): number {

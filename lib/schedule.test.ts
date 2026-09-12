@@ -114,6 +114,27 @@ describe("scheduledForToday", () => {
     const result = scheduledForToday("09:00", "America/Los_Angeles", now);
     expect(result.toISOString()).toBe("2026-03-08T16:00:00.000Z"); // 9am PDT = 16:00 UTC
   });
+
+  it("computes the correct target offset when `now` is BEFORE today's spring-forward transition but the target time is AFTER it", () => {
+    // now = 1am PST (pre-transition); target 09:00 will be 9am PDT once the day's 2am
+    // transition happens — the target's offset must not be borrowed from `now`'s offset.
+    const now = new Date("2026-03-08T09:00:00Z"); // 1am PST
+    const result = scheduledForToday("09:00", "America/Los_Angeles", now);
+    expect(result.toISOString()).toBe("2026-03-08T16:00:00.000Z"); // 9am PDT = 16:00 UTC
+  });
+
+  it("computes the correct target offset when `now` is AFTER today's spring-forward transition but the target time is a pre-transition hour", () => {
+    // now = 5am PDT (post-transition); target 01:00 already happened earlier that day in PST.
+    const now = new Date("2026-03-08T12:00:00Z"); // 5am PDT
+    const result = scheduledForToday("01:00", "America/Los_Angeles", now);
+    expect(result.toISOString()).toBe("2026-03-08T09:00:00.000Z"); // 1am PST = 09:00 UTC
+  });
+
+  it("handles the fall-back transition (2026-11-01, PDT->PST) correctly on both sides", () => {
+    const now = new Date("2026-11-01T08:00:00Z"); // 1am PDT, before the 2am fall-back
+    const result = scheduledForToday("09:00", "America/Los_Angeles", now);
+    expect(result.toISOString()).toBe("2026-11-01T17:00:00.000Z"); // 9am PST = 17:00 UTC
+  });
 });
 
 describe("medsAtLocalTime", () => {
