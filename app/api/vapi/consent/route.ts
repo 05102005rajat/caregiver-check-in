@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
+
+const consentBodySchema = z.object({
+  parent_id: z.string().min(1),
+  consented: z.boolean(),
+});
 
 /**
  * Target of the record_consent Tool (Vapi "API Request" type — a direct HTTP call from
@@ -16,13 +22,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
-  const parentId: string | undefined = body.parent_id;
-  const consented = body.consented === true;
-
-  if (!parentId) {
-    return NextResponse.json({ error: "Missing parent_id" }, { status: 400 });
+  const json = await request.json();
+  const parsed = consentBodySchema.safeParse(json);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid input", details: parsed.error.flatten() }, { status: 400 });
   }
+  const { parent_id: parentId, consented } = parsed.data;
 
   const db = createAdminClient();
 

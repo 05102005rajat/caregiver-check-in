@@ -28,27 +28,14 @@ export async function POST() {
   }
   const parent = parentRow as Parent;
 
-  // The (parent_id, scheduled_for) unique constraint doesn't help here since scheduledFor
-  // is `new Date()` computed fresh per request — two rapid clicks (or two open tabs) would
-  // get distinct timestamps and both place a real, paid Vapi call. This closes that gap:
-  // skip if a call for this parent is already active within the last couple of minutes.
-  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
-  const { data: recentActive } = await db
-    .from("calls")
-    .select("id")
-    .eq("parent_id", parent.id)
-    .in("status", ["scheduled", "in_progress"])
-    .gte("created_at", twoMinutesAgo)
-    .limit(1);
-  if (recentActive && recentActive.length > 0) {
-    return NextResponse.json({ error: "A test call was already placed in the last couple of minutes" }, { status: 409 });
-  }
-
   const [{ data: medications }, { data: appointments }] = await Promise.all([
     db.from("medications").select("*").eq("parent_id", parent.id).eq("active", true),
     db.from("appointments").select("*").eq("parent_id", parent.id),
   ]);
 
+  // scheduleAndDial's insert is atomically guarded by a unique index on parent_id for
+  // any active (scheduled/in_progress) call, so a double-click or two open tabs can't
+  // both place a real Vapi call — one insert wins, the other fails and returns false here.
   const dialed = await scheduleAndDial(
     db,
     parent,
@@ -60,7 +47,7 @@ export async function POST() {
 
   if (!dialed) {
     return NextResponse.json(
-      { error: "A test call was already placed in the last moment — try again shortly" },
+      { error: "There's already an active call for this parent — wait for it to finish first" },
       { status: 409 }
     );
   }

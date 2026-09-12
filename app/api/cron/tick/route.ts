@@ -2,12 +2,24 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dialAndRecord, scheduleAndDial } from "@/lib/dial";
 import { retryDecision } from "@/lib/retry";
-import { appointmentsToday, formatLocalTime, medsAtLocalTime, medsDueNow, scheduledForToday } from "@/lib/schedule";
+import {
+  appointmentsToday,
+  formatLocalTime,
+  medsAtLocalTime,
+  medsDueNow,
+  minutesBetween,
+  scheduledForToday,
+} from "@/lib/schedule";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
+
+// How late medsDueNow's "due by now" catch-up is allowed to go before we give up calling
+// and just tell the family it was missed. Recovers from a delayed cron tick without ever
+// placing a very-late, confusing "check-in" call about a medication from hours ago.
+const MAX_CATCHUP_MINUTES = 120;
 
 function groupByParentId<T extends { parent_id: string }>(rows: T[]): Map<string, T[]> {
   const map = new Map<string, T[]>();
@@ -53,7 +65,9 @@ async function processRetries(
     if (!claimed) continue; // lost the race to another cron invocation
 
     const scheduledFor = new Date(call.scheduled_for);
-    const medsForSlot = medsAtLocalTime(medications, scheduledFor, parent.timezone);
+    const medsForSlot = call.scheduled_meds
+      ? medications.filter((m) => call.scheduled_meds!.includes(m.name))
+      : medsAtLocalTime(medications, scheduledFor, parent.timezone);
 
     if (nextStatus === "failed") {
       const time = formatLocalTime(scheduledFor, parent.timezone);
@@ -70,6 +84,38 @@ async function processRetries(
       medsForSlot,
       appointmentsToday(appointments, parent.timezone)
     );
+  }
+}
+
+/**
+ * A calls row can get stuck in 'scheduled' forever if dialAndRecord's post-dial DB write
+ * failed right after a successful Vapi call (rare, but the row never got its vapi_call_id
+ * or a called_at, so the in_progress reaper below never sees it) — or, less likely, if
+ * the process crashed between the insert and the dial. Re-attempts the dial on the same
+ * row rather than leaving it stranded; the active-call unique index still protects against
+ * this colliding with a genuinely in-flight call for the same parent.
+ */
+async function reapStaleScheduled(
+  db: ReturnType<typeof createAdminClient>,
+  parent: Parent,
+  caregiverName: string,
+  medications: Medication[],
+  appointments: Appointment[],
+  now: Date
+) {
+  const staleThreshold = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+  const { data: staleRows } = await db
+    .from("calls")
+    .select("*")
+    .eq("parent_id", parent.id)
+    .eq("status", "scheduled")
+    .lt("created_at", staleThreshold);
+
+  for (const row of (staleRows ?? []) as Call[]) {
+    const medsForSlot = row.scheduled_meds
+      ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
+      : medsAtLocalTime(medications, new Date(row.scheduled_for), parent.timezone);
+    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone));
   }
 }
 
@@ -103,6 +149,30 @@ async function processParent(
       const medsForSlot = due.filter((m) => m.time_of_day === slotTime);
       const scheduledFor = scheduledForToday(slotTime, parent.timezone, now);
 
+      if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
+        // Too late to place a sensible "check-in" call about this — tell the family it
+        // was missed instead. The insert is still idempotency-guarded (parent_id,
+        // scheduled_for) so a slow scheduler doesn't send this alert more than once.
+        const { data: row, error } = await db
+          .from("calls")
+          .insert({
+            parent_id: parent.id,
+            scheduled_for: scheduledFor.toISOString(),
+            status: "failed",
+            scheduled_meds: medsForSlot.map((m) => m.name),
+          })
+          .select()
+          .single();
+        if (error) {
+          if (error.code !== "23505") console.error("Failed to record skipped-too-late call", error);
+          continue;
+        }
+        const time = formatLocalTime(scheduledFor, parent.timezone);
+        const body = `Heads up: ${parent.name}'s ${time} check-in was missed and is now too late to call about. Their ${formatMeds(medsForSlot)} was scheduled.`;
+        await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body);
+        continue;
+      }
+
       const dialed = await scheduleAndDial(
         db,
         parent,
@@ -113,6 +183,8 @@ async function processParent(
       );
       if (dialed) callsTriggered += 1;
     }
+
+    await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now);
   }
 
   if (ctx.rules) {
@@ -138,7 +210,8 @@ export async function GET(request: Request) {
 
   const parentList = (parents ?? []) as Parent[];
   if (parentList.length === 0) {
-    await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
+    const { error } = await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
+    if (error) console.error("Failed to update cron heartbeat", error);
     return NextResponse.json({ ok: true, callsTriggered: 0 });
   }
 
@@ -152,12 +225,13 @@ export async function GET(request: Request) {
   // is a safe buffer before assuming it's not coming back. Routing it into 'no_answer'
   // puts it through the exact same retry/miss-alert pipeline as an actual no-answer.
   const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
-  await db
+  const { error: reapError } = await db
     .from("calls")
     .update({ status: "no_answer" })
     .in("parent_id", parentIds)
     .eq("status", "in_progress")
     .lt("called_at", staleThreshold);
+  if (reapError) console.error("Failed to reap stale in_progress calls", reapError);
 
   // One batch of queries for all parents instead of per-parent round-trips, so tick
   // latency stays roughly constant as the number of caregivers grows.
@@ -200,7 +274,11 @@ export async function GET(request: Request) {
   const callsTriggered = counts.reduce((sum, n) => sum + n, 0);
 
   // /api/health reads this to tell whether the external scheduler is still running.
-  await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
+  const { error: heartbeatError } = await db
+    .from("cron_heartbeat")
+    .update({ last_tick_at: now.toISOString() })
+    .eq("id", true);
+  if (heartbeatError) console.error("Failed to update cron heartbeat", heartbeatError);
 
   return NextResponse.json({ ok: true, callsTriggered });
 }

@@ -1,9 +1,11 @@
+import { requireEnv } from "@/lib/env";
+
 /** Sends an SMS via Twilio's REST API, authenticated with an API Key (not the classic Auth Token). */
 export async function sendSms(to: string, body: string): Promise<string> {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID!;
-  const apiKeySid = process.env.TWILIO_API_KEY_SID!;
-  const apiKeySecret = process.env.TWILIO_API_KEY_SECRET!;
-  const from = process.env.TWILIO_FROM_NUMBER!;
+  const accountSid = requireEnv("TWILIO_ACCOUNT_SID");
+  const apiKeySid = requireEnv("TWILIO_API_KEY_SID");
+  const apiKeySecret = requireEnv("TWILIO_API_KEY_SECRET");
+  const from = requireEnv("TWILIO_FROM_NUMBER");
 
   const params = new URLSearchParams({ To: to, From: from, Body: body });
   const basicAuth = Buffer.from(`${apiKeySid}:${apiKeySecret}`).toString("base64");

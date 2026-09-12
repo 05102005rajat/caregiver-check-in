@@ -3,42 +3,60 @@ import { z } from "zod";
 const phoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, "Must be E.164 format, e.g. +15551234567");
 const timeOfDaySchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Must be HH:mm, 24-hour");
 
+// These all end up as input to an LLM prompt (system prompt variables, transcript
+// analysis context) — bounded lengths keep a caregiver's free-form text from blowing up
+// prompt size, not a security boundary by themselves.
+const shortText = (max: number) => z.string().max(max);
+const shortNonEmptyText = (max: number) => z.string().trim().min(1).max(max);
+
 export const setupFormSchema = z.object({
   caregiver: z.object({
-    name: z.string().trim().min(1),
+    name: shortNonEmptyText(100),
     phone: phoneSchema,
   }),
   parent: z.object({
-    name: z.string().trim().min(1),
+    name: shortNonEmptyText(100),
     phone: phoneSchema,
-    timezone: z.string().trim().min(1),
-    assistant_name: z.string().trim().min(1),
+    timezone: z.string().trim().min(1).max(100),
+    assistant_name: shortNonEmptyText(50),
   }),
   medications: z
     .array(
       z.object({
-        name: z.string().trim().min(1),
-        dose: z.string(),
+        name: shortNonEmptyText(100),
+        dose: shortText(50),
         time_of_day: timeOfDaySchema,
-        notes: z.string(),
-        description: z.string(),
+        notes: shortText(300),
+        description: shortText(300),
       })
     )
-    .max(10),
+    .max(10)
+    .refine(
+      (meds) => {
+        const seen = new Set<string>();
+        for (const m of meds) {
+          const key = `${m.name.trim().toLowerCase()}|${m.time_of_day}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+        }
+        return true;
+      },
+      { message: "Duplicate medication name + time" }
+    ),
   appointments: z
     .array(
       z.object({
-        title: z.string().trim().min(1),
+        title: shortNonEmptyText(150),
         starts_at: z.string().refine((s) => !Number.isNaN(Date.parse(s)), "Invalid date/time"),
-        location: z.string(),
-        notes: z.string(),
+        location: shortText(150),
+        notes: shortText(300),
       })
     )
     .max(10),
   family_contacts: z
     .array(
       z.object({
-        name: z.string().trim().min(1),
+        name: shortNonEmptyText(100),
         phone: phoneSchema,
         role: z.enum(["son", "daughter", "spouse", "aide", "other"]),
         notify_on_miss: z.boolean(),

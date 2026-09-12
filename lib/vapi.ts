@@ -1,3 +1,5 @@
+import { requireEnv } from "@/lib/env";
+
 interface TriggerCallArgs {
   toNumber: string;
   variableValues: Record<string, string>;
@@ -14,12 +16,12 @@ export async function triggerVapiCall({ toNumber, variableValues, metadata }: Tr
   const res = await fetch("https://api.vapi.ai/call", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
+      Authorization: `Bearer ${requireEnv("VAPI_API_KEY")}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      assistantId: process.env.VAPI_ASSISTANT_ID,
-      phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
+      assistantId: requireEnv("VAPI_ASSISTANT_ID"),
+      phoneNumberId: requireEnv("VAPI_PHONE_NUMBER_ID"),
       customer: { number: toNumber },
       assistantOverrides: { variableValues },
       metadata,
