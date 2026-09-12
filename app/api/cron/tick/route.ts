@@ -153,7 +153,11 @@ export async function GET(request: Request) {
     db.from("appointments").select("*").in("parent_id", parentIds),
     db.from("escalation_rules").select("*").in("parent_id", parentIds),
     db.from("calls").select("*").in("parent_id", parentIds).eq("status", "no_answer").gte("scheduled_for", oneDayAgo.toISOString()),
-    db.from("calls").select("parent_id").in("parent_id", parentIds),
+    // Only counts as a "prior call" for consent-gating if it actually got far enough to
+    // dial (has a vapi_call_id) — a row that only ever recorded a dial-time failure
+    // (e.g. an infrastructure error) shouldn't permanently block every future attempt
+    // to reach consent, since the parent never got a chance to hear the question.
+    db.from("calls").select("parent_id").in("parent_id", parentIds).not("vapi_call_id", "is", null),
   ]);
 
   const caregiverNameById = new Map<string, string>(
