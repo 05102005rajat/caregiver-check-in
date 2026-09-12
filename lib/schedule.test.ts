@@ -107,6 +107,13 @@ describe("scheduledForToday", () => {
       process.env.TZ = originalTZ;
     }
   });
+
+  it("uses the post-transition offset on the DST spring-forward day (2026-03-08, PST->PDT)", () => {
+    // Clocks jump 2:00am -> 3:00am local; a 9am med that day is UTC-7 (PDT), not UTC-8 (PST).
+    const now = new Date("2026-03-08T15:00:00Z"); // 7am PDT, after the 2am transition
+    const result = scheduledForToday("09:00", "America/Los_Angeles", now);
+    expect(result.toISOString()).toBe("2026-03-08T16:00:00.000Z"); // 9am PDT = 16:00 UTC
+  });
 });
 
 describe("medsAtLocalTime", () => {

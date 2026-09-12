@@ -24,8 +24,23 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Missing parent_id" }, { status: 400 });
   }
 
+  const db = createAdminClient();
+
+  // The webhook secret alone would otherwise be a standing credential to set consent for
+  // any parent_id. Requiring a currently-active call for that parent narrows a leaked
+  // secret's blast radius to "during a call already in progress," not "at any time."
+  const { data: activeCall } = await db
+    .from("calls")
+    .select("id")
+    .eq("parent_id", parentId)
+    .eq("status", "in_progress")
+    .limit(1)
+    .maybeSingle();
+  if (!activeCall) {
+    return NextResponse.json({ error: "No active call for this parent" }, { status: 409 });
+  }
+
   if (consented) {
-    const db = createAdminClient();
     // Don't clobber an existing timestamp (e.g. a duplicate tool invocation).
     await db.from("parents").update({ consent_given_at: new Date().toISOString() }).eq("id", parentId).is("consent_given_at", null);
   }

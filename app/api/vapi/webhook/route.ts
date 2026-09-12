@@ -109,9 +109,13 @@ export async function POST(request: Request) {
   const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
 
   // Meds this specific call was actually for, so Claude's med-name output can be checked
-  // against reality rather than trusted outright (see knownMedNames below).
-  const medsForSlot = parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone) : [];
-  const knownMedNames = medsForSlot.map((m) => m.name.toLowerCase());
+  // against reality rather than trusted outright (see knownMedNames below). Prefer the
+  // snapshot taken when the call was created (immune to later medication edits); fall
+  // back to reconstructing from current medications only for calls predating that column.
+  const knownMedNames = (
+    call.scheduled_meds ??
+    (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : [])
+  ).map((n) => n.toLowerCase());
   const isKnownMed = (name: string) => {
     const lower = name.toLowerCase();
     return knownMedNames.some((known) => known.includes(lower) || lower.includes(known));

@@ -69,6 +69,8 @@ export interface Call {
   summary: string | null;
   meds_confirmed: Record<string, unknown> | null;
   concerns: string[] | null;
+  /** Snapshot of the medication names actually due at call-creation time (see lib/dial.ts). */
+  scheduled_meds: string[] | null;
   created_at: string;
 }
 

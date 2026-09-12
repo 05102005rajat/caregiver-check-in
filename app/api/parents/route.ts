@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { SetupFormPayload } from "@/types/db";
+import { setupFormSchema } from "@/lib/validation";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -13,11 +13,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Not signed in" }, { status: 401 });
   }
 
-  const payload = (await request.json()) as SetupFormPayload;
-
-  if (!payload.caregiver?.name || !payload.parent?.name || !payload.parent?.phone) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  const json = await request.json();
+  const parsed = setupFormSchema.safeParse(json);
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid input", details: parsed.error.flatten() }, { status: 400 });
   }
+  const payload = parsed.data;
 
   const db = createAdminClient();
 

@@ -66,7 +66,14 @@ export async function scheduleAndDial(
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
   const { data: callRow, error: insertError } = await db
     .from("calls")
-    .insert({ parent_id: parent.id, scheduled_for: scheduledFor.toISOString(), status: "scheduled" })
+    .insert({
+      parent_id: parent.id,
+      scheduled_for: scheduledFor.toISOString(),
+      status: "scheduled",
+      // Snapshot at creation time so later analysis (and any future caregiver edits to
+      // medications) can't retroactively change what this specific call was actually for.
+      scheduled_meds: medsForSlot.map((m) => m.name),
+    })
     .select()
     .single();
 
