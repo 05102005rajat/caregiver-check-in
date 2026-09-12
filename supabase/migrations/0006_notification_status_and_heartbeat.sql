@@ -13,3 +13,7 @@ create table cron_heartbeat (
   constraint cron_heartbeat_single_row check (id)
 );
 insert into cron_heartbeat (id, last_tick_at) values (true, null);
+
+-- Only ever read/written by the service-role admin client (which bypasses RLS
+-- regardless), so this has no policies — it just blocks direct anon/authenticated access.
+alter table cron_heartbeat enable row level security;
