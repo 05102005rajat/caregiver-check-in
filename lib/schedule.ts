@@ -1,8 +1,6 @@
 import { toZonedTime } from "date-fns-tz";
 import type { Appointment, Medication } from "@/types/db";
 
-const WINDOW_MINUTES = 5;
-
 function minutesSinceMidnight(date: Date): number {
   return date.getHours() * 60 + date.getMinutes();
 }
@@ -16,7 +14,14 @@ function localDateKey(date: Date): string {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 }
 
-/** Medications whose time_of_day falls in [now, now + 5min) local to the parent's timezone. */
+/**
+ * Medications due by (at or before) `now`, local to the parent's timezone — not a narrow
+ * forward-looking window. A slot that's already due today but not yet dialed keeps showing
+ * up on every tick until it's actually handled, so a delayed or skipped cron tick still
+ * catches it later the same day instead of silently missing it forever. The unique
+ * (parent_id, scheduled_for) constraint on `calls` (enforced in scheduleAndDial) is what
+ * prevents this from re-dialing an already-handled slot.
+ */
 export function medsDueNow(
   medications: Medication[],
   timezone: string,
@@ -27,8 +32,7 @@ export function medsDueNow(
 
   return medications.filter((m) => {
     if (!m.active) return false;
-    const medMinutes = timeOfDayToMinutes(m.time_of_day);
-    return medMinutes >= nowMinutes && medMinutes < nowMinutes + WINDOW_MINUTES;
+    return timeOfDayToMinutes(m.time_of_day) <= nowMinutes;
   });
 }
 

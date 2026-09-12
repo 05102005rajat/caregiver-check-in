@@ -79,6 +79,8 @@ export interface Message {
   body: string;
   sent_at: string;
   twilio_sid: string | null;
+  status: "sent" | "failed";
+  error: string | null;
 }
 
 // Shape submitted by the /setup form (see app/setup/page.tsx and app/api/parents/route.ts)

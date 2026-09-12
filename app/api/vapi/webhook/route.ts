@@ -3,8 +3,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { scanForConcernKeywords } from "@/lib/safety";
+import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
-import type { Call, EscalationRules, Parent } from "@/types/db";
+import type { Call, EscalationRules, Medication, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
@@ -39,12 +40,30 @@ export async function POST(request: Request) {
   }
 
   const db = createAdminClient();
-  const { data: callRow } = await db.from("calls").select("*").eq("vapi_call_id", vapiCallId).single();
-  if (!callRow) {
+  let call: Call | null = null;
+  {
+    const { data } = await db.from("calls").select("*").eq("vapi_call_id", vapiCallId).single();
+    call = data as Call | null;
+  }
+
+  if (!call) {
+    // Fallback: if our own DB update right after dialing ever failed to persist
+    // vapi_call_id, the row is otherwise unreachable by it. We passed our internal
+    // call id as Vapi call metadata specifically to recover from that (see lib/dial.ts).
+    const internalCallId: string | undefined = message.call?.metadata?.internal_call_id;
+    if (internalCallId) {
+      const { data } = await db.from("calls").select("*").eq("id", internalCallId).single();
+      if (data) {
+        call = data as Call;
+        await db.from("calls").update({ vapi_call_id: vapiCallId }).eq("id", call.id).is("vapi_call_id", null);
+      }
+    }
+  }
+
+  if (!call) {
     console.error(`No calls row for vapi_call_id ${vapiCallId}`);
     return NextResponse.json({ ok: true });
   }
-  const call = callRow as Call;
 
   // Webhook providers can redeliver the same event (e.g. if our response was lost in
   // transit). A completed/failed call was already fully processed — reprocessing would
@@ -80,12 +99,23 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  const { data: rulesRow } = await db
-    .from("escalation_rules")
-    .select("*")
-    .eq("parent_id", call.parent_id)
-    .single();
+  const [{ data: rulesRow }, { data: parentRow }, { data: medsRow }] = await Promise.all([
+    db.from("escalation_rules").select("*").eq("parent_id", call.parent_id).single(),
+    db.from("parents").select("*").eq("id", call.parent_id).single(),
+    db.from("medications").select("*").eq("parent_id", call.parent_id).eq("active", true),
+  ]);
+  const parent = parentRow as Parent | null;
+  const parentName = parent?.name ?? "your family member";
   const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
+
+  // Meds this specific call was actually for, so Claude's med-name output can be checked
+  // against reality rather than trusted outright (see knownMedNames below).
+  const medsForSlot = parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone) : [];
+  const knownMedNames = medsForSlot.map((m) => m.name.toLowerCase());
+  const isKnownMed = (name: string) => {
+    const lower = name.toLowerCase();
+    return knownMedNames.some((known) => known.includes(lower) || lower.includes(known));
+  };
 
   // Deterministic backstop, run independent of whether Claude succeeds: catches an
   // emergency mention even if the LLM call fails or under-classifies the transcript.
@@ -99,12 +129,19 @@ export async function POST(request: Request) {
     await db.from("calls").update({ status: "completed", transcript, concerns: keywordMatches }).eq("id", call.id);
 
     if (keywordMatches.length > 0) {
-      const { data: parentRow } = await db.from("parents").select("*").eq("id", call.parent_id).single();
-      const parentName = (parentRow as Parent | null)?.name ?? "your family member";
       const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
       await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body);
     }
     return NextResponse.json({ ok: true });
+  }
+
+  // Claude is asked to pick medication names out of free-form speech, which it can get
+  // wrong or invent. Only keep names that plausibly match this call's actual medications;
+  // anything else is dropped from the stored/notified result rather than trusted outright.
+  const medsConfirmed = knownMedNames.length > 0 ? extracted.meds_confirmed.filter(isKnownMed) : extracted.meds_confirmed;
+  const medsMissed = knownMedNames.length > 0 ? extracted.meds_missed.filter(isKnownMed) : extracted.meds_missed;
+  if (medsConfirmed.length !== extracted.meds_confirmed.length || medsMissed.length !== extracted.meds_missed.length) {
+    console.warn(`Claude returned medication name(s) not matching call ${call.id}'s actual medications; dropped`);
   }
 
   const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches]));
@@ -115,20 +152,17 @@ export async function POST(request: Request) {
       status: "completed",
       transcript,
       summary: extracted.summary,
-      meds_confirmed: { confirmed: extracted.meds_confirmed, missed: extracted.meds_missed },
+      meds_confirmed: { confirmed: medsConfirmed, missed: medsMissed },
       concerns,
     })
     .eq("id", call.id);
 
-  const hasConcern = concerns.length > 0 || extracted.mood === "concerning" || extracted.meds_missed.length > 0;
+  const hasConcern = concerns.length > 0 || extracted.mood === "concerning" || medsMissed.length > 0;
 
   if (hasConcern) {
-    const { data: parentRow } = await db.from("parents").select("*").eq("id", call.parent_id).single();
-    const parentName = (parentRow as Parent | null)?.name ?? "your family member";
-
     const lines = [`Heads up from ${parentName}'s check-in: ${extracted.summary}`];
-    if (extracted.meds_missed.length > 0) {
-      lines.push(`Not confirmed taken: ${extracted.meds_missed.join(", ")}.`);
+    if (medsMissed.length > 0) {
+      lines.push(`Not confirmed taken: ${medsMissed.join(", ")}.`);
     }
     if (concerns.length > 0) {
       lines.push(`Concerns noted: ${concerns.join(", ")}.`);

@@ -30,6 +30,10 @@ export async function dialAndRecord(
         // never re-ask once consent_given_at is set).
         consent_already_given: parent.consent_given_at ? "true" : "false",
       },
+      // Correlation fallback: if the update below ever fails to persist vapi_call_id,
+      // the webhook can still find this row via metadata.internal_call_id instead of
+      // silently dropping the call's result (see app/api/vapi/webhook/route.ts).
+      metadata: { internal_call_id: callId },
     });
   } catch (err) {
     console.error("Vapi call trigger failed", err);

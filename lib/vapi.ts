@@ -1,6 +1,8 @@
 interface TriggerCallArgs {
   toNumber: string;
   variableValues: Record<string, string>;
+  /** Echoed back on the call object/webhook payload — see app/api/vapi/webhook's fallback lookup. */
+  metadata?: Record<string, string>;
 }
 
 interface VapiCallResponse {
@@ -8,7 +10,7 @@ interface VapiCallResponse {
   [key: string]: unknown;
 }
 
-export async function triggerVapiCall({ toNumber, variableValues }: TriggerCallArgs): Promise<VapiCallResponse> {
+export async function triggerVapiCall({ toNumber, variableValues, metadata }: TriggerCallArgs): Promise<VapiCallResponse> {
   const res = await fetch("https://api.vapi.ai/call", {
     method: "POST",
     headers: {
@@ -20,6 +22,7 @@ export async function triggerVapiCall({ toNumber, variableValues }: TriggerCallA
       phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
       customer: { number: toNumber },
       assistantOverrides: { variableValues },
+      metadata,
     }),
   });
 

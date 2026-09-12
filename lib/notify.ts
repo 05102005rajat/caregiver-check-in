@@ -17,9 +17,18 @@ export async function notifyFamilyContacts(
   for (const contact of (contacts ?? []) as FamilyContact[]) {
     try {
       const sid = await sendSms(contact.phone, body);
-      await db.from("messages").insert({ call_id: callId, contact_id: contact.id, body, twilio_sid: sid });
+      await db.from("messages").insert({ call_id: callId, contact_id: contact.id, body, twilio_sid: sid, status: "sent" });
     } catch (err) {
+      // Don't let a Twilio failure be silently equivalent to "the family was told" —
+      // record it so it's visible (e.g. via Supabase) rather than only in server logs.
       console.error(`Failed to SMS family contact ${contact.id}`, err);
+      await db.from("messages").insert({
+        call_id: callId,
+        contact_id: contact.id,
+        body,
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }

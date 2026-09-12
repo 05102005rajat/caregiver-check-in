@@ -138,12 +138,26 @@ export async function GET(request: Request) {
 
   const parentList = (parents ?? []) as Parent[];
   if (parentList.length === 0) {
+    await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
     return NextResponse.json({ ok: true, callsTriggered: 0 });
   }
 
   const parentIds = parentList.map((p) => p.id);
   const caregiverIds = [...new Set(parentList.map((p) => p.caregiver_id))];
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  // A call stuck 'in_progress' means Vapi never sent an end-of-call-report for it (a
+  // dropped webhook, a crashed call, etc.) — without this it would linger forever,
+  // never retried and never escalated to family. Max call duration is 5 minutes, so 10
+  // is a safe buffer before assuming it's not coming back. Routing it into 'no_answer'
+  // puts it through the exact same retry/miss-alert pipeline as an actual no-answer.
+  const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
+  await db
+    .from("calls")
+    .update({ status: "no_answer" })
+    .in("parent_id", parentIds)
+    .eq("status", "in_progress")
+    .lt("called_at", staleThreshold);
 
   // One batch of queries for all parents instead of per-parent round-trips, so tick
   // latency stays roughly constant as the number of caregivers grows.
@@ -184,6 +198,9 @@ export async function GET(request: Request) {
     )
   );
   const callsTriggered = counts.reduce((sum, n) => sum + n, 0);
+
+  // /api/health reads this to tell whether the external scheduler is still running.
+  await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
 
   return NextResponse.json({ ok: true, callsTriggered });
 }

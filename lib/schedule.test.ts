@@ -35,25 +35,26 @@ function appt(overrides: Partial<Appointment> = {}): Appointment {
 }
 
 describe("medsDueNow", () => {
-  it("includes a med exactly at the start of the 5-minute window", () => {
+  it("includes a med exactly at now", () => {
     // 2026-09-10T16:00:00Z = 9:00am PDT
     const now = new Date("2026-09-10T16:00:00Z");
     const meds = [med({ time_of_day: "09:00:00" })];
     expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(1);
   });
 
-  it("includes a med 4 minutes into the window but excludes one exactly 5 minutes out", () => {
+  it("excludes a med that hasn't happened yet", () => {
     const now = new Date("2026-09-10T16:00:00Z"); // 9:00am PDT
-    const within = med({ time_of_day: "09:04:00" });
-    const outside = med({ time_of_day: "09:05:00" });
-    const due = medsDueNow([within, outside], "America/Los_Angeles", now);
-    expect(due).toEqual([within]);
+    const future = med({ time_of_day: "09:05:00" });
+    expect(medsDueNow([future], "America/Los_Angeles", now)).toHaveLength(0);
   });
 
-  it("excludes a med before the window", () => {
-    const now = new Date("2026-09-10T16:00:00Z"); // 9:00am PDT
-    const meds = [med({ time_of_day: "08:59:00" })];
-    expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(0);
+  it("still includes a med whose time passed hours ago (delayed/skipped cron tick recovery)", () => {
+    // A med due at 9:00 must still show up as due even if the cron didn't run again
+    // until well past its time — the old forward-looking 5-minute window would have
+    // silently dropped this forever once nowMinutes moved past medMinutes + 5.
+    const now = new Date("2026-09-10T18:30:00Z"); // 11:30am PDT, med was due at 9:00am
+    const meds = [med({ time_of_day: "09:00:00" })];
+    expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(1);
   });
 
   it("excludes inactive medications even if the time matches", () => {
