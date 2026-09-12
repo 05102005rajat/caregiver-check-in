@@ -103,7 +103,11 @@ async function reapStaleScheduled(
   appointments: Appointment[],
   now: Date
 ) {
-  const staleThreshold = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
+  // Same 10-minute (2x max call duration) buffer as the in_progress reaper below — a call
+  // that's actually still ringing/talking can legitimately keep this row at 'scheduled'
+  // for close to the full call duration if the post-dial bookkeeping write failed; a
+  // shorter threshold risked re-dialing a parent mid-conversation.
+  const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
   const { data: staleRows } = await db
     .from("calls")
     .select("*")
@@ -150,6 +154,19 @@ async function processParent(
       const scheduledFor = scheduledForToday(slotTime, parent.timezone, now);
 
       if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
+        // Only one active (scheduled/in_progress) call per parent is ever allowed at a
+        // time (calls_parent_active_unique). Checked fresh on every slot (not once
+        // before the loop) since an earlier slot in this very loop may have just been
+        // dialed. If one's active, this slot is merely queued behind it, not lost — skip
+        // for this tick rather than wrongly reporting it to family as "too late."
+        const { data: activeNow } = await db
+          .from("calls")
+          .select("id")
+          .eq("parent_id", parent.id)
+          .in("status", ["scheduled", "in_progress"])
+          .limit(1)
+          .maybeSingle();
+        if (activeNow) continue;
         // Too late to place a sensible "check-in" call about this — tell the family it
         // was missed instead. The insert is still idempotency-guarded (parent_id,
         // scheduled_for) so a slow scheduler doesn't send this alert more than once.
@@ -241,11 +258,15 @@ export async function GET(request: Request) {
     db.from("appointments").select("*").in("parent_id", parentIds),
     db.from("escalation_rules").select("*").in("parent_id", parentIds),
     db.from("calls").select("*").in("parent_id", parentIds).eq("status", "no_answer").gte("scheduled_for", oneDayAgo.toISOString()),
-    // Only counts as a "prior call" for consent-gating if it actually got far enough to
-    // dial (has a vapi_call_id) — a row that only ever recorded a dial-time failure
-    // (e.g. an infrastructure error) shouldn't permanently block every future attempt
-    // to reach consent, since the parent never got a chance to hear the question.
-    db.from("calls").select("parent_id").in("parent_id", parentIds).not("vapi_call_id", "is", null),
+    // Only counts as a "prior call" for consent-gating if a real dial was actually
+    // attempted. dialAndRecord explicitly sets status='failed' only when Vapi itself
+    // rejected the call (never rang) — every other status (including 'scheduled', which
+    // can mean "Vapi call succeeded but our own bookkeeping write failed right after")
+    // means a real call did go out. Filtering on vapi_call_id instead would have let this
+    // permanently read as "no prior calls" whenever that bookkeeping write fails, since
+    // vapi_call_id is one of the fields that write sets — silently disabling the consent
+    // gate and letting the system keep cold-calling the parent without consent.
+    db.from("calls").select("parent_id").in("parent_id", parentIds).neq("status", "failed"),
   ]);
 
   const caregiverNameById = new Map<string, string>(
