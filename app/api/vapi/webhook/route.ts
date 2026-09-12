@@ -59,6 +59,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  // Atomic claim before doing any paid-API work: Vapi can redeliver the same event (e.g.
+  // our response was lost in transit). isAlreadyProcessed above is a plain read, so two
+  // concurrent deliveries could both pass it and both call Claude + send a duplicate SMS.
+  // This conditional update only succeeds for whichever request gets there first.
+  const { data: claimed } = await db
+    .from("calls")
+    .update({ status: "completed" })
+    .eq("id", call.id)
+    .eq("status", call.status)
+    .select()
+    .maybeSingle();
+  if (!claimed) {
+    return NextResponse.json({ ok: true }); // lost the race to a concurrent delivery
+  }
+
+  if (!transcript.trim()) {
+    // Nothing for Claude to analyze (e.g. a pipeline error before any dialogue) — skip
+    // the paid call entirely rather than paying for a completion with no real signal.
+    return NextResponse.json({ ok: true });
+  }
+
   const { data: rulesRow } = await db
     .from("escalation_rules")
     .select("*")
