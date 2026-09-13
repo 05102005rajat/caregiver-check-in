@@ -24,6 +24,32 @@ was built incrementally against that spec, evening by evening.
      raw transcript as a backstop in case Claude fails or under-classifies.
    - Texts family contacts only if something was missed or concerning ("no news is
      good news" — a clean call sends no text).
+5. The caregiver can check `/dashboard` at any time to see recent calls (status,
+   summary, meds confirmed/missed, concerns) and expand any call's full transcript,
+   plus a health banner if the scheduler has gone quiet or a call is stuck.
+
+## First-call consent (spec section 8)
+
+California is all-party consent, so the assistant asks for it before doing anything
+else on a parent's very first call: *"Is now a good time to talk... this call may be
+recorded so your family can check summaries later — is that okay?"* (see the system
+prompt). The result is reported back via the `record_consent` Vapi Tool →
+`app/api/vapi/consent/route.ts`, which stamps `parents.consent_given_at`.
+
+Until consent is recorded, `/api/cron/tick` still places the first call (so Rosie has a
+chance to ask), but blocks all *subsequent* automatic scheduled calls
+(`consentBlocksNewCalls` in `app/api/cron/tick/route.ts`) — it won't keep cold-calling a
+parent who hasn't consented. The caregiver's manual "Call now to test" button can also
+be used to (re)obtain consent if the first real call didn't get a clear answer.
+
+## Monitoring
+
+`/api/health` reports unhealthy (503) if `/api/cron/tick` hasn't run in the last 15
+minutes (point an external uptime monitor at it if you want a ping/alert outside the
+app). The `/dashboard` page shows the same signal as a banner, plus flags any call
+that's been stuck `in_progress` for more than 10 minutes — check it periodically
+instead of relying solely on family SMS, since a clean call intentionally sends no
+text ("no news is good news").
 
 ## Architecture
 
@@ -146,14 +172,13 @@ added as `Config` type (not `Secret`), since they're exposed to the browser by d
 ## Known limitations (v1, matches spec section 10)
 
 - One parent per caregiver (enforced via a DB unique constraint).
-- No caregiver-facing dashboard — family only gets texts; call history/transcripts are
-  only visible via Supabase directly right now.
 - No daily digest, no mood trends over time.
 - Not HIPAA-reviewed — this is a direct-to-consumer tool, not a covered entity's system.
 - Setup writes (`/api/parents`) are not atomic across all five tables — a failure
   partway through is designed to never *lose* existing data (new rows are inserted
   before old ones are deleted), but isn't a single transaction. A Postgres RPC wrapping
   the whole operation in `BEGIN`/`COMMIT` would close this gap.
-- No production monitoring/alerting (cron silently stopping, calls stuck
-  `in_progress`, webhook failures) — worth adding before this serves more than one
-  household.
+- Monitoring is pull-based (`/api/health` + the `/dashboard` banner), not push —
+  nothing pages you automatically if you don't check. Fine for a single household
+  watching its own dashboard; wire `/api/health` into an external alerting service
+  before this serves people who won't think to check.

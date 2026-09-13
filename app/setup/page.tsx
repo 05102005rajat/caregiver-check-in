@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import type { FamilyRole, SetupFormPayload } from "@/types/db";
 
@@ -16,6 +17,17 @@ const TIMEZONES = [
 const FAMILY_ROLES: FamilyRole[] = ["son", "daughter", "spouse", "aide", "other"];
 
 const PHONE_PATTERN = "^\\+[1-9]\\d{6,14}$";
+
+// Most users type a plain 10-digit US number and don't know to prepend "+1" —
+// normalize on blur so the E.164 requirement stays invisible to them.
+function normalizePhone(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.startsWith("+")) return trimmed;
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;
+  return trimmed;
+}
 
 type Medication = SetupFormPayload["medications"][number];
 type Appointment = SetupFormPayload["appointments"][number];
@@ -163,6 +175,12 @@ export default function SetupPage() {
             )}
             {testCallStatus === "error" && <p className="text-sm text-red-600 mt-3">{testCallError}</p>}
           </div>
+
+          <p className="pt-2">
+            <Link href="/dashboard" className="text-sm text-slate-500 underline hover:text-slate-800">
+              View call history →
+            </Link>
+          </p>
         </div>
       </Shell>
     );
@@ -221,6 +239,7 @@ export default function SetupPage() {
                 className="input"
                 value={caregiverPhone}
                 onChange={(e) => setCaregiverPhone(e.target.value)}
+                onBlur={(e) => setCaregiverPhone(normalizePhone(e.target.value))}
               />
             </Field>
           </div>
@@ -244,6 +263,7 @@ export default function SetupPage() {
                 className="input"
                 value={parentPhone}
                 onChange={(e) => setParentPhone(e.target.value)}
+                onBlur={(e) => setParentPhone(normalizePhone(e.target.value))}
               />
             </Field>
             <div className="grid grid-cols-2 gap-4">
@@ -354,6 +374,7 @@ export default function SetupPage() {
                         className="input"
                         value={contact.phone}
                         onChange={(e) => updateContact(i, { phone: e.target.value })}
+                        onBlur={(e) => updateContact(i, { phone: normalizePhone(e.target.value) })}
                       />
                     </Field>
                     <Field label="Role">
