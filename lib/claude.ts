@@ -7,7 +7,7 @@ export interface CallSummary {
   meds_confirmed: string[];
   meds_missed: string[];
   concerns: string[];
-  mood: "good" | "okay" | "low" | "concerning";
+  mood: "good" | "okay" | "low" | "concerning" | "unknown";
   appointments_acknowledged: string[];
 }
 
@@ -48,7 +48,7 @@ export function extractJson(text: string): string {
   return text.slice(start, end + 1);
 }
 
-const MOODS: CallSummary["mood"][] = ["good", "okay", "low", "concerning"];
+const MOODS: CallSummary["mood"][] = ["good", "okay", "low", "concerning", "unknown"];
 
 const MAX_SUMMARY_CHARS = 1000;
 const MAX_ITEM_CHARS = 200;
@@ -73,7 +73,11 @@ export function normalize(raw: unknown): CallSummary {
     meds_confirmed: asStringArray(obj.meds_confirmed),
     meds_missed: asStringArray(obj.meds_missed),
     concerns: asStringArray(obj.concerns),
-    mood: MOODS.includes(obj.mood as CallSummary["mood"]) ? (obj.mood as CallSummary["mood"]) : "okay",
+    // An invalid/missing mood means Claude gave no real signal — that's "we don't know,"
+    // not "everything's fine." Defaulting to "okay" would let malformed output quietly
+    // look like a healthy call; "unknown" preserves that this needs a closer look
+    // (the webhook treats it as a concern, same as "concerning").
+    mood: MOODS.includes(obj.mood as CallSummary["mood"]) ? (obj.mood as CallSummary["mood"]) : "unknown",
     appointments_acknowledged: asStringArray(obj.appointments_acknowledged),
   };
 }

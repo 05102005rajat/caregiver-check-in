@@ -28,7 +28,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
-      mood: "okay",
+      mood: "unknown",
       appointments_acknowledged: [],
     });
   });
@@ -39,7 +39,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
-      mood: "okay",
+      mood: "unknown",
       appointments_acknowledged: [],
     });
     expect(normalize([1, 2, 3])).toEqual({
@@ -47,7 +47,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
-      mood: "okay",
+      mood: "unknown",
       appointments_acknowledged: [],
     });
   });
@@ -57,9 +57,9 @@ describe("normalize", () => {
     expect(result.meds_missed).toEqual(["Aspirin", "Metformin"]);
   });
 
-  it("rejects an invalid mood value rather than propagating it", () => {
+  it("treats an invalid mood value as unknown (not a fabricated 'okay') rather than propagating it", () => {
     const result = normalize({ mood: "extremely-worried" });
-    expect(result.mood).toBe("okay");
+    expect(result.mood).toBe("unknown");
   });
 
   it("never throws regardless of input shape", () => {

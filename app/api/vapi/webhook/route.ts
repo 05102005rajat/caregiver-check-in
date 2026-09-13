@@ -212,7 +212,11 @@ export async function POST(request: Request) {
     .eq("id", call.id);
   if (finalUpdateError) console.error(`Failed to record analysis for call ${call.id}`, finalUpdateError);
 
-  const hasConcern = concerns.length > 0 || extracted.mood === "concerning" || medsMissed.length > 0;
+  // "unknown" means Claude gave no real signal on mood (see lib/claude.ts normalize) —
+  // treated as worth a look, same as an explicit "concerning," rather than silently
+  // passing as fine.
+  const hasConcern =
+    concerns.length > 0 || extracted.mood === "concerning" || extracted.mood === "unknown" || medsMissed.length > 0;
 
   if (hasConcern) {
     const lines = [`Heads up from ${parentName}'s check-in: ${extracted.summary}`];

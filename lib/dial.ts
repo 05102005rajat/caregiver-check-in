@@ -36,8 +36,15 @@ export async function dialAndRecord(
       metadata: { internal_call_id: callId },
     });
   } catch (err) {
+    // A transient Vapi-side rejection (network blip, 5xx) is not the same as "the person
+    // didn't answer" — but treating it as terminal 'failed' had the same practical effect:
+    // 'failed' rows are invisible to processRetries (which only ever queries status=
+    // 'no_answer'), so a single transient API error either burned a retry attempt with no
+    // real signal, or — on the very first dial — skipped the entire retry budget outright.
+    // Routing this into the same no_answer/retry_count pipeline as a real no-answer means
+    // it gets the same number of chances before genuinely giving up and alerting family.
     console.error("Vapi call trigger failed", err);
-    await db.from("calls").update({ status: "failed" }).eq("id", callId);
+    await db.from("calls").update({ status: "no_answer", called_at: new Date().toISOString() }).eq("id", callId);
     return;
   }
 
