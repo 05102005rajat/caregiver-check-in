@@ -27,6 +27,9 @@ export interface Medication {
   /** How to recognize it by appearance/taste/location, e.g. "small blue tablet, in the left drawer". */
   description: string | null;
   active: boolean;
+  /** Optional course date range (both YYYY-MM-DD, inclusive). Both null = repeats every day, no end. */
+  start_date: string | null;
+  end_date: string | null;
 }
 
 export interface Appointment {
@@ -45,6 +48,7 @@ export interface FamilyContact {
   parent_id: string;
   name: string;
   phone: string;
+  email: string | null;
   role: FamilyRole | null;
   notify_on_miss: boolean;
   notify_on_concern: boolean;
@@ -103,6 +107,8 @@ export interface SetupFormPayload {
     time_of_day: string;
     notes: string;
     description: string;
+    start_date: string;
+    end_date: string;
   }>;
   appointments: Array<{
     title: string;
@@ -113,6 +119,7 @@ export interface SetupFormPayload {
   family_contacts: Array<{
     name: string;
     phone: string;
+    email: string;
     role: FamilyRole;
     notify_on_miss: boolean;
     notify_on_concern: boolean;

@@ -18,6 +18,8 @@ function med(overrides: Partial<Medication> = {}): Medication {
     notes: null,
     description: null,
     active: true,
+    start_date: null,
+    end_date: null,
     ...overrides,
   };
 }
@@ -86,6 +88,32 @@ describe("medsDueNow", () => {
     } finally {
       process.env.TZ = originalTZ;
     }
+  });
+
+  it("excludes a med whose date range hasn't started yet", () => {
+    const now = new Date("2026-09-10T16:00:00Z"); // 9am PDT on 2026-09-10
+    const meds = [med({ time_of_day: "09:00:00", start_date: "2026-09-15" })];
+    expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(0);
+  });
+
+  it("excludes a med whose date range has already ended", () => {
+    const now = new Date("2026-09-10T16:00:00Z"); // 9am PDT on 2026-09-10
+    const meds = [med({ time_of_day: "09:00:00", end_date: "2026-09-05" })];
+    expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(0);
+  });
+
+  it("includes a med on the boundary days of its date range, inclusive", () => {
+    const startDay = new Date("2026-09-10T16:00:00Z"); // 9am PDT on 2026-09-10
+    const endDay = new Date("2026-09-12T16:00:00Z"); // 9am PDT on 2026-09-12
+    const meds = [med({ time_of_day: "09:00:00", start_date: "2026-09-10", end_date: "2026-09-12" })];
+    expect(medsDueNow(meds, "America/Los_Angeles", startDay)).toHaveLength(1);
+    expect(medsDueNow(meds, "America/Los_Angeles", endDay)).toHaveLength(1);
+  });
+
+  it("excludes a med the day after its date range ends", () => {
+    const now = new Date("2026-09-13T16:00:00Z"); // 9am PDT on 2026-09-13
+    const meds = [med({ time_of_day: "09:00:00", start_date: "2026-09-10", end_date: "2026-09-12" })];
+    expect(medsDueNow(meds, "America/Los_Angeles", now)).toHaveLength(0);
   });
 });
 

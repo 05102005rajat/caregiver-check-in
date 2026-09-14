@@ -11,7 +11,8 @@ function timeOfDayToMinutes(timeOfDay: string): number {
 }
 
 function localDateKey(date: Date): string {
-  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 /**
@@ -29,9 +30,12 @@ export function medsDueNow(
 ): Medication[] {
   const local = toZonedTime(now, timezone);
   const nowMinutes = minutesSinceMidnight(local);
+  const todayKey = localDateKey(local);
 
   return medications.filter((m) => {
     if (!m.active) return false;
+    if (m.start_date && todayKey < m.start_date) return false;
+    if (m.end_date && todayKey > m.end_date) return false;
     return timeOfDayToMinutes(m.time_of_day) <= nowMinutes;
   });
 }

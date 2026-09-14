@@ -33,11 +33,20 @@ type Medication = SetupFormPayload["medications"][number];
 type Appointment = SetupFormPayload["appointments"][number];
 type FamilyContact = SetupFormPayload["family_contacts"][number];
 
-const emptyMed = (): Medication => ({ name: "", dose: "", time_of_day: "", notes: "", description: "" });
+const emptyMed = (): Medication => ({
+  name: "",
+  dose: "",
+  time_of_day: "",
+  notes: "",
+  description: "",
+  start_date: "",
+  end_date: "",
+});
 const emptyAppt = (): Appointment => ({ title: "", starts_at: "", location: "", notes: "" });
 const emptyContact = (): FamilyContact => ({
   name: "",
   phone: "",
+  email: "",
   role: "other",
   notify_on_miss: true,
   notify_on_concern: true,
@@ -233,7 +242,7 @@ export default function SetupPage() {
             </Field>
             <Field label="Your phone">
               <input
-                placeholder="+15551234567"
+                placeholder="9495551234"
                 pattern={PHONE_PATTERN}
                 title="E.164 format, e.g. +15551234567"
                 className="input"
@@ -241,6 +250,7 @@ export default function SetupPage() {
                 onChange={(e) => setCaregiverPhone(e.target.value)}
                 onBlur={(e) => setCaregiverPhone(normalizePhone(e.target.value))}
               />
+              <p className="text-xs text-slate-400 mt-1">Just the 10 digits — we&apos;ll add +1 for you.</p>
             </Field>
           </div>
         )}
@@ -257,7 +267,7 @@ export default function SetupPage() {
             </Field>
             <Field label="Parent's phone">
               <input
-                placeholder="+15551234567"
+                placeholder="9495551234"
                 pattern={PHONE_PATTERN}
                 title="E.164 format, e.g. +15551234567"
                 className="input"
@@ -265,6 +275,7 @@ export default function SetupPage() {
                 onChange={(e) => setParentPhone(e.target.value)}
                 onBlur={(e) => setParentPhone(normalizePhone(e.target.value))}
               />
+              <p className="text-xs text-slate-400 mt-1">Just the 10 digits — we&apos;ll add +1 for you.</p>
             </Field>
             <div className="grid grid-cols-2 gap-4">
               <Field label="Their timezone">
@@ -319,6 +330,27 @@ export default function SetupPage() {
                     onChange={(e) => updateMed(i, { description: e.target.value })}
                   />
                 </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Start date (optional)">
+                    <input
+                      type="date"
+                      className="input"
+                      value={med.start_date}
+                      onChange={(e) => updateMed(i, { start_date: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="End date (optional)">
+                    <input
+                      type="date"
+                      className="input"
+                      value={med.end_date}
+                      onChange={(e) => updateMed(i, { end_date: e.target.value })}
+                    />
+                  </Field>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Leave both blank for an ongoing medication. Set a range for a short course, like a 7-day antibiotic.
+                </p>
               </Card>
             ))}
             {medications.length < 10 && <AddButton onClick={() => setMedications((prev) => [...prev, emptyMed()])}>+ Add medication</AddButton>}
@@ -368,13 +400,23 @@ export default function SetupPage() {
                     </Field>
                     <Field label="Phone">
                       <input
-                        placeholder="+15551234567"
+                        placeholder="9495551234"
                         pattern={PHONE_PATTERN}
                         title="E.164 format, e.g. +15551234567"
                         className="input"
                         value={contact.phone}
                         onChange={(e) => updateContact(i, { phone: e.target.value })}
                         onBlur={(e) => updateContact(i, { phone: normalizePhone(e.target.value) })}
+                      />
+                      <p className="text-xs text-slate-400 mt-1">Just the 10 digits — we&apos;ll add +1 for you.</p>
+                    </Field>
+                    <Field label="Email (optional, backup alert channel)">
+                      <input
+                        type="email"
+                        placeholder="name@example.com"
+                        className="input"
+                        value={contact.email}
+                        onChange={(e) => updateContact(i, { email: e.target.value })}
                       />
                     </Field>
                     <Field label="Role">

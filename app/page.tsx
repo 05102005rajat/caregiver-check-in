@@ -15,6 +15,11 @@ export default function Home() {
       >
         Set up check-ins
       </Link>
+      <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-left">
+        Heads up: text alerts to family are temporarily not sending while our phone number
+        finishes carrier verification. Calls, transcripts, and the dashboard all work
+        normally in the meantime.
+      </p>
     </div>
   );
 }

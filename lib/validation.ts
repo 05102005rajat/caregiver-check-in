@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const phoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, "Must be E.164 format, e.g. +15551234567");
 const timeOfDaySchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Must be HH:mm, 24-hour");
+const dateSchema = z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD")]);
 
 // These all end up as input to an LLM prompt (system prompt variables, transcript
 // analysis context) — bounded lengths keep a caregiver's free-form text from blowing up
@@ -22,13 +23,20 @@ export const setupFormSchema = z.object({
   }),
   medications: z
     .array(
-      z.object({
-        name: shortNonEmptyText(100),
-        dose: shortText(50),
-        time_of_day: timeOfDaySchema,
-        notes: shortText(300),
-        description: shortText(300),
-      })
+      z
+        .object({
+          name: shortNonEmptyText(100),
+          dose: shortText(50),
+          time_of_day: timeOfDaySchema,
+          notes: shortText(300),
+          description: shortText(300),
+          start_date: dateSchema,
+          end_date: dateSchema,
+        })
+        .refine((m) => !m.start_date || !m.end_date || m.end_date >= m.start_date, {
+          message: "End date must be on or after start date",
+          path: ["end_date"],
+        })
     )
     .max(10)
     .refine(
@@ -58,6 +66,7 @@ export const setupFormSchema = z.object({
       z.object({
         name: shortNonEmptyText(100),
         phone: phoneSchema,
+        email: z.union([z.literal(""), z.string().trim().email()]),
         role: z.enum(["son", "daughter", "spouse", "aide", "other"]),
         notify_on_miss: z.boolean(),
         notify_on_concern: z.boolean(),

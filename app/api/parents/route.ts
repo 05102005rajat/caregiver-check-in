@@ -78,6 +78,8 @@ export async function POST(request: Request) {
         time_of_day: m.time_of_day,
         notes: m.notes || null,
         description: m.description || null,
+        start_date: m.start_date || null,
+        end_date: m.end_date || null,
       }))
     );
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -102,6 +104,7 @@ export async function POST(request: Request) {
         parent_id: parentId,
         name: c.name,
         phone: c.phone,
+        email: c.email || null,
         role: c.role,
         notify_on_miss: c.notify_on_miss,
         notify_on_concern: c.notify_on_concern,
