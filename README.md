@@ -23,7 +23,18 @@ was built incrementally against that spec, evening by evening.
      confirmed/missed, concerns, mood), **plus a deterministic keyword scan** of the
      raw transcript as a backstop in case Claude fails or under-classifies.
    - Texts family contacts only if something was missed or concerning ("no news is
-     good news" — a clean call sends no text).
+     good news" — a clean call sends no text). If a contact also has an email on file,
+     the same alert is sent by email too (`lib/email.ts`, via SendGrid) — a backup
+     channel with no carrier compliance gate, useful while SMS is pending Twilio
+     toll-free verification.
+
+     **Known limitation:** the SendGrid sender is currently a personal Gmail address
+     (Single Sender Verification, not a real authenticated domain). Gmail enforces
+     DMARC on its own domain, so mail claiming to be `@gmail.com` but not actually sent
+     through Google's servers is **silently dropped** by any Gmail *recipient* — no
+     bounce, nothing in spam. Verified working to non-Gmail addresses (e.g. `.edu`).
+     Fix: buy a real domain and do SendGrid Domain Authentication instead of Single
+     Sender Verification.
 5. The caregiver can check `/dashboard` at any time to see recent calls (status,
    summary, meds confirmed/missed, concerns) and expand any call's full transcript,
    plus a health banner if the scheduler has gone quiet or a call is stuck.
