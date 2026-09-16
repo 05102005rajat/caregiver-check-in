@@ -3,6 +3,7 @@ import {
   appointmentRemindersDueNow,
   appointmentsToday,
   formatLocalTime,
+  localDayBoundsUtc,
   medsAtLocalTime,
   medsDueNow,
   scheduledForToday,
@@ -228,5 +229,34 @@ describe("appointmentRemindersDueNow", () => {
     const now = new Date("2026-09-10T21:00:00Z");
     const a = appt({ starts_at: apptAt.toISOString() });
     expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toEqual([]);
+  });
+});
+
+describe("localDayBoundsUtc", () => {
+  it("returns the correct UTC instants for local midnight-to-midnight", () => {
+    // 11am PDT on 2026-09-10 = 18:00 UTC. Local day is 2026-09-10 00:00 to 23:59:59.999 PDT.
+    const now = new Date("2026-09-10T18:00:00Z");
+    const { startUtc, endUtc } = localDayBoundsUtc("America/Los_Angeles", now);
+    expect(startUtc.toISOString()).toBe("2026-09-10T07:00:00.000Z"); // midnight PDT = 7am UTC
+    expect(endUtc.toISOString()).toBe("2026-09-11T06:59:59.999Z"); // 11:59:59.999pm PDT
+  });
+
+  it("a call scheduled just before local midnight falls within the same day's bounds, not the next", () => {
+    const now = new Date("2026-09-10T18:00:00Z");
+    const { endUtc } = localDayBoundsUtc("America/Los_Angeles", now);
+    const justBeforeMidnight = new Date("2026-09-11T06:59:00Z"); // 11:59pm PDT on 2026-09-10
+    expect(justBeforeMidnight.getTime()).toBeLessThanOrEqual(endUtc.getTime());
+  });
+
+  it("is timezone-independent of the host system's local timezone", () => {
+    const originalTZ = process.env.TZ;
+    process.env.TZ = "Asia/Kolkata";
+    try {
+      const now = new Date("2026-09-10T18:00:00Z");
+      const { startUtc } = localDayBoundsUtc("America/Los_Angeles", now);
+      expect(startUtc.toISOString()).toBe("2026-09-10T07:00:00.000Z");
+    } finally {
+      process.env.TZ = originalTZ;
+    }
   });
 });

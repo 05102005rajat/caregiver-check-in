@@ -16,6 +16,20 @@ function localDateKey(date: Date): string {
 }
 
 /**
+ * UTC instants for the start and end of "today", local to `timezone`. Used to query
+ * `calls` by scheduled_for within the parent's own calendar day, not the server's.
+ */
+export function localDayBoundsUtc(timezone: string, now: Date = new Date()): { startUtc: Date; endUtc: Date } {
+  const local = toZonedTime(now, timezone);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const dateStr = `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}`;
+  return {
+    startUtc: fromZonedTime(`${dateStr}T00:00:00.000`, timezone),
+    endUtc: fromZonedTime(`${dateStr}T23:59:59.999`, timezone),
+  };
+}
+
+/**
  * Medications due by (at or before) `now`, local to the parent's timezone — not a narrow
  * forward-looking window. A slot that's already due today but not yet dialed keeps showing
  * up on every tick until it's actually handled, so a delayed or skipped cron tick still

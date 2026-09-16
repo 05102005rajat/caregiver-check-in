@@ -6,6 +6,7 @@ import {
   appointmentRemindersDueNow,
   appointmentsToday,
   formatLocalTime,
+  localDayBoundsUtc,
   medsAtLocalTime,
   medsDueNow,
   minutesBetween,
@@ -136,6 +137,26 @@ async function reapStaleScheduled(
   }
 }
 
+/**
+ * Whether a call already exists today (parent's local day) that either actually
+ * connected (called_at set) or is still pending (scheduled/in_progress, so it will
+ * connect or fail on its own). Used to decide whether an appointment reminder is still
+ * needed — medsDueNow is cumulative for the whole day by design (delayed-tick catch-up),
+ * so "was any medication slot ever due today" stays true even after that slot's call
+ * fails outright, which would otherwise permanently block the appointment reminder for
+ * the rest of the day even though nothing ever actually mentioned the appointment.
+ */
+async function hasCoveredCallToday(db: ReturnType<typeof createAdminClient>, parent: Parent, now: Date): Promise<boolean> {
+  const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
+  const { data } = await db
+    .from("calls")
+    .select("called_at, status")
+    .eq("parent_id", parent.id)
+    .gte("scheduled_for", startUtc.toISOString())
+    .lte("scheduled_for", endUtc.toISOString());
+  return (data ?? []).some((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
+}
+
 interface ParentContext {
   caregiverName: string;
   medications: Medication[];
@@ -216,11 +237,16 @@ async function processParent(
 
     // Appointment-only fallback: the loop above only ever fires for a due medication, so
     // a parent with an appointment today but no medication due (including parents with
-    // no medications configured at all) would otherwise never get called. Only attempted
-    // when no medication slot is due today at all, so a normal med+appointment day still
-    // places exactly one call (the appointment is already mentioned within it).
-    if (distinctSlotTimes.length === 0) {
-      for (const { appointment, scheduledFor } of appointmentRemindersDueNow(ctx.appointments, parent.timezone, now)) {
+    // no medications configured at all) would otherwise never get called. Gated on
+    // whether a call today already connected or is still pending — NOT on whether a
+    // medication slot was merely due at some point today, since medsDueNow's due-by-now
+    // semantics stay true for the rest of the day even after that slot's call fails
+    // outright, which would otherwise permanently block the appointment reminder despite
+    // nothing having actually mentioned the appointment. A normal day where the med call
+    // does connect still places exactly one call, since that's already "covered".
+    const dueApptReminders = appointmentRemindersDueNow(ctx.appointments, parent.timezone, now);
+    if (dueApptReminders.length > 0 && !(await hasCoveredCallToday(db, parent, now))) {
+      for (const { appointment, scheduledFor } of dueApptReminders) {
         if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
           // Same catch-up-cutoff treatment as a missed medication (record it and tell
           // family) instead of silently dropping it — otherwise a badly-delayed
