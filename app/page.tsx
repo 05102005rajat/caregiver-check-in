@@ -1,81 +1,103 @@
 import Link from "next/link";
+import { MarketingFooter, MarketingHeader } from "@/components/MarketingShell";
+
+const STEPS = [
+  {
+    title: "Tell us the details",
+    body: "Your parent's name and number, their medications and when they're due, any upcoming appointments, and which family members should be notified.",
+  },
+  {
+    title: "We call, every day",
+    body: "At the times you set, our AI assistant calls your parent, checks in on how they're feeling, confirms medications, and reminds them of appointments.",
+  },
+  {
+    title: "You stay in the loop",
+    body: "Review the full transcript and summary on your dashboard any time. If something needs attention, family contacts are notified. A healthy check-in sends no notification at all.",
+  },
+];
 
 export default function Home() {
   return (
-    <div className="max-w-2xl mx-auto px-4 py-16 space-y-16">
-      <section className="text-center space-y-6">
-        <h1 className="text-3xl font-semibold">Caregiver Check-In</h1>
-        <p className="text-gray-600 text-lg">
-          Daily automated check-in calls for an aging parent or loved one — so you know
-          they&apos;re okay without having to call every day yourself.
-        </p>
-        <Link
-          href="/setup"
-          className="inline-block bg-black text-white rounded px-5 py-2.5 font-medium"
-        >
-          Set up check-ins
-        </Link>
-        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2 text-left max-w-md mx-auto">
-          Heads up: text alerts to family are temporarily not sending while our phone
-          number finishes carrier verification. Calls, transcripts, and the dashboard all
-          work normally in the meantime.
-        </p>
-      </section>
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      <MarketingHeader />
 
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold">How it works</h2>
-        <ol className="space-y-3 text-gray-600 list-decimal list-inside">
-          <li>
-            You sign in and fill out a short setup form: your parent&apos;s name and
-            phone number, their medications and when they&apos;re due, any upcoming
-            appointments, and which family members should be notified.
-          </li>
-          <li>
-            Every day at the times you set, our AI assistant calls your parent, checks in
-            on how they&apos;re feeling, confirms they&apos;ve taken their medications,
-            and reminds them of any appointments.
-          </li>
-          <li>
-            After the call, you can review the full transcript and summary on your
-            dashboard. If something needs attention — a missed medication, a health
-            concern, or a missed call — the family contacts you specify are notified. A
-            normal, healthy check-in sends no notification at all.
-          </li>
-        </ol>
-      </section>
+      <main className="flex-1">
+        <section className="max-w-2xl mx-auto px-4 pt-14 pb-10 text-center space-y-6">
+          <div className="mx-auto w-12 h-12 rounded-full bg-slate-900 text-white flex items-center justify-center text-xl">
+            📞
+          </div>
+          <div className="space-y-3">
+            <h1 className="text-3xl sm:text-4xl font-semibold text-slate-900 tracking-tight">
+              Daily check-in calls for the people you love
+            </h1>
+            <p className="text-slate-500 text-lg max-w-lg mx-auto">
+              An AI assistant calls your parent every day, confirms their medications and
+              appointments, and only texts you when something actually needs your
+              attention.
+            </p>
+          </div>
+          <div>
+            <Link
+              href="/setup"
+              className="inline-block bg-slate-900 text-white rounded-lg px-5 py-2.5 font-medium hover:bg-slate-800 transition"
+            >
+              Set up check-ins
+            </Link>
+          </div>
+          <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-left max-w-md mx-auto">
+            Heads up: text alerts to family are temporarily not sending while our phone
+            number finishes carrier verification. Calls, transcripts, and the dashboard
+            all work normally in the meantime.
+          </p>
+        </section>
 
-      <section className="space-y-4">
-        <h2 className="text-xl font-semibold">Who this is for</h2>
-        <p className="text-gray-600">
-          Caregiver Check-In is built for adult children and family caregivers who live
-          far from an aging parent, or who simply can&apos;t call every single day, but
-          still want a reliable daily touchpoint and peace of mind that medications are
-          being taken and nothing has gone wrong.
-        </p>
-      </section>
+        <section className="max-w-2xl mx-auto px-4 py-10">
+          <h2 className="text-xl font-semibold text-slate-900 mb-5">How it works</h2>
+          <div className="space-y-3">
+            {STEPS.map((step, i) => (
+              <div key={step.title} className="bg-white border border-slate-200 rounded-xl p-4 flex gap-4">
+                <div className="w-7 h-7 shrink-0 rounded-full bg-slate-900 text-white text-sm font-medium flex items-center justify-center">
+                  {i + 1}
+                </div>
+                <div>
+                  <p className="font-medium text-slate-900">{step.title}</p>
+                  <p className="text-slate-500 text-sm mt-0.5">{step.body}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
 
-      <section className="space-y-2">
-        <h2 className="text-xl font-semibold">About &amp; contact</h2>
-        <p className="text-gray-600">
-          Caregiver Check-In is operated by Rajat Choudhary as a sole proprietor, based in
-          Irvine, California.
-        </p>
-        <p className="text-gray-600">
-          Questions, feedback, or support requests:{" "}
-          <a href="mailto:05102005rajat@gmail.com" className="underline">
-            05102005rajat@gmail.com
-          </a>
-        </p>
-      </section>
+        <section className="max-w-2xl mx-auto px-4 py-10">
+          <div className="bg-white border border-slate-200 rounded-xl p-6">
+            <h2 className="text-xl font-semibold text-slate-900 mb-2">Who this is for</h2>
+            <p className="text-slate-600">
+              Caregiver Check-In is built for adult children and family caregivers who
+              live far from an aging parent, or who simply can&apos;t call every single
+              day, but still want a reliable daily touchpoint and peace of mind that
+              medications are being taken and nothing has gone wrong.
+            </p>
+          </div>
+        </section>
 
-      <footer className="border-t border-gray-200 pt-6 flex gap-6 text-sm text-gray-500">
-        <Link href="/privacy" className="underline">
-          Privacy Policy
-        </Link>
-        <Link href="/terms" className="underline">
-          Terms of Service
-        </Link>
-      </footer>
+        <section className="max-w-2xl mx-auto px-4 py-10">
+          <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-2">
+            <h2 className="text-xl font-semibold text-slate-900">About &amp; contact</h2>
+            <p className="text-slate-600">
+              Caregiver Check-In is operated by Rajat Choudhary as a sole proprietor,
+              based in Irvine, California.
+            </p>
+            <p className="text-slate-600">
+              Questions, feedback, or support requests:{" "}
+              <a href="mailto:05102005rajat@gmail.com" className="underline text-slate-900">
+                05102005rajat@gmail.com
+              </a>
+            </p>
+          </div>
+        </section>
+      </main>
+
+      <MarketingFooter />
     </div>
   );
 }
