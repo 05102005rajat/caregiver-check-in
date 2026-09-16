@@ -50,6 +50,7 @@ const emptyContact = (): FamilyContact => ({
   role: "other",
   notify_on_miss: true,
   notify_on_concern: true,
+  sms_opt_in_confirmed: false,
 });
 
 const STEPS = [
@@ -121,6 +122,15 @@ export default function SetupPage() {
   const canLeaveParentStep = parentName.trim().length > 0 && phoneValid(parentPhone);
 
   async function handleSave() {
+    const unconfirmed = contacts.filter((c) => c.name && c.phone && !c.sms_opt_in_confirmed);
+    if (unconfirmed.length > 0) {
+      setStatus("error");
+      setError(
+        `Please confirm text-alert consent for: ${unconfirmed.map((c) => c.name).join(", ")} (see the "Family" step).`
+      );
+      return;
+    }
+
     setStatus("saving");
     setError("");
 
@@ -451,6 +461,18 @@ export default function SetupPage() {
                       Notify on concern
                     </label>
                   </div>
+                  <label className="flex items-start gap-2 text-sm text-slate-600 pt-1 border-t border-slate-100 mt-1">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={contact.sms_opt_in_confirmed}
+                      onChange={(e) => updateContact(i, { sms_opt_in_confirmed: e.target.checked })}
+                    />
+                    <span>
+                      I confirm {contact.name || "this person"} has agreed to receive text message
+                      alerts about {parentName || "your parent"}&apos;s care.
+                    </span>
+                  </label>
                 </Card>
               ))}
               {contacts.length < 4 && <AddButton onClick={() => setContacts((prev) => [...prev, emptyContact()])}>+ Add family contact</AddButton>}

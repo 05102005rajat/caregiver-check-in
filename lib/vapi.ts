@@ -3,6 +3,8 @@ import { requireEnv } from "@/lib/env";
 interface TriggerCallArgs {
   toNumber: string;
   variableValues: Record<string, string>;
+  /** Overrides the assistant's default opening line for this call only. */
+  firstMessage?: string;
   /** Echoed back on the call object/webhook payload — see app/api/vapi/webhook's fallback lookup. */
   metadata?: Record<string, string>;
 }
@@ -12,7 +14,7 @@ interface VapiCallResponse {
   [key: string]: unknown;
 }
 
-export async function triggerVapiCall({ toNumber, variableValues, metadata }: TriggerCallArgs): Promise<VapiCallResponse> {
+export async function triggerVapiCall({ toNumber, variableValues, firstMessage, metadata }: TriggerCallArgs): Promise<VapiCallResponse> {
   const res = await fetch("https://api.vapi.ai/call", {
     method: "POST",
     headers: {
@@ -23,7 +25,7 @@ export async function triggerVapiCall({ toNumber, variableValues, metadata }: Tr
       assistantId: requireEnv("VAPI_ASSISTANT_ID"),
       phoneNumberId: requireEnv("VAPI_PHONE_NUMBER_ID"),
       customer: { number: toNumber },
-      assistantOverrides: { variableValues },
+      assistantOverrides: { variableValues, ...(firstMessage ? { firstMessage } : {}) },
       metadata,
     }),
   });

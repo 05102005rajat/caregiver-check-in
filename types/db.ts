@@ -52,6 +52,7 @@ export interface FamilyContact {
   role: FamilyRole | null;
   notify_on_miss: boolean;
   notify_on_concern: boolean;
+  sms_opt_in_confirmed: boolean;
 }
 
 export interface EscalationRules {
@@ -123,6 +124,7 @@ export interface SetupFormPayload {
     role: FamilyRole;
     notify_on_miss: boolean;
     notify_on_concern: boolean;
+    sms_opt_in_confirmed: boolean;
   }>;
   rules: {
     retry_after_minutes: number;

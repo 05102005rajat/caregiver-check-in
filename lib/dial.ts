@@ -12,10 +12,18 @@ export async function dialAndRecord(
   medsDue: Medication[],
   todaysAppointments: Appointment[]
 ) {
+  // Folds the consent ask into the opening line itself on a first call, instead of a
+  // separate scripted greeting ("how are you feeling?") followed by a second, jarring
+  // switch into the consent question — cuts one full back-and-forth out of the call.
+  const firstMessage = parent.consent_given_at
+    ? undefined
+    : `Hi ${parent.name}, it's ${parent.preferred_voice} calling for your check-in. This call may be recorded so your family can see a summary later — is that okay?`;
+
   let vapiCall;
   try {
     vapiCall = await triggerVapiCall({
       toNumber: parent.phone,
+      firstMessage,
       variableValues: {
         // Referenced by the record_consent Tool's Static Body Field ({{parent_id}}) so the
         // consent webhook knows which parent to update without depending on Vapi's call id.

@@ -70,6 +70,9 @@ export const setupFormSchema = z.object({
         role: z.enum(["son", "daughter", "spouse", "aide", "other"]),
         notify_on_miss: z.boolean(),
         notify_on_concern: z.boolean(),
+        sms_opt_in_confirmed: z
+          .boolean()
+          .refine((v) => v === true, "Must confirm this contact agreed to receive text alerts before saving"),
       })
     )
     .max(4),

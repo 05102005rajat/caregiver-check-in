@@ -108,6 +108,7 @@ export async function POST(request: Request) {
         role: c.role,
         notify_on_miss: c.notify_on_miss,
         notify_on_concern: c.notify_on_concern,
+        sms_opt_in_confirmed: c.sms_opt_in_confirmed,
       }))
     );
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
