@@ -184,15 +184,21 @@ export async function POST(request: Request) {
   // Claude is asked to pick medication names out of free-form speech, which it can get
   // wrong or invent. Only keep names that plausibly match this call's actual medications;
   // anything else is dropped from the stored/notified result rather than trusted outright.
-  let medsConfirmed = knownMedNames.length > 0 ? extracted.meds_confirmed.filter(isKnownMed) : extracted.meds_confirmed;
-  const medsMissed = knownMedNames.length > 0 ? extracted.meds_missed.filter(isKnownMed) : extracted.meds_missed;
+  // Always filter, even when knownMedNames is empty (e.g. an appointment-only call, whose
+  // scheduled_meds snapshot is deliberately []) — an empty known-list must mean "nothing
+  // Claude says here can be verified, drop it all", never "trust it unfiltered". The old
+  // fallback-to-unfiltered special case only made sense for legacy calls predating the
+  // scheduled_meds snapshot, but a bare length check couldn't tell "unknown" apart from
+  // "deliberately none", and silently let hallucinated missed-medication alerts through
+  // for calls that were never about medications at all.
+  let medsConfirmed = extracted.meds_confirmed.filter(isKnownMed);
+  const medsMissed = extracted.meds_missed.filter(isKnownMed);
   // If Claude contradicts itself and lists the same med as both confirmed and missed,
   // treat it as missed — matching the prompt's own "if in doubt, count as missed" stance.
   const missedLower = new Set(medsMissed.map((m) => m.toLowerCase()));
   medsConfirmed = medsConfirmed.filter((m) => !missedLower.has(m.toLowerCase()));
 
-  const appointmentsAcknowledged =
-    knownApptTitles.length > 0 ? extracted.appointments_acknowledged.filter(isKnownAppt) : extracted.appointments_acknowledged;
+  const appointmentsAcknowledged = extracted.appointments_acknowledged.filter(isKnownAppt);
 
   if (medsConfirmed.length !== extracted.meds_confirmed.length || medsMissed.length !== extracted.meds_missed.length) {
     console.warn(`Claude returned medication name(s) not matching call ${call.id}'s actual medications; dropped`);

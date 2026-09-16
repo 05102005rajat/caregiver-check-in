@@ -106,20 +106,21 @@ export default function SetupPage() {
   }
 
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
-  useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getUser().then(({ data }) => {
-      setUserEmail(data.user?.email ?? null);
-    });
-
+  function loadExisting() {
+    setLoadError(false);
     // Pre-fill with any existing setup — POST fully replaces medications/appointments/
     // family_contacts on submit, so without this, any return visit would silently wipe
-    // out everything not manually retyped.
+    // out everything not manually retyped. A failed load must NOT be treated the same as
+    // "nothing exists yet" — that would re-enable Save over a still-blank form and wipe
+    // real data on a flaky network/500, exactly the bug this pre-fill exists to prevent.
     fetch("/api/parents")
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load existing setup (${res.status})`);
+        return res.json();
+      })
       .then((data) => {
-        if (!data) return;
         if (data.caregiver) {
           setCaregiverName(data.caregiver.name ?? "");
           setCaregiverPhone(data.caregiver.phone ?? "");
@@ -170,8 +171,20 @@ export default function SetupPage() {
           setRetryAfterMinutes(data.rules.retry_after_minutes ?? 30);
           setMaxRetries(data.rules.max_retries ?? 2);
         }
+        setLoaded(true);
       })
-      .finally(() => setLoaded(true));
+      .catch((err) => {
+        console.error("Failed to load existing setup", err);
+        setLoadError(true);
+      });
+  }
+
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth.getUser().then(({ data }) => {
+      setUserEmail(data.user?.email ?? null);
+    });
+    loadExisting();
   }, []);
 
   function updateMed(i: number, patch: Partial<Medication>) {
@@ -293,7 +306,15 @@ export default function SetupPage() {
           </span>
           {userEmail && <span>{userEmail}</span>}
         </div>
-        {!loaded && <p className="text-xs text-slate-400 mb-2">Loading your existing setup…</p>}
+        {!loaded && !loadError && <p className="text-xs text-slate-400 mb-2">Loading your existing setup…</p>}
+        {loadError && (
+          <div className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mb-2 flex items-center justify-between gap-3">
+            <span>Couldn&apos;t load your existing setup — saving is disabled until this works, to avoid overwriting your data.</span>
+            <button type="button" onClick={loadExisting} className="underline font-medium whitespace-nowrap">
+              Retry
+            </button>
+          </div>
+        )}
         <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
           <div
             className="h-full bg-slate-900 rounded-full transition-all duration-300"

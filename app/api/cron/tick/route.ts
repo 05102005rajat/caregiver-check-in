@@ -11,7 +11,7 @@ import {
   minutesBetween,
   scheduledForToday,
 } from "@/lib/schedule";
-import { formatMeds } from "@/lib/format";
+import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
 
@@ -39,7 +39,8 @@ async function processRetries(
   rules: EscalationRules,
   medications: Medication[],
   appointments: Appointment[],
-  noAnswerCalls: Call[]
+  noAnswerCalls: Call[],
+  now: Date
 ) {
   for (const call of noAnswerCalls) {
     const decision = retryDecision(call, rules);
@@ -72,7 +73,18 @@ async function processRetries(
 
     if (nextStatus === "failed") {
       const time = formatLocalTime(scheduledFor, parent.timezone);
-      const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. Their ${formatMeds(medsForSlot)} was scheduled.`;
+      // medsForSlot is empty for an appointment-only call (see appointmentRemindersDueNow
+      // below) — falling back to formatMeds([]) there produced the nonsensical "Their
+      // none was scheduled." Use the day's appointments instead when there's no
+      // medication to report, so the alert actually names what was missed.
+      const subject =
+        medsForSlot.length > 0
+          ? `Their ${formatMeds(medsForSlot)} was scheduled.`
+          : (() => {
+              const todaysAppts = appointmentsToday(appointments, parent.timezone, scheduledFor);
+              return todaysAppts.length > 0 ? `Their ${formatAppointments(todaysAppts)} appointment was scheduled.` : "";
+            })();
+      const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body);
       continue;
     }
@@ -83,7 +95,7 @@ async function processRetries(
       parent,
       caregiverName,
       medsForSlot,
-      appointmentsToday(appointments, parent.timezone)
+      appointmentsToday(appointments, parent.timezone, now)
     );
   }
 }
@@ -120,7 +132,7 @@ async function reapStaleScheduled(
     const medsForSlot = row.scheduled_meds
       ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
       : medsAtLocalTime(medications, new Date(row.scheduled_for), parent.timezone);
-    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone));
+    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now));
   }
 }
 
@@ -208,8 +220,34 @@ async function processParent(
     // when no medication slot is due today at all, so a normal med+appointment day still
     // places exactly one call (the appointment is already mentioned within it).
     if (distinctSlotTimes.length === 0) {
-      for (const { scheduledFor } of appointmentRemindersDueNow(ctx.appointments, parent.timezone, now)) {
-        if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) continue; // too late, just skip silently — no medication was riding on this
+      for (const { appointment, scheduledFor } of appointmentRemindersDueNow(ctx.appointments, parent.timezone, now)) {
+        if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
+          // Same catch-up-cutoff treatment as a missed medication (record it and tell
+          // family) instead of silently dropping it — otherwise a badly-delayed
+          // appointment reminder leaves no trace anywhere: no calls row, no dashboard
+          // entry, no alert.
+          const { data: activeNow } = await db
+            .from("calls")
+            .select("id")
+            .eq("parent_id", parent.id)
+            .in("status", ["scheduled", "in_progress"])
+            .limit(1)
+            .maybeSingle();
+          if (activeNow) continue;
+          const { data: row, error } = await db
+            .from("calls")
+            .insert({ parent_id: parent.id, scheduled_for: scheduledFor.toISOString(), status: "failed", scheduled_meds: [] })
+            .select()
+            .single();
+          if (error) {
+            if (error.code !== "23505") console.error("Failed to record skipped-too-late appointment call", error);
+            continue;
+          }
+          const time = formatLocalTime(scheduledFor, parent.timezone);
+          const body = `Heads up: ${parent.name}'s ${formatAppointments([appointment])} appointment reminder (around ${time}) was missed and is now too late to call about.`;
+          await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body);
+          continue;
+        }
         const dialed = await scheduleAndDial(
           db,
           parent,
@@ -226,7 +264,7 @@ async function processParent(
   }
 
   if (ctx.rules) {
-    await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls);
+    await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now);
   }
 
   return callsTriggered;
