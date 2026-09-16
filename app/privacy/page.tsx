@@ -10,7 +10,7 @@ export default function PrivacyPolicy() {
       <p className="text-sm text-gray-400">Last updated September 2026</p>
 
       <p className="text-gray-600">
-        Caregiver Check-In (&quot;we&quot;, &quot;us&quot;) is operated by Rajat Chopra as
+        Caregiver Check-In (&quot;we&quot;, &quot;us&quot;) is operated by Rajat Choudhary as
         a sole proprietor, based in Irvine, California. This policy explains what
         information we collect through the service and how it&apos;s used.
       </p>
@@ -62,8 +62,8 @@ export default function PrivacyPolicy() {
       <h2 className="text-lg font-semibold pt-4">Contact</h2>
       <p className="text-gray-600">
         Questions about this policy or your data:{" "}
-        <a href="mailto:rajatc1@uci.edu" className="underline">
-          rajatc1@uci.edu
+        <a href="mailto:05102005rajat@gmail.com" className="underline">
+          05102005rajat@gmail.com
         </a>
       </p>
     </div>

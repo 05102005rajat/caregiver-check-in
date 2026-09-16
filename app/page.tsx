@@ -57,13 +57,13 @@ export default function Home() {
       <section className="space-y-2">
         <h2 className="text-xl font-semibold">About &amp; contact</h2>
         <p className="text-gray-600">
-          Caregiver Check-In is operated by Rajat Chopra as a sole proprietor, based in
+          Caregiver Check-In is operated by Rajat Choudhary as a sole proprietor, based in
           Irvine, California.
         </p>
         <p className="text-gray-600">
           Questions, feedback, or support requests:{" "}
-          <a href="mailto:rajatc1@uci.edu" className="underline">
-            rajatc1@uci.edu
+          <a href="mailto:05102005rajat@gmail.com" className="underline">
+            05102005rajat@gmail.com
           </a>
         </p>
       </section>

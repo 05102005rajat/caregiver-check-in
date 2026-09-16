@@ -10,7 +10,7 @@ export default function TermsOfService() {
       <p className="text-sm text-gray-400">Last updated September 2026</p>
 
       <p className="text-gray-600">
-        Caregiver Check-In is operated by Rajat Chopra as a sole proprietor, based in
+        Caregiver Check-In is operated by Rajat Choudhary as a sole proprietor, based in
         Irvine, California. By using this service, you agree to the following terms.
       </p>
 
@@ -54,8 +54,8 @@ export default function TermsOfService() {
       <h2 className="text-lg font-semibold pt-4">Contact</h2>
       <p className="text-gray-600">
         Questions about these terms:{" "}
-        <a href="mailto:rajatc1@uci.edu" className="underline">
-          rajatc1@uci.edu
+        <a href="mailto:05102005rajat@gmail.com" className="underline">
+          05102005rajat@gmail.com
         </a>
       </p>
     </div>
