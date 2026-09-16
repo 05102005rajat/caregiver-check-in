@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appointmentRemindersDueNow,
   appointmentsToday,
   formatLocalTime,
   medsAtLocalTime,
@@ -193,5 +194,39 @@ describe("appointmentsToday", () => {
     const tomorrow = appt({ starts_at: new Date("2026-09-11T20:00:00Z").toISOString() });
     const result = appointmentsToday([today, tomorrow], "America/Los_Angeles", now);
     expect(result).toEqual([today]);
+  });
+});
+
+describe("appointmentRemindersDueNow", () => {
+  it("is not due more than an hour before the appointment", () => {
+    // Appointment at 3pm PDT, now is 1:30pm PDT (90 min before) — not due yet.
+    const apptAt = new Date("2026-09-10T22:00:00Z");
+    const now = new Date("2026-09-10T20:30:00Z");
+    const a = appt({ starts_at: apptAt.toISOString() });
+    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toEqual([]);
+  });
+
+  it("is due exactly an hour before the appointment", () => {
+    const apptAt = new Date("2026-09-10T22:00:00Z");
+    const now = new Date("2026-09-10T21:00:00Z"); // exactly 60 min before
+    const a = appt({ starts_at: apptAt.toISOString() });
+    const result = appointmentRemindersDueNow([a], "America/Los_Angeles", now);
+    expect(result).toHaveLength(1);
+    expect(result[0].appointment).toEqual(a);
+    expect(result[0].scheduledFor.getTime()).toBe(now.getTime());
+  });
+
+  it("stays due if the tick is delayed past the reminder time (same recovery as medsDueNow)", () => {
+    const apptAt = new Date("2026-09-10T22:00:00Z");
+    const now = new Date("2026-09-10T21:45:00Z"); // 15 min after the reminder was due
+    const a = appt({ starts_at: apptAt.toISOString() });
+    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toHaveLength(1);
+  });
+
+  it("excludes an appointment on a different day even if the time-of-day math would otherwise match", () => {
+    const apptAt = new Date("2026-09-11T22:00:00Z"); // tomorrow
+    const now = new Date("2026-09-10T21:00:00Z");
+    const a = appt({ starts_at: apptAt.toISOString() });
+    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toEqual([]);
   });
 });

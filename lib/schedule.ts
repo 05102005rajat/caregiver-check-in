@@ -87,6 +87,30 @@ export function formatLocalTime(date: Date, timezone: string): string {
   return `${hour12}:${String(minutes).padStart(2, "0")}${period}`;
 }
 
+// How long before an appointment to place a reminder call, for parents with no
+// medications due that day — otherwise appointments only ever get mentioned as a
+// side note inside a medication-triggered call, and an appointment-only parent (or a
+// day with an appointment but no medication due) would never get called at all.
+const APPOINTMENT_REMINDER_MINUTES_BEFORE = 60;
+
+/**
+ * Today's appointments whose reminder time (a fixed window before they start) has
+ * arrived, paired with the UTC instant of that reminder — same "due by now, not a
+ * narrow window" semantics as medsDueNow, for the same delayed-cron-tick recovery reason.
+ */
+export function appointmentRemindersDueNow(
+  appointments: Appointment[],
+  timezone: string,
+  now: Date = new Date()
+): Array<{ appointment: Appointment; scheduledFor: Date }> {
+  return appointmentsToday(appointments, timezone, now)
+    .map((appointment) => ({
+      appointment,
+      scheduledFor: new Date(new Date(appointment.starts_at).getTime() - APPOINTMENT_REMINDER_MINUTES_BEFORE * 60000),
+    }))
+    .filter(({ scheduledFor }) => scheduledFor.getTime() <= now.getTime());
+}
+
 /**
  * Medications whose time_of_day matches the local hour:minute of `scheduledFor`.
  * A call row's scheduled_for keeps its original slot time across retries (only

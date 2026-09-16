@@ -3,6 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { dialAndRecord, scheduleAndDial } from "@/lib/dial";
 import { retryDecision } from "@/lib/retry";
 import {
+  appointmentRemindersDueNow,
   appointmentsToday,
   formatLocalTime,
   medsAtLocalTime,
@@ -199,6 +200,26 @@ async function processParent(
         scheduledFor
       );
       if (dialed) callsTriggered += 1;
+    }
+
+    // Appointment-only fallback: the loop above only ever fires for a due medication, so
+    // a parent with an appointment today but no medication due (including parents with
+    // no medications configured at all) would otherwise never get called. Only attempted
+    // when no medication slot is due today at all, so a normal med+appointment day still
+    // places exactly one call (the appointment is already mentioned within it).
+    if (distinctSlotTimes.length === 0) {
+      for (const { scheduledFor } of appointmentRemindersDueNow(ctx.appointments, parent.timezone, now)) {
+        if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) continue; // too late, just skip silently — no medication was riding on this
+        const dialed = await scheduleAndDial(
+          db,
+          parent,
+          ctx.caregiverName,
+          [],
+          appointmentsToday(ctx.appointments, parent.timezone, now),
+          scheduledFor
+        );
+        if (dialed) callsTriggered += 1;
+      }
     }
 
     await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now);
