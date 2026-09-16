@@ -4,6 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import type { FamilyRole, SetupFormPayload } from "@/types/db";
+import type {
+  Appointment as DbAppointment,
+  FamilyContact as DbFamilyContact,
+  Medication as DbMedication,
+} from "@/types/db";
 
 const TIMEZONES = [
   "America/Los_Angeles",
@@ -100,11 +105,73 @@ export default function SetupPage() {
     }
   }
 
+  const [loaded, setLoaded] = useState(false);
+
   useEffect(() => {
     const supabase = createClient();
     supabase.auth.getUser().then(({ data }) => {
       setUserEmail(data.user?.email ?? null);
     });
+
+    // Pre-fill with any existing setup — POST fully replaces medications/appointments/
+    // family_contacts on submit, so without this, any return visit would silently wipe
+    // out everything not manually retyped.
+    fetch("/api/parents")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) return;
+        if (data.caregiver) {
+          setCaregiverName(data.caregiver.name ?? "");
+          setCaregiverPhone(data.caregiver.phone ?? "");
+        }
+        if (data.parent) {
+          setParentName(data.parent.name ?? "");
+          setParentPhone(data.parent.phone ?? "");
+          setTimezone(data.parent.timezone ?? "America/Los_Angeles");
+          setAssistantName(data.parent.preferred_voice ?? "Rosie");
+        }
+        if (data.medications?.length) {
+          setMedications(
+            data.medications.map((m: DbMedication) => ({
+              name: m.name ?? "",
+              dose: m.dose ?? "",
+              time_of_day: (m.time_of_day ?? "").slice(0, 5),
+              notes: m.notes ?? "",
+              description: m.description ?? "",
+              start_date: m.start_date ?? "",
+              end_date: m.end_date ?? "",
+            }))
+          );
+        }
+        if (data.appointments?.length) {
+          setAppointments(
+            data.appointments.map((a: DbAppointment) => ({
+              title: a.title ?? "",
+              starts_at: a.starts_at ? new Date(a.starts_at).toISOString().slice(0, 16) : "",
+              location: a.location ?? "",
+              notes: a.notes ?? "",
+            }))
+          );
+        }
+        if (data.family_contacts?.length) {
+          setContacts(
+            data.family_contacts.map((c: DbFamilyContact) => ({
+              name: c.name ?? "",
+              phone: c.phone ?? "",
+              email: c.email ?? "",
+              role: c.role ?? "other",
+              notify_on_miss: c.notify_on_miss ?? true,
+              notify_on_concern: c.notify_on_concern ?? true,
+              sms_opt_in_confirmed: c.sms_opt_in_confirmed ?? false,
+            }))
+          );
+        }
+        if (data.rules) {
+          setRetryAfterMinutes(data.rules.retry_after_minutes ?? 30);
+          setMaxRetries(data.rules.max_retries ?? 2);
+        }
+      })
+      .finally(() => setLoaded(true));
   }, []);
 
   function updateMed(i: number, patch: Partial<Medication>) {
@@ -226,6 +293,7 @@ export default function SetupPage() {
           </span>
           {userEmail && <span>{userEmail}</span>}
         </div>
+        {!loaded && <p className="text-xs text-slate-400 mb-2">Loading your existing setup…</p>}
         <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
           <div
             className="h-full bg-slate-900 rounded-full transition-all duration-300"
@@ -541,7 +609,7 @@ export default function SetupPage() {
           <button
             type="button"
             onClick={handleSave}
-            disabled={status === "saving"}
+            disabled={status === "saving" || !loaded}
             className="bg-slate-900 text-white rounded-lg px-5 py-2.5 font-medium hover:bg-slate-800 transition disabled:opacity-50"
           >
             {status === "saving" ? "Saving..." : "Save"}

@@ -2,6 +2,47 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { setupFormSchema } from "@/lib/validation";
+import type { Appointment, Caregiver, EscalationRules, FamilyContact, Medication, Parent } from "@/types/db";
+
+/**
+ * Loads the caregiver's existing setup, if any, so `/setup` can pre-fill the form instead
+ * of always starting blank. This matters because POST fully replaces medications/
+ * appointments/family_contacts on every submit (see below) — without pre-filling, any
+ * return visit to `/setup` would silently delete everything not manually retyped.
+ */
+export async function GET() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+  }
+
+  const { data: caregiverRow } = await supabase.from("caregivers").select("*").eq("id", user.id).maybeSingle();
+  const { data: parentRow } = await supabase.from("parents").select("*").eq("caregiver_id", user.id).maybeSingle();
+
+  if (!parentRow) {
+    return NextResponse.json({ caregiver: caregiverRow ?? null, parent: null });
+  }
+  const parent = parentRow as Parent;
+
+  const [{ data: meds }, { data: appts }, { data: contacts }, { data: rules }] = await Promise.all([
+    supabase.from("medications").select("*").eq("parent_id", parent.id),
+    supabase.from("appointments").select("*").eq("parent_id", parent.id),
+    supabase.from("family_contacts").select("*").eq("parent_id", parent.id),
+    supabase.from("escalation_rules").select("*").eq("parent_id", parent.id).maybeSingle(),
+  ]);
+
+  return NextResponse.json({
+    caregiver: (caregiverRow as Caregiver | null) ?? null,
+    parent,
+    medications: (meds ?? []) as Medication[],
+    appointments: (appts ?? []) as Appointment[],
+    family_contacts: (contacts ?? []) as FamilyContact[],
+    rules: (rules as EscalationRules | null) ?? null,
+  });
+}
 
 export async function POST(request: Request) {
   const supabase = await createClient();
