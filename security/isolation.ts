@@ -182,6 +182,24 @@ async function main() {
       anonRpc !== null && afterAnon?.phone === "+15555550102",
       `rpc error: ${anonRpc?.message ?? "NONE — call succeeded"}; phone is now ${afterAnon?.phone}`
     );
+    // --- Deletion actually deletes. The privacy policy promises this, and the failure
+    //     mode is silent: telling someone their parent's transcripts are gone while rows
+    //     remain is worse than not offering deletion at all. Mirrors the ordered sweep in
+    //     /api/parents/delete rather than trusting cascade rules.
+    for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
+      await admin.from(t).delete().eq("parent_id", parentA);
+    }
+    await admin.from("parents").delete().eq("id", parentA);
+
+    let residue = 0;
+    for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
+      const { count } = await admin.from(t).select("id", { count: "exact", head: true }).eq("parent_id", parentA);
+      residue += count ?? 0;
+    }
+    const { count: parentsLeft } = await admin.from("parents").select("id", { count: "exact", head: true }).eq("id", parentA);
+    check("deleting a household leaves no transcripts or other rows behind", residue === 0 && (parentsLeft ?? 0) === 0, `${residue} child row(s), ${parentsLeft} parent row(s) remain`);
+    parentA = ""; // already removed; skip the cleanup sweep below
+
   } finally {
     // Clean up regardless of outcome — a failed run must not leave probe households behind.
     if (parentA) {
