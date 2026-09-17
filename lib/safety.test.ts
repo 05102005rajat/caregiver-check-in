@@ -50,3 +50,22 @@ describe("hasParentResponse", () => {
     expect(hasParentResponse("AI: I'll let the user know about that.\n")).toBe(false);
   });
 });
+
+describe("scanForConcernKeywords — parent turns only", () => {
+  it("does not trip on the assistant's own words", () => {
+    // Rosie echoes watch-item text every call, so scanning her turns made the backstop
+    // fire daily for any watch item containing a keyword.
+    const transcript = "AI: How's the knee pain today, and did you have another fall?\nUser: All fine thanks.\n";
+    expect(scanForConcernKeywords(transcript, ["pain", "fall"])).toEqual([]);
+  });
+
+  it("still catches what the parent actually says", () => {
+    const transcript = "AI: How are you?\nUser: I had a fall this morning.\n";
+    expect(scanForConcernKeywords(transcript, ["fall"])).toEqual(["fall"]);
+  });
+
+  it("falls back to scanning everything when speaker labels are unrecognizable", () => {
+    // Over-reporting beats missing a real emergency if Vapi ever changes transcript shape.
+    expect(scanForConcernKeywords("she mentioned chest pain", ["chest"])).toEqual(["chest"]);
+  });
+});

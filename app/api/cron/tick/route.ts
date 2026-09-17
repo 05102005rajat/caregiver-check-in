@@ -25,6 +25,15 @@ export const dynamic = "force-dynamic";
 // placing a very-late, confusing "check-in" call about a medication from hours ago.
 const MAX_CATCHUP_MINUTES = 120;
 
+/** Promise.all keyed by name, so inserting a query can't silently shift the results. */
+async function allNamed<T extends Record<string, PromiseLike<unknown>>>(
+  queries: T
+): Promise<{ [K in keyof T]: Awaited<T[K]> }> {
+  const keys = Object.keys(queries) as Array<keyof T>;
+  const settled = await Promise.all(keys.map((k) => queries[k]));
+  return Object.fromEntries(keys.map((k, i) => [k, settled[i]])) as { [K in keyof T]: Awaited<T[K]> };
+}
+
 function groupByParentId<T extends { parent_id: string }>(rows: T[]): Map<string, T[]> {
   const map = new Map<string, T[]>();
   for (const row of rows) {
@@ -43,7 +52,8 @@ async function processRetries(
   medications: Medication[],
   appointments: Appointment[],
   noAnswerCalls: Call[],
-  now: Date
+  now: Date,
+  watchItems: WatchItem[]
 ) {
   for (const call of noAnswerCalls) {
     const decision = retryDecision(call, rules);
@@ -100,7 +110,10 @@ async function processRetries(
       parent,
       caregiverName,
       medsForSlot,
-      appointmentsToday(appointments, parent.timezone, now)
+      appointmentsToday(appointments, parent.timezone, now),
+      // Without this a retry stops asking after the knee the first dial asked about —
+      // Rosie's "remembering" would be inconsistent within the same morning.
+      watchItems
     );
   }
 }
@@ -119,7 +132,8 @@ async function reapStaleScheduled(
   caregiverName: string,
   medications: Medication[],
   appointments: Appointment[],
-  now: Date
+  now: Date,
+  watchItems: WatchItem[]
 ) {
   // Same 10-minute (2x max call duration) buffer as the in_progress reaper below — a call
   // that's actually still ringing/talking can legitimately keep this row at 'scheduled'
@@ -137,7 +151,7 @@ async function reapStaleScheduled(
     const medsForSlot = row.scheduled_meds
       ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
       : medsAtLocalTime(medications, new Date(row.scheduled_for), parent.timezone);
-    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now));
+    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
   }
 }
 
@@ -305,11 +319,11 @@ async function processParent(
       }
     }
 
-    await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now);
+    await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
   }
 
   if (ctx.rules) {
-    await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now);
+    await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now, ctx.watchItems);
   }
 
   return callsTriggered;
@@ -356,13 +370,30 @@ export async function GET(request: Request) {
 
   // One batch of queries for all parents instead of per-parent round-trips, so tick
   // latency stays roughly constant as the number of caregivers grows.
-  const [caregiversRes, medsRes, apptsRes, rulesRes, noAnswerRes, anyCallsRes, watchRes] = await Promise.all([
-    db.from("caregivers").select("id, name").in("id", caregiverIds),
-    db.from("medications").select("*").in("parent_id", parentIds).eq("active", true),
-    db.from("appointments").select("*").in("parent_id", parentIds),
-    db.from("escalation_rules").select("*").in("parent_id", parentIds),
-    db.from("calls").select("*").in("parent_id", parentIds).eq("status", "no_answer").gte("scheduled_for", oneDayAgo.toISOString()),
-    db.from("watch_items").select("*").in("parent_id", parentIds),
+  // Positional destructuring of a long Promise.all is easy to get wrong when a query is
+  // inserted mid-array — doing exactly that silently swapped the watch-items and
+  // prior-calls results, which disabled the consent gate entirely. Named properties so
+  // adding a query can't reorder anything.
+  const {
+    caregivers: caregiversRes,
+    meds: medsRes,
+    appts: apptsRes,
+    rules: rulesRes,
+    noAnswer: noAnswerRes,
+    watch: watchRes,
+    anyCalls: anyCallsRes,
+  } = await allNamed({
+    caregivers: db.from("caregivers").select("id, name").in("id", caregiverIds),
+    meds: db.from("medications").select("*").in("parent_id", parentIds).eq("active", true),
+    appts: db.from("appointments").select("*").in("parent_id", parentIds),
+    rules: db.from("escalation_rules").select("*").in("parent_id", parentIds),
+    noAnswer: db
+      .from("calls")
+      .select("*")
+      .in("parent_id", parentIds)
+      .eq("status", "no_answer")
+      .gte("scheduled_for", oneDayAgo.toISOString()),
+    watch: db.from("watch_items").select("*").in("parent_id", parentIds),
     // Only counts as a "prior call" for consent-gating if a real dial was actually
     // attempted. dialAndRecord explicitly sets status='failed' only when Vapi itself
     // rejected the call (never rang) — every other status (including 'scheduled', which
@@ -371,8 +402,8 @@ export async function GET(request: Request) {
     // permanently read as "no prior calls" whenever that bookkeeping write fails, since
     // vapi_call_id is one of the fields that write sets — silently disabling the consent
     // gate and letting the system keep cold-calling the parent without consent.
-    db.from("calls").select("parent_id").in("parent_id", parentIds).neq("status", "failed"),
-  ]);
+    anyCalls: db.from("calls").select("parent_id").in("parent_id", parentIds).neq("status", "failed"),
+  });
 
   const caregiverNameById = new Map<string, string>(
     (caregiversRes.data ?? []).map((c) => [c.id as string, c.name as string])

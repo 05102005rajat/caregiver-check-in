@@ -17,7 +17,26 @@ function escapeRegExp(s: string): string {
  * keyword list, but this is a deliberately simple backstop, not the whole safety system.
  */
 export function scanForConcernKeywords(transcript: string, keywords: string[]): string[] {
-  return keywords.filter((k) => new RegExp(`\\b${escapeRegExp(k)}\\b`, "i").test(transcript));
+  return keywords.filter((k) => new RegExp(`\\b${escapeRegExp(k)}\\b`, "i").test(parentTurnsOnly(transcript)));
+}
+
+/**
+ * Only the parent's own words.
+ *
+ * The scan used to run over the whole transcript, including the assistant's turns — so
+ * Rosie saying "I'll let your family know about that fall" was itself enough to trip the
+ * "fall" keyword. Watch items made that fatal rather than merely noisy: their text is
+ * injected into Rosie's prompt, so for a watch item like "left knee pain since her fall
+ * in June" she says the words "pain" and "fall" out loud every single morning, tripping
+ * the backstop and texting the family daily — the exact alert fatigue watch items exist
+ * to remove, and it would have bypassed the LLM suppression entirely.
+ */
+function parentTurnsOnly(transcript: string): string {
+  const lines = transcript.split("\n");
+  const parentLines = lines.filter((line) => /^\s*(user|customer|human)\s*:/i.test(line));
+  // If the transcript doesn't use recognizable speaker labels, scanning everything is the
+  // safe failure: over-reporting a concern beats missing one.
+  return parentLines.length > 0 ? parentLines.join("\n") : transcript;
 }
 
 /**

@@ -171,8 +171,13 @@ export async function POST(request: Request) {
     // Watch items the family has already flagged as known — raises the bar for alerting
     // on those specific topics only, so a chronic complaint doesn't generate a text every
     // morning while anything new or worsening still comes straight through.
-    const knownIssues = ((watchRow ?? []) as WatchItem[]).filter((w) => !w.always_alert).map((w) => w.description);
-    extracted = await summarizeCall(transcript, knownIssues);
+    const watchItems = (watchRow ?? []) as WatchItem[];
+    const knownIssues = watchItems.filter((w) => !w.always_alert).map((w) => w.description);
+    // always_alert is what the setup checkbox actually promises ("alert me every time this
+    // comes up"); without passing it through, ticking it merely opted out of suppression
+    // while the base prompt still declined to flag an unchanged chronic complaint.
+    const alwaysReport = watchItems.filter((w) => w.always_alert).map((w) => w.description);
+    extracted = await summarizeCall(transcript, knownIssues, alwaysReport);
   } catch (err) {
     log.error("webhook.summarize_failed", { call_id: call.id, parent_id: call.parent_id, err });
     const { error } = await db

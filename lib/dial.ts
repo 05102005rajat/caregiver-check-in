@@ -12,7 +12,7 @@ export async function dialAndRecord(
   caregiverName: string,
   medsDue: Medication[],
   todaysAppointments: Appointment[],
-  watchItems: WatchItem[] = []
+  watchItems: WatchItem[]
 ) {
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
@@ -83,7 +83,7 @@ export async function scheduleAndDial(
   medsForSlot: Medication[],
   todaysAppointments: Appointment[],
   scheduledFor: Date,
-  watchItems: WatchItem[] = []
+  watchItems: WatchItem[]
 ): Promise<boolean> {
   // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.

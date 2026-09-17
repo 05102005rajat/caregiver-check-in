@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { appointmentsToday } from "@/lib/schedule";
-import type { Appointment, Medication, Parent } from "@/types/db";
+import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires an immediate real call to the caregiver's own parent, bypassing the schedule. */
 export async function POST() {
@@ -28,9 +28,12 @@ export async function POST() {
   }
   const parent = parentRow as Parent;
 
-  const [{ data: medications }, { data: appointments }] = await Promise.all([
+  const [{ data: medications }, { data: appointments }, { data: watchItems }] = await Promise.all([
     db.from("medications").select("*").eq("parent_id", parent.id).eq("active", true),
     db.from("appointments").select("*").eq("parent_id", parent.id),
+    // The test call is exactly where a caregiver checks that Rosie asks after the things
+    // they told us about, so it must behave identically to a scheduled call.
+    db.from("watch_items").select("*").eq("parent_id", parent.id),
   ]);
 
   // scheduleAndDial's insert is atomically guarded by a unique index on parent_id for
@@ -42,7 +45,8 @@ export async function POST() {
     caregiver?.name ?? "your family",
     (medications ?? []) as Medication[],
     appointmentsToday((appointments ?? []) as Appointment[], parent.timezone),
-    new Date()
+    new Date(),
+    (watchItems ?? []) as WatchItem[]
   );
 
   if (!dialed) {

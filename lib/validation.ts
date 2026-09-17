@@ -83,7 +83,10 @@ export const setupFormSchema = z.object({
         always_alert: z.boolean(),
       })
     )
-    .max(10),
+    .max(10)
+    // Defaulted so a client still running the previous bundle across a deploy doesn't get
+    // a 400 with no field on screen to explain it, losing the whole form.
+    .default([]),
   rules: z.object({
     retry_after_minutes: z.number().int().min(1).max(1440),
     max_retries: z.number().int().min(0).max(10),
