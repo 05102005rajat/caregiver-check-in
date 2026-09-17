@@ -10,6 +10,12 @@ export default function SmsConsentPage() {
         that opt-in is collected.
       </p>
 
+      <p>
+        Family members can also sign themselves up directly at{" "}
+        <a href="/sms-opt-in">/sms-opt-in</a>, which records their own consent rather than relying on
+        the caregiver to confirm it on their behalf.
+      </p>
+
       <h2>Who signs up, and what they agree to</h2>
       <p>
         The <strong>caregiver</strong> (an adult child or family member) creates an
