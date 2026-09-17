@@ -18,9 +18,12 @@ async function sendAlert(
   email: string | null,
   body: string
 ) {
+  // `recipient` is denormalized on purpose: contact_id goes null if that contact is
+  // later removed from the setup form (ON DELETE SET NULL), and "who did we actually
+  // notify" has to stay answerable after the fact for a care product.
   try {
     const sid = await sendSms(phone, body);
-    await db.from("messages").insert({ call_id: callId, contact_id: contactId, body, twilio_sid: sid, status: "sent", channel: "sms" });
+    await db.from("messages").insert({ call_id: callId, contact_id: contactId, recipient: phone, body, twilio_sid: sid, status: "sent", channel: "sms" });
   } catch (err) {
     // Don't let a Twilio failure be silently equivalent to "the family was told" —
     // record it so it's visible (e.g. via Supabase) rather than only in server logs.
@@ -28,6 +31,7 @@ async function sendAlert(
     await db.from("messages").insert({
       call_id: callId,
       contact_id: contactId,
+      recipient: phone,
       body,
       status: "failed",
       channel: "sms",
@@ -39,12 +43,13 @@ async function sendAlert(
 
   try {
     const messageId = await sendEmail(email, "Caregiver Check-In update", body);
-    await db.from("messages").insert({ call_id: callId, contact_id: contactId, body, twilio_sid: messageId, status: "sent", channel: "email" });
+    await db.from("messages").insert({ call_id: callId, contact_id: contactId, recipient: email, body, twilio_sid: messageId, status: "sent", channel: "email" });
   } catch (err) {
     console.error(`Failed to email ${contactId ?? "caregiver"}`, err);
     await db.from("messages").insert({
       call_id: callId,
       contact_id: contactId,
+      recipient: email,
       body,
       status: "failed",
       channel: "email",

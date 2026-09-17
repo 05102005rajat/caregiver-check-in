@@ -82,7 +82,10 @@ export interface Call {
 export interface Message {
   id: string;
   call_id: string;
-  contact_id: string;
+  /** Null once that family contact is removed from the setup form (ON DELETE SET NULL). */
+  contact_id: string | null;
+  /** Phone or email this actually went to, snapshotted so history survives contact removal. */
+  recipient: string | null;
   body: string;
   sent_at: string;
   twilio_sid: string | null;
