@@ -84,6 +84,9 @@ export interface Call {
 export interface Message {
   id: string;
   call_id: string;
+  parent_id: string | null;
+  /** Identifies "we already said this" for de-duplication — see lib/insights alertFingerprint. */
+  fingerprint: string | null;
   /** Null once that family contact is removed from the setup form (ON DELETE SET NULL). */
   contact_id: string | null;
   /** Phone or email this actually went to, snapshotted so history survives contact removal. */

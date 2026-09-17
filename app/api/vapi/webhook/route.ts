@@ -3,6 +3,7 @@ import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
+import { alertFingerprint } from "@/lib/insights";
 import { scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
@@ -176,7 +177,9 @@ export async function POST(request: Request) {
 
     if (keywordMatches.length > 0) {
       const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
-      await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body);
+      await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
+        fingerprint: alertFingerprint("keyword", keywordMatches),
+      });
     }
     return NextResponse.json({ ok: true });
   }
@@ -234,7 +237,11 @@ export async function POST(request: Request) {
       lines.push(`Concerns noted: ${concerns.join(", ")}.`);
     }
 
-    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join(" "));
+    // Fingerprint the structured facts, not the prose: Claude rewords the same situation
+    // differently every call, so body text would never match and nothing would dedupe.
+    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join(" "), {
+      fingerprint: alertFingerprint("concern", [...concerns, ...medsMissed.map((m) => `missed:${m}`)]),
+    });
   }
   // Healthy call, no concerns: log silently, no text. No news is good news (spec section 7).
 

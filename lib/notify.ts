@@ -12,27 +12,28 @@ type NotifyFlag = "notify_on_miss" | "notify_on_concern";
  */
 async function sendAlert(
   db: ReturnType<typeof createAdminClient>,
+  parentId: string,
   callId: string,
   contactId: string | null,
   phone: string,
   email: string | null,
-  body: string
+  body: string,
+  fingerprint?: string
 ) {
+  const common = { parent_id: parentId, call_id: callId, contact_id: contactId, fingerprint, body };
   // `recipient` is denormalized on purpose: contact_id goes null if that contact is
   // later removed from the setup form (ON DELETE SET NULL), and "who did we actually
   // notify" has to stay answerable after the fact for a care product.
   try {
     const sid = await sendSms(phone, body);
-    await db.from("messages").insert({ call_id: callId, contact_id: contactId, recipient: phone, body, twilio_sid: sid, status: "sent", channel: "sms" });
+    await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
   } catch (err) {
     // Don't let a Twilio failure be silently equivalent to "the family was told" —
     // record it so it's visible (e.g. via Supabase) rather than only in server logs.
     console.error(`Failed to SMS ${contactId ?? "caregiver"}`, err);
     await db.from("messages").insert({
-      call_id: callId,
-      contact_id: contactId,
+      ...common,
       recipient: phone,
-      body,
       status: "failed",
       channel: "sms",
       error: err instanceof Error ? err.message : String(err),
@@ -43,20 +44,22 @@ async function sendAlert(
 
   try {
     const messageId = await sendEmail(email, "Caregiver Check-In update", body);
-    await db.from("messages").insert({ call_id: callId, contact_id: contactId, recipient: email, body, twilio_sid: messageId, status: "sent", channel: "email" });
+    await db.from("messages").insert({ ...common, recipient: email, twilio_sid: messageId, status: "sent", channel: "email" });
   } catch (err) {
     console.error(`Failed to email ${contactId ?? "caregiver"}`, err);
     await db.from("messages").insert({
-      call_id: callId,
-      contact_id: contactId,
+      ...common,
       recipient: email,
-      body,
       status: "failed",
       channel: "email",
       error: err instanceof Error ? err.message : String(err),
     });
   }
 }
+
+// Long enough to cover a full day of retries and repeated slots without suppressing a
+// genuinely new day's alert about the same underlying issue.
+const DEFAULT_DEDUPE_WINDOW_HOURS = 20;
 
 /**
  * Notifies every family contact for this parent with `flag` enabled, plus always notifies
@@ -72,15 +75,40 @@ export async function notifyFamilyContacts(
   parentId: string,
   flag: NotifyFlag,
   callId: string,
-  body: string
+  body: string,
+  options: { fingerprint?: string; dedupeWindowHours?: number } = {}
 ) {
+  // Don't tell the same family the same thing twice in a day. A retried call, two
+  // medication slots close together, or a concern resurfacing on a later call all
+  // otherwise produce separate identical alerts — and once alerts read as noise, the
+  // one that actually matters gets ignored too. Fingerprint is built from the
+  // structured facts by the caller, not the prose, so a reworded Claude summary of the
+  // same underlying situation still counts as a duplicate.
+  const { fingerprint, dedupeWindowHours = DEFAULT_DEDUPE_WINDOW_HOURS } = options;
+  if (fingerprint) {
+    const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
+    const { data: recent } = await db
+      .from("messages")
+      .select("id")
+      .eq("parent_id", parentId)
+      .eq("fingerprint", fingerprint)
+      .eq("status", "sent")
+      .gte("sent_at", since)
+      .limit(1)
+      .maybeSingle();
+    if (recent) {
+      console.info(`Suppressed duplicate alert for parent ${parentId} (fingerprint ${fingerprint})`);
+      return;
+    }
+  }
+
   const [{ data: contacts }, { data: parentRow }] = await Promise.all([
     db.from("family_contacts").select("*").eq("parent_id", parentId).eq(flag, true),
     db.from("parents").select("caregiver_id").eq("id", parentId).single(),
   ]);
 
   for (const contact of (contacts ?? []) as FamilyContact[]) {
-    await sendAlert(db, callId, contact.id, contact.phone, contact.email, body);
+    await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint);
   }
 
   if (parentRow?.caregiver_id) {
@@ -90,7 +118,7 @@ export async function notifyFamilyContacts(
       .eq("id", parentRow.caregiver_id)
       .single();
     if (caregiver?.phone) {
-      await sendAlert(db, callId, null, caregiver.phone, caregiver.email ?? null, body);
+      await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint);
     }
   }
 }

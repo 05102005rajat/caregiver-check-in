@@ -62,6 +62,18 @@ export function describeChanges(latest: Call, previous: Call[]): Change[] {
   return changes;
 }
 
+/**
+ * Stable identifier for "we have already told the family this". Built from the
+ * structured facts rather than the alert prose, because Claude rewords the same
+ * situation differently on every call — fingerprinting the text would never match, and
+ * nothing would ever de-duplicate. Order-insensitive and case-insensitive so
+ * ["dizzy","fell"] and ["Fell","Dizzy"] are the same alert.
+ */
+export function alertFingerprint(kind: string, facts: string[]): string {
+  const normalized = [...new Set(facts.map((f) => f.trim().toLowerCase()).filter(Boolean))].sort();
+  return `${kind}:${normalized.join("|")}`;
+}
+
 /** Whether the caregiver needs to do anything about this call at all. */
 export function needsAttention(call: Call): boolean {
   const missed = medsOf(call, "missed");

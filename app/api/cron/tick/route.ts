@@ -14,6 +14,7 @@ import {
 } from "@/lib/schedule";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
+import { alertFingerprint } from "@/lib/insights";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
@@ -86,7 +87,9 @@ async function processRetries(
               return todaysAppts.length > 0 ? `Their ${formatAppointments(todaysAppts)} appointment was scheduled.` : "";
             })();
       const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
-      await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body);
+      await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
+        fingerprint: alertFingerprint("miss", [call.scheduled_for]),
+      });
       continue;
     }
 
@@ -220,7 +223,9 @@ async function processParent(
         }
         const time = formatLocalTime(scheduledFor, parent.timezone);
         const body = `Heads up: ${parent.name}'s ${time} check-in was missed and is now too late to call about. Their ${formatMeds(medsForSlot)} was scheduled.`;
-        await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body);
+        await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body, {
+          fingerprint: alertFingerprint("too-late", [scheduledFor.toISOString()]),
+        });
         continue;
       }
 
@@ -271,7 +276,9 @@ async function processParent(
           }
           const time = formatLocalTime(scheduledFor, parent.timezone);
           const body = `Heads up: ${parent.name}'s ${formatAppointments([appointment])} appointment reminder (around ${time}) was missed and is now too late to call about.`;
-          await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body);
+          await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body, {
+            fingerprint: alertFingerprint("appt-too-late", [scheduledFor.toISOString()]),
+          });
           continue;
         }
         const dialed = await scheduleAndDial(

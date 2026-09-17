@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeChanges, needsAttention } from "./insights";
+import { alertFingerprint, describeChanges, needsAttention } from "./insights";
 import type { Call } from "@/types/db";
 
 function call(overrides: Partial<Call> = {}): Call {
@@ -84,6 +84,24 @@ describe("describeChanges", () => {
     const latest = call({ concerns: null, meds_confirmed: null, mood: null });
     expect(() => describeChanges(latest, [call({ concerns: null, meds_confirmed: null })])).not.toThrow();
     expect(describeChanges(latest, [])).toEqual([]);
+  });
+});
+
+describe("alertFingerprint", () => {
+  it("is identical regardless of order or casing, so the same situation dedupes", () => {
+    expect(alertFingerprint("concern", ["Dizzy", "fell"])).toBe(alertFingerprint("concern", ["FELL", "dizzy"]));
+  });
+
+  it("differs when the actual facts differ, so a genuinely new concern still sends", () => {
+    expect(alertFingerprint("concern", ["dizzy"])).not.toBe(alertFingerprint("concern", ["dizzy", "chest pain"]));
+  });
+
+  it("separates alert kinds even with identical facts", () => {
+    expect(alertFingerprint("concern", ["dizzy"])).not.toBe(alertFingerprint("keyword", ["dizzy"]));
+  });
+
+  it("collapses duplicates and ignores blank entries", () => {
+    expect(alertFingerprint("concern", ["dizzy", "dizzy", "  ", ""])).toBe(alertFingerprint("concern", ["dizzy"]));
   });
 });
 
