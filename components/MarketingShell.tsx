@@ -22,6 +22,9 @@ export function MarketingFooter() {
       <Link href="/terms" className="hover:text-slate-800 transition">
         Terms of Service
       </Link>
+      <Link href="/sms-consent" className="hover:text-slate-800 transition">
+        SMS Consent
+      </Link>
       <a href="mailto:05102005rajat@gmail.com" className="hover:text-slate-800 transition">
         05102005rajat@gmail.com
       </a>
