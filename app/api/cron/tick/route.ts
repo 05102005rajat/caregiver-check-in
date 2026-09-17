@@ -176,6 +176,14 @@ async function processParent(
   now: Date,
   ctx: ParentContext
 ): Promise<number> {
+  // Paused by the caregiver (hospital stay, travel, family visiting). Returns before any
+  // dialing, retrying or miss-alerting: the whole point is silence, so a pause that still
+  // produced "didn't answer" texts every day would be worse than useless.
+  if (parent.paused_until && new Date(parent.paused_until) > now) {
+    log.info("cron.parent_paused", { parent_id: parent.id, paused_until: parent.paused_until });
+    return 0;
+  }
+
   // Consent gate (spec section 8): the very first call always goes out so Rosie can ask
   // for consent. Once at least one call has happened, further automatic scheduled calls
   // wait for consent_given_at to be set (the caregiver's manual test-call button, or a

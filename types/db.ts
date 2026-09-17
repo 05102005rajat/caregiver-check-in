@@ -14,6 +14,8 @@ export interface Parent {
   timezone: string;
   preferred_voice: string;
   consent_given_at: string | null;
+  /** Scheduler skips this parent until this instant; null means active. */
+  paused_until: string | null;
   created_at: string;
 }
 

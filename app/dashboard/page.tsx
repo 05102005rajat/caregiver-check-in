@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { describeChanges, needsAttention } from "@/lib/insights";
 import type { Call, Message, Parent } from "@/types/db";
 import CallRow from "./CallRow";
+import PauseControl from "./PauseControl";
 
 export const dynamic = "force-dynamic";
 
@@ -97,6 +98,8 @@ export default async function DashboardPage() {
         <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
         <p className="text-slate-500 mt-1">{parent.name}&apos;s check-in history</p>
       </div>
+
+      <PauseControl parentName={parent.name} pausedUntil={parent.paused_until} />
 
       <div className={`rounded-xl border p-5 mb-4 ${attention ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`}>
         {!latestCall ? (
