@@ -37,6 +37,7 @@ function normalizePhone(raw: string): string {
 type Medication = SetupFormPayload["medications"][number];
 type Appointment = SetupFormPayload["appointments"][number];
 type FamilyContact = SetupFormPayload["family_contacts"][number];
+type WatchItemInput = SetupFormPayload["watch_items"][number];
 
 const emptyMed = (): Medication => ({
   name: "",
@@ -58,11 +59,18 @@ const emptyContact = (): FamilyContact => ({
   sms_opt_in_confirmed: false,
 });
 
+const emptyWatchItem = (): WatchItemInput => ({ description: "", always_alert: false });
+
 const STEPS = [
   { key: "you", title: "Who's setting this up?", subtitle: "Just your name and number." },
   { key: "parent", title: "Who are we calling?", subtitle: "Your parent's info, and what to call the assistant." },
   { key: "medications", title: "What should we check on?", subtitle: "Medications and when they're due." },
   { key: "appointments", title: "Any appointments?", subtitle: "Optional — skip if there's nothing coming up." },
+  {
+    key: "watch",
+    title: "Anything we already know about?",
+    subtitle: "Optional — ongoing things Rosie should ask after, without alerting you every time.",
+  },
   { key: "family", title: "Who should we alert?", subtitle: "Optional — family gets texted only if something needs attention." },
   { key: "review", title: "Ready to go", subtitle: "Review, then save." },
 ] as const;
@@ -82,6 +90,7 @@ export default function SetupPage() {
   const [medications, setMedications] = useState<Medication[]>([emptyMed()]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [contacts, setContacts] = useState<FamilyContact[]>([]);
+  const [watchItems, setWatchItems] = useState<WatchItemInput[]>([]);
 
   const [retryAfterMinutes, setRetryAfterMinutes] = useState(30);
   const [maxRetries, setMaxRetries] = useState(2);
@@ -167,6 +176,14 @@ export default function SetupPage() {
             }))
           );
         }
+        if (data.watch_items?.length) {
+          setWatchItems(
+            data.watch_items.map((w: { description?: string; always_alert?: boolean }) => ({
+              description: w.description ?? "",
+              always_alert: w.always_alert ?? false,
+            }))
+          );
+        }
         if (data.rules) {
           setRetryAfterMinutes(data.rules.retry_after_minutes ?? 30);
           setMaxRetries(data.rules.max_retries ?? 2);
@@ -192,6 +209,9 @@ export default function SetupPage() {
   }
   function updateAppt(i: number, patch: Partial<Appointment>) {
     setAppointments((prev) => prev.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
+  }
+  function updateWatchItem(i: number, patch: Partial<WatchItemInput>) {
+    setWatchItems((prev) => prev.map((w, idx) => (idx === i ? { ...w, ...patch } : w)));
   }
   function updateContact(i: number, patch: Partial<FamilyContact>) {
     setContacts((prev) => prev.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -220,6 +240,7 @@ export default function SetupPage() {
       medications: medications.filter((m) => m.name && m.time_of_day),
       appointments: appointments.filter((a) => a.title && a.starts_at),
       family_contacts: contacts.filter((c) => c.name && c.phone),
+      watch_items: watchItems.filter((w) => w.description.trim()),
       rules: { retry_after_minutes: retryAfterMinutes, max_retries: maxRetries },
     };
 
@@ -488,6 +509,42 @@ export default function SetupPage() {
           </div>
         )}
 
+        {current.key === "watch" && (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-500">
+              Things the family already knows about — a bad knee, trouble sleeping. Rosie will ask
+              after them by name, and we won&apos;t text you every time they come up unless they sound
+              worse than usual.
+            </p>
+            {watchItems.map((item, i) => (
+              <Card key={i} onRemove={() => setWatchItems((prev) => prev.filter((_, idx) => idx !== i))}>
+                <Field label="What should Rosie keep an eye on?">
+                  <input
+                    className="input"
+                    placeholder="e.g. left knee pain since her fall in June"
+                    value={item.description}
+                    onChange={(e) => updateWatchItem(i, { description: e.target.value })}
+                  />
+                </Field>
+                <label className="flex items-center gap-1.5 text-sm text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={item.always_alert}
+                    onChange={(e) => updateWatchItem(i, { always_alert: e.target.checked })}
+                  />
+                  Alert me every time this comes up
+                </label>
+              </Card>
+            ))}
+            {watchItems.length < 10 && (
+              <AddButton onClick={() => setWatchItems((prev) => [...prev, emptyWatchItem()])}>+ Add something to watch</AddButton>
+            )}
+            {watchItems.length === 0 && (
+              <p className="text-sm text-slate-400">Nothing ongoing? Just hit Next.</p>
+            )}
+          </div>
+        )}
+
         {current.key === "family" && (
           <div className="space-y-4">
             <div className="space-y-3">
@@ -606,6 +663,10 @@ export default function SetupPage() {
             <ReviewRow
               label="Appointments"
               value={appointments.filter((a) => a.title).length > 0 ? `${appointments.filter((a) => a.title).length} added` : "None"}
+            />
+            <ReviewRow
+              label="Watching"
+              value={watchItems.filter((w) => w.description.trim()).length > 0 ? `${watchItems.filter((w) => w.description.trim()).length} item(s)` : "None"}
             />
             <ReviewRow
               label="Family to notify"

@@ -1,8 +1,8 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { log } from "@/lib/log";
 import { triggerVapiCall } from "@/lib/vapi";
-import { formatAppointments, formatMeds } from "@/lib/format";
-import type { Appointment, Medication, Parent } from "@/types/db";
+import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
+import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires the actual Vapi call and records the outcome on an already-created `calls` row. */
 export async function dialAndRecord(
@@ -11,7 +11,8 @@ export async function dialAndRecord(
   parent: Parent,
   caregiverName: string,
   medsDue: Medication[],
-  todaysAppointments: Appointment[]
+  todaysAppointments: Appointment[],
+  watchItems: WatchItem[] = []
 ) {
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
@@ -34,6 +35,9 @@ export async function dialAndRecord(
         meds_due: formatMeds(medsDue),
         appointments_today: formatAppointments(todaysAppointments),
         family_setup_by: caregiverName,
+        // Things the family already knows about, so Rosie asks after them by name
+        // ("how's the knee today?") instead of treating every mention as news.
+        watch_items: formatWatchItems(watchItems),
         // Tells the assistant whether to ask the consent question this call (spec
         // section 8: ask on the first call, and any call since where it's still unset;
         // never re-ask once consent_given_at is set).
@@ -78,7 +82,8 @@ export async function scheduleAndDial(
   caregiverName: string,
   medsForSlot: Medication[],
   todaysAppointments: Appointment[],
-  scheduledFor: Date
+  scheduledFor: Date,
+  watchItems: WatchItem[] = []
 ): Promise<boolean> {
   // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
@@ -101,6 +106,6 @@ export async function scheduleAndDial(
   }
   if (!callRow) return false;
 
-  await dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments);
+  await dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems);
   return true;
 }

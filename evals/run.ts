@@ -29,7 +29,7 @@ async function main() {
   for (const testCase of EVAL_CASES) {
     process.stdout.write(`  ${testCase.id}… `);
     try {
-      outputs.push(applyProductionBackstops(testCase.transcript, await summarizeCall(testCase.transcript)));
+      outputs.push(applyProductionBackstops(testCase.transcript, await summarizeCall(testCase.transcript, testCase.knownIssues ?? [])));
       process.stdout.write("done\n");
     } catch (err) {
       process.stdout.write("ERROR\n");

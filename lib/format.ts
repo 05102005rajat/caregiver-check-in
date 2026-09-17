@@ -1,4 +1,4 @@
-import type { Appointment, Medication } from "@/types/db";
+import type { Appointment, Medication, WatchItem } from "@/types/db";
 
 export function formatMeds(meds: Medication[]): string {
   if (meds.length === 0) return "none";
@@ -15,4 +15,10 @@ export function formatMeds(meds: Medication[]): string {
 export function formatAppointments(appts: Appointment[]): string {
   if (appts.length === 0) return "none";
   return appts.map((a) => a.title).join(", ");
+}
+
+/** Watch items for the assistant's prompt — things to ask after by name. */
+export function formatWatchItems(items: WatchItem[]): string {
+  if (items.length === 0) return "none";
+  return items.map((w) => w.description).join("; ");
 }

@@ -8,7 +8,7 @@ import { log } from "@/lib/log";
 import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
-import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
+import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
@@ -131,11 +131,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  const [{ data: rulesRow }, { data: parentRow }, { data: medsRow }, { data: apptsRow }] = await Promise.all([
+  const [{ data: rulesRow }, { data: parentRow }, { data: medsRow }, { data: apptsRow }, { data: watchRow }] = await Promise.all([
     db.from("escalation_rules").select("*").eq("parent_id", call.parent_id).single(),
     db.from("parents").select("*").eq("id", call.parent_id).single(),
     db.from("medications").select("*").eq("parent_id", call.parent_id).eq("active", true),
     db.from("appointments").select("*").eq("parent_id", call.parent_id),
+    db.from("watch_items").select("*").eq("parent_id", call.parent_id),
   ]);
   const parent = parentRow as Parent | null;
   const parentName = parent?.name ?? "your family member";
@@ -167,7 +168,11 @@ export async function POST(request: Request) {
 
   let extracted;
   try {
-    extracted = await summarizeCall(transcript);
+    // Watch items the family has already flagged as known — raises the bar for alerting
+    // on those specific topics only, so a chronic complaint doesn't generate a text every
+    // morning while anything new or worsening still comes straight through.
+    const knownIssues = ((watchRow ?? []) as WatchItem[]).filter((w) => !w.always_alert).map((w) => w.description);
+    extracted = await summarizeCall(transcript, knownIssues);
   } catch (err) {
     log.error("webhook.summarize_failed", { call_id: call.id, parent_id: call.parent_id, err });
     const { error } = await db

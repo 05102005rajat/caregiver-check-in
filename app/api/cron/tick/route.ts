@@ -16,7 +16,7 @@ import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
+import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
@@ -165,6 +165,7 @@ interface ParentContext {
   caregiverName: string;
   medications: Medication[];
   appointments: Appointment[];
+  watchItems: WatchItem[];
   rules: EscalationRules | null;
   noAnswerCalls: Call[];
   hasPriorCalls: boolean;
@@ -244,7 +245,8 @@ async function processParent(
         ctx.caregiverName,
         medsForSlot,
         appointmentsToday(ctx.appointments, parent.timezone, now),
-        scheduledFor
+        scheduledFor,
+        ctx.watchItems
       );
       if (dialed) callsTriggered += 1;
     }
@@ -296,7 +298,8 @@ async function processParent(
           ctx.caregiverName,
           [],
           appointmentsToday(ctx.appointments, parent.timezone, now),
-          scheduledFor
+          scheduledFor,
+          ctx.watchItems
         );
         if (dialed) callsTriggered += 1;
       }
@@ -353,12 +356,13 @@ export async function GET(request: Request) {
 
   // One batch of queries for all parents instead of per-parent round-trips, so tick
   // latency stays roughly constant as the number of caregivers grows.
-  const [caregiversRes, medsRes, apptsRes, rulesRes, noAnswerRes, anyCallsRes] = await Promise.all([
+  const [caregiversRes, medsRes, apptsRes, rulesRes, noAnswerRes, anyCallsRes, watchRes] = await Promise.all([
     db.from("caregivers").select("id, name").in("id", caregiverIds),
     db.from("medications").select("*").in("parent_id", parentIds).eq("active", true),
     db.from("appointments").select("*").in("parent_id", parentIds),
     db.from("escalation_rules").select("*").in("parent_id", parentIds),
     db.from("calls").select("*").in("parent_id", parentIds).eq("status", "no_answer").gte("scheduled_for", oneDayAgo.toISOString()),
+    db.from("watch_items").select("*").in("parent_id", parentIds),
     // Only counts as a "prior call" for consent-gating if a real dial was actually
     // attempted. dialAndRecord explicitly sets status='failed' only when Vapi itself
     // rejected the call (never rang) — every other status (including 'scheduled', which
@@ -374,6 +378,7 @@ export async function GET(request: Request) {
     (caregiversRes.data ?? []).map((c) => [c.id as string, c.name as string])
   );
   const medsByParent = groupByParentId((medsRes.data ?? []) as Medication[]);
+  const watchByParent = groupByParentId((watchRes.data ?? []) as WatchItem[]);
   const apptsByParent = groupByParentId((apptsRes.data ?? []) as Appointment[]);
   const rulesByParent = new Map<string, EscalationRules>(
     ((rulesRes.data ?? []) as EscalationRules[]).map((r) => [r.parent_id, r])
@@ -387,6 +392,7 @@ export async function GET(request: Request) {
         caregiverName: caregiverNameById.get(parent.caregiver_id) ?? "your family",
         medications: medsByParent.get(parent.id) ?? [],
         appointments: apptsByParent.get(parent.id) ?? [],
+        watchItems: watchByParent.get(parent.id) ?? [],
         rules: rulesByParent.get(parent.id) ?? null,
         noAnswerCalls: noAnswerByParent.get(parent.id) ?? [],
         hasPriorCalls: parentIdsWithPriorCalls.has(parent.id),

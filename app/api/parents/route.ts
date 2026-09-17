@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { setupFormSchema } from "@/lib/validation";
-import type { Appointment, Caregiver, EscalationRules, FamilyContact, Medication, Parent } from "@/types/db";
+import type { Appointment, Caregiver, EscalationRules, FamilyContact, Medication, Parent, WatchItem } from "@/types/db";
 
 /**
  * Loads the caregiver's existing setup, if any, so `/setup` can pre-fill the form instead
@@ -27,11 +27,12 @@ export async function GET() {
   }
   const parent = parentRow as Parent;
 
-  const [{ data: meds }, { data: appts }, { data: contacts }, { data: rules }] = await Promise.all([
+  const [{ data: meds }, { data: appts }, { data: contacts }, { data: rules }, { data: watch }] = await Promise.all([
     supabase.from("medications").select("*").eq("parent_id", parent.id),
     supabase.from("appointments").select("*").eq("parent_id", parent.id),
     supabase.from("family_contacts").select("*").eq("parent_id", parent.id),
     supabase.from("escalation_rules").select("*").eq("parent_id", parent.id).maybeSingle(),
+    supabase.from("watch_items").select("*").eq("parent_id", parent.id),
   ]);
 
   return NextResponse.json({
@@ -41,6 +42,7 @@ export async function GET() {
     appointments: (appts ?? []) as Appointment[],
     family_contacts: (contacts ?? []) as FamilyContact[],
     rules: (rules as EscalationRules | null) ?? null,
+    watch_items: (watch ?? []) as WatchItem[],
   });
 }
 
@@ -84,6 +86,7 @@ export async function POST(request: Request) {
       starts_at: new Date(a.starts_at).toISOString(),
     })),
     p_family_contacts: payload.family_contacts,
+    p_watch_items: payload.watch_items,
     p_retry_after_minutes: payload.rules.retry_after_minutes,
     p_max_retries: payload.rules.max_retries,
   });

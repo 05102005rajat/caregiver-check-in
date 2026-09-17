@@ -76,6 +76,14 @@ export const setupFormSchema = z.object({
       })
     )
     .max(4),
+  watch_items: z
+    .array(
+      z.object({
+        description: shortNonEmptyText(300),
+        always_alert: z.boolean(),
+      })
+    )
+    .max(10),
   rules: z.object({
     retry_after_minutes: z.number().int().min(1).max(1440),
     max_retries: z.number().int().min(0).max(10),

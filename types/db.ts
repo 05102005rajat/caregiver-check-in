@@ -57,6 +57,16 @@ export interface FamilyContact {
   sms_opt_in_confirmed: boolean;
 }
 
+export interface WatchItem {
+  id: string;
+  parent_id: string;
+  /** The caregiver's own words, e.g. "left knee pain since her fall in June". */
+  description: string;
+  /** false: only alert if it sounds worse than usual. true: always alert when raised. */
+  always_alert: boolean;
+  created_at: string;
+}
+
 export interface EscalationRules {
   parent_id: string;
   retry_after_minutes: number;
@@ -137,6 +147,10 @@ export interface SetupFormPayload {
     notify_on_miss: boolean;
     notify_on_concern: boolean;
     sms_opt_in_confirmed: boolean;
+  }>;
+  watch_items: Array<{
+    description: string;
+    always_alert: boolean;
   }>;
   rules: {
     retry_after_minutes: number;

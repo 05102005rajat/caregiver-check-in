@@ -15,6 +15,8 @@ export interface EvalCase {
   /** Why this case exists — what would break in production if it regressed. */
   rationale: string;
   transcript: string;
+  /** Watch items the family has already flagged as known (lib/claude summarizeCall). */
+  knownIssues?: string[];
   expect: {
     /** Medication names that must appear as confirmed taken. */
     medsConfirmed?: string[];
@@ -160,6 +162,43 @@ export const EVAL_CASES: EvalCase[] = [
       AI("I understand. I'll let your family know so you can talk it through with them.")
     ),
     expect: { medsMissed: ["Lisinopril"], anyConcern: true },
+  },
+  {
+    id: "watch-item-suppressed",
+    rationale:
+      "A family who told us about the bad knee should not be texted about it daily. This is the whole point of watch items.",
+    knownIssues: ["left knee pain, ongoing since her fall in June"],
+    transcript: convo(
+      AI("How are you feeling today?"),
+      USER("Knee's grumbling away as usual, nothing I'm not used to."),
+      AI("Have you taken your Lisinopril?"),
+      USER("Yes, with breakfast.")
+    ),
+    expect: { medsConfirmed: ["Lisinopril"], anyConcern: false },
+  },
+  {
+    id: "watch-item-worsening-still-alerts",
+    rationale:
+      "The dangerous failure mode of watch items: suppressing a known issue even when it gets materially worse. Must still alert.",
+    knownIssues: ["left knee pain, ongoing since her fall in June"],
+    transcript: convo(
+      AI("How are you feeling today?"),
+      USER("My knee is much worse today — I couldn't get up the stairs, had to sleep downstairs."),
+      AI("That sounds like a real change. I'll let your family know.")
+    ),
+    expect: { anyConcern: true, concernMatches: ["knee", "stairs", "wors", "mobil", "walk"] },
+  },
+  {
+    id: "watch-item-does-not-mask-unrelated",
+    rationale:
+      "A watch item must only raise the bar for its own topic. Suppressing an unrelated new symptom would be a serious safety regression.",
+    knownIssues: ["left knee pain, ongoing since her fall in June"],
+    transcript: convo(
+      AI("How are you feeling today?"),
+      USER("Knee's the same as always. But I've been very short of breath since yesterday."),
+      AI("I'll pass that along to your family.")
+    ),
+    expect: { anyConcern: true, concernMatches: ["breath", "short"] },
   },
   {
     id: "hangup-no-content",
