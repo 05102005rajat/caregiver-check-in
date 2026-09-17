@@ -186,19 +186,34 @@ async function main() {
     //     mode is silent: telling someone their parent's transcripts are gone while rows
     //     remain is worse than not offering deletion at all. Mirrors the ordered sweep in
     //     /api/parents/delete rather than trusting cascade rules.
-    for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
-      await admin.from(t).delete().eq("parent_id", parentA);
+    // escalation_rules is keyed by parent_id with no `id` column, so selecting "id" there
+    // errors, leaves count undefined, and the table silently drops out of the residue
+    // total — the one check whose entire job is "nothing was left behind".
+    const CLEANUP_TABLES = ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"] as const;
+    let deleteErrors = 0;
+    for (const t of CLEANUP_TABLES) {
+      const { error: delError } = await admin.from(t).delete().eq("parent_id", parentA);
+      if (delError) deleteErrors += 1;
     }
     await admin.from("parents").delete().eq("id", parentA);
 
     let residue = 0;
-    for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
-      const { count } = await admin.from(t).select("id", { count: "exact", head: true }).eq("parent_id", parentA);
+    for (const t of CLEANUP_TABLES) {
+      const { count, error: countError } = await admin.from(t).select("parent_id", { count: "exact", head: true }).eq("parent_id", parentA);
+      // An unreadable table can't be claimed as empty.
+      if (countError) residue += 1;
       residue += count ?? 0;
     }
     const { count: parentsLeft } = await admin.from("parents").select("id", { count: "exact", head: true }).eq("id", parentA);
-    check("deleting a household leaves no transcripts or other rows behind", residue === 0 && (parentsLeft ?? 0) === 0, `${residue} child row(s), ${parentsLeft} parent row(s) remain`);
-    parentA = ""; // already removed; skip the cleanup sweep below
+    const fullyDeleted = residue === 0 && (parentsLeft ?? 0) === 0 && deleteErrors === 0;
+    check(
+      "deleting a household leaves no transcripts or other rows behind",
+      fullyDeleted,
+      `${residue} child row(s), ${parentsLeft} parent row(s) remain, ${deleteErrors} delete error(s)`
+    );
+    // Only skip the finally-sweep when everything really did go. Clearing this
+    // unconditionally would abandon probe rows in exactly the failure case where they exist.
+    if (fullyDeleted) parentA = "";
 
   } finally {
     // Clean up regardless of outcome — a failed run must not leave probe households behind.

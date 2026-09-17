@@ -8,6 +8,7 @@
 import { summarizeCall } from "@/lib/claude";
 import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, scanForConcernKeywords } from "@/lib/safety";
 import { EVAL_CASES } from "./cases";
+import type { EvalCase } from "./cases";
 import { buildReport } from "./score";
 import type { CallSummary } from "@/lib/claude";
 
@@ -16,10 +17,27 @@ import type { CallSummary } from "@/lib/claude";
  * deterministic backstops. Measuring the model alone would misreport the system — the
  * backstops exist precisely because the model isn't reliable on its own for these.
  */
-function applyProductionBackstops(transcript: string, extracted: CallSummary): CallSummary {
+function applyProductionBackstops(testCase: EvalCase, extracted: CallSummary): CallSummary {
+  const { transcript, scheduledMeds } = testCase;
   const keywordMatches = scanForConcernKeywords(transcript, DEFAULT_CONCERN_KEYWORDS);
   const noResponse = !hasParentResponse(transcript) ? ["Parent didn't respond — call ended without a conversation"] : [];
-  return { ...extracted, concerns: Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse])) };
+
+  // Same fuzzy validation the webhook applies against the call's scheduled_meds snapshot:
+  // a medication Claude invented is dropped there, so counting it here as grounds to alert
+  // would score a pass for a call production would stay silent on.
+  const known = (scheduledMeds ?? []).map((m) => m.toLowerCase());
+  const isKnown = (name: string) => {
+    const lower = name.toLowerCase();
+    if (lower.length < 4) return known.includes(lower);
+    return known.some((k) => k.length >= 4 && (k.includes(lower) || lower.includes(k)));
+  };
+
+  return {
+    ...extracted,
+    meds_confirmed: extracted.meds_confirmed.filter(isKnown),
+    meds_missed: extracted.meds_missed.filter(isKnown),
+    concerns: Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse])),
+  };
 }
 
 async function main() {
@@ -29,7 +47,10 @@ async function main() {
   for (const testCase of EVAL_CASES) {
     process.stdout.write(`  ${testCase.id}… `);
     try {
-      outputs.push(applyProductionBackstops(testCase.transcript, await summarizeCall(testCase.transcript, testCase.knownIssues ?? [])));
+      const raw = await summarizeCall(testCase.transcript, testCase.knownIssues ?? [], []);
+      // Injection cases are scored on the model alone — the backstops would otherwise
+      // supply a concern regardless of whether the model was hijacked.
+      outputs.push(testCase.assertRawModel ? raw : applyProductionBackstops(testCase, raw));
       process.stdout.write("done\n");
     } catch (err) {
       process.stdout.write("ERROR\n");

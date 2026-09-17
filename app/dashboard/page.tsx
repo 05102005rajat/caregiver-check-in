@@ -100,7 +100,10 @@ export default async function DashboardPage() {
         <p className="text-slate-500 mt-1">{parent.name}&apos;s check-in history</p>
       </div>
 
-      {!parent.consent_given_at && calls.length > 0 && (
+      {/* Mirrors the cron's own gate (a call with status <> 'failed'), not merely "a call
+          row exists" — a parent whose only calls were rejected by Vapi still gets dialed,
+          so claiming check-ins are paused would contradict what the system actually does. */}
+      {!parent.consent_given_at && calls.some((c) => c.status !== "failed") && (
         // Without this the caregiver has no way to discover that automatic calls are
         // blocked — they'd just notice calls quietly stopping and assume it was broken.
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-4 text-sm text-amber-900">

@@ -45,8 +45,9 @@ export default function Home() {
             </Link>
           </div>
           <p className="text-sm text-slate-500 max-w-md mx-auto">
-            Alerts currently go out by email. Text messaging is being added once carrier
-            verification completes.
+            Alerts currently reach family by email, so add an email address for anyone who
+            should be notified. Text messaging is being added once carrier verification
+            completes.
           </p>
         </section>
 

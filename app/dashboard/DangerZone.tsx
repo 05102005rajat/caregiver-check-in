@@ -13,19 +13,25 @@ export default function DangerZone({ parentName }: { parentName: string }) {
   async function remove() {
     setBusy(true);
     setError("");
-    const res = await fetch("/api/parents/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm_name: typed }),
-    });
-    if (res.ok) {
-      router.push("/setup");
-      router.refresh();
-    } else {
+    try {
+      const res = await fetch("/api/parents/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm_name: typed }),
+      });
+      if (res.ok) {
+        router.push("/setup");
+        router.refresh();
+        return;
+      }
       const body = await res.json().catch(() => ({}));
       setError(body.error ?? "Couldn't delete. Try again.");
-      setBusy(false);
+    } catch {
+      // Without this an offline tab sits on "Deleting…" indefinitely, leaving someone
+      // unable to tell whether their parent's transcripts were deleted or not.
+      setError("Couldn't reach the server — nothing was deleted. Check your connection and try again.");
     }
+    setBusy(false);
   }
 
   if (!open) {
