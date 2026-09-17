@@ -76,6 +76,8 @@ export interface Call {
   concerns: string[] | null;
   /** Snapshot of the medication names actually due at call-creation time (see lib/dial.ts). */
   scheduled_meds: string[] | null;
+  /** Claude's read of how they sounded, persisted so change-over-time analysis is possible. */
+  mood: "good" | "okay" | "low" | "concerning" | "unknown" | null;
   created_at: string;
 }
 

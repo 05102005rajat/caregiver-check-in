@@ -214,6 +214,7 @@ export async function POST(request: Request) {
       summary: extracted.summary,
       meds_confirmed: { confirmed: medsConfirmed, missed: medsMissed, appointments_acknowledged: appointmentsAcknowledged },
       concerns,
+      mood: extracted.mood,
     })
     .eq("id", call.id);
   if (finalUpdateError) console.error(`Failed to record analysis for call ${call.id}`, finalUpdateError);

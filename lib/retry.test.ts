@@ -16,6 +16,7 @@ function call(overrides: Partial<Call> = {}): Call {
     meds_confirmed: null,
     concerns: null,
     scheduled_meds: null,
+    mood: null,
     created_at: "2026-09-10T16:00:00.000Z",
     ...overrides,
   };
