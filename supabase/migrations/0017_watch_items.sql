@@ -8,7 +8,7 @@
 -- A watch item says: "we know about this, ask after it, but only tell us if it changes."
 -- It also gives Rosie something to follow up on by name, which is what makes a check-in
 -- feel like a person remembering rather than a form being read out.
-create table watch_items (
+create table if not exists watch_items (
   id uuid primary key default gen_random_uuid(),
   parent_id uuid not null references parents(id) on delete cascade,
   -- Free text in the caregiver's own words, e.g. "left knee pain since her fall in June".
@@ -19,10 +19,11 @@ create table watch_items (
   created_at timestamptz default now()
 );
 
-create index watch_items_parent_idx on watch_items (parent_id);
+create index if not exists watch_items_parent_idx on watch_items (parent_id);
 
 alter table watch_items enable row level security;
 
+drop policy if exists "caregivers can manage their parents' watch items" on watch_items;
 create policy "caregivers can manage their parents' watch items"
   on watch_items for all
   using (parent_id in (select id from parents where caregiver_id = auth.uid()))
@@ -30,6 +31,15 @@ create policy "caregivers can manage their parents' watch items"
 
 -- Extends the atomic setup save (0013) to cover watch items. Same transaction, same
 -- replace-wholesale semantics as the other child tables.
+--
+-- Adding a parameter does NOT replace the previous function: Postgres treats a different
+-- argument list as a separate overload, leaving two functions with this name. That both
+-- makes an unqualified REVOKE ambiguous (error 42725) and leaves a stale 13-argument
+-- version callable that would silently ignore watch items. Drop it explicitly by
+-- signature first.
+drop function if exists save_parent_setup(
+  uuid, text, text, text, text, text, text, text, jsonb, jsonb, jsonb, int, int
+);
 create or replace function save_parent_setup(
   p_caregiver_id uuid,
   p_caregiver_email text,
@@ -120,4 +130,6 @@ begin
 end;
 $$;
 
-revoke execute on function save_parent_setup from anon, authenticated;
+revoke execute on function save_parent_setup(
+  uuid, text, text, text, text, text, text, text, jsonb, jsonb, jsonb, int, int, jsonb
+) from anon, authenticated;
