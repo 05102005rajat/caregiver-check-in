@@ -107,7 +107,12 @@ export interface Message {
   sent_at: string;
   /** Provider message id — Twilio SID for SMS, SendGrid message id for email. */
   twilio_sid: string | null;
+  /** Whether the provider accepted the send request — NOT whether it arrived. */
   status: "sent" | "failed";
+  /** What the carrier actually did with it, via Twilio status callback. */
+  delivery_status: "queued" | "sending" | "sent" | "delivered" | "undelivered" | "failed" | null;
+  delivered_at: string | null;
+  delivery_error: string | null;
   channel: "sms" | "email";
   error: string | null;
 }
