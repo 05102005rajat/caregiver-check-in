@@ -93,8 +93,10 @@ export interface Message {
   recipient: string | null;
   body: string;
   sent_at: string;
+  /** Provider message id — Twilio SID for SMS, SendGrid message id for email. */
   twilio_sid: string | null;
   status: "sent" | "failed";
+  channel: "sms" | "email";
   error: string | null;
 }
 
