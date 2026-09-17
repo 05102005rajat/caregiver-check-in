@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { describeChanges, needsAttention } from "@/lib/insights";
-import type { Call, Parent } from "@/types/db";
+import type { Call, Message, Parent } from "@/types/db";
 import CallRow from "./CallRow";
 
 export const dynamic = "force-dynamic";
@@ -54,6 +54,24 @@ export default async function DashboardPage() {
     supabase.from("cron_heartbeat").select("last_tick_at").eq("id", true).maybeSingle(),
   ]);
   const calls = (callsData ?? []) as Call[];
+
+  // Whether the family was actually reached matters as much as what was said — a
+  // caregiver assuming a text went out when it silently failed is the worst outcome here.
+  const { data: messageRows } = calls.length
+    ? await supabase
+        .from("messages")
+        .select("*")
+        .in(
+          "call_id",
+          calls.map((c) => c.id)
+        )
+    : { data: [] };
+  const messagesByCall = new Map<string, Message[]>();
+  for (const message of (messageRows ?? []) as Message[]) {
+    const bucket = messagesByCall.get(message.call_id);
+    if (bucket) bucket.push(message);
+    else messagesByCall.set(message.call_id, [message]);
+  }
 
   const lastTickAt = heartbeatRow?.last_tick_at ? new Date(heartbeatRow.last_tick_at as string) : null;
   const minutesSinceLastTick = lastTickAt ? (Date.now() - lastTickAt.getTime()) / 60000 : null;
@@ -150,7 +168,7 @@ export default async function DashboardPage() {
       <div className="space-y-3">
         {calls.length === 0 && <p className="text-sm text-slate-400">No calls yet.</p>}
         {calls.map((call) => (
-          <CallRow key={call.id} call={call} />
+          <CallRow key={call.id} call={call} messages={messagesByCall.get(call.id) ?? []} />
         ))}
       </div>
     </Shell>
