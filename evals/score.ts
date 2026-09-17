@@ -30,6 +30,19 @@ function rate(numerator: number, denominator: number): number {
   return denominator === 0 ? 1 : numerator / denominator;
 }
 
+/**
+ * Whether the family actually gets told — mirrors `hasConcern` in the webhook.
+ *
+ * Scoring the `concerns` array alone measured something narrower than the real decision:
+ * a transcript where the parent plainly refuses a medication is escalated in production
+ * because meds_missed is non-empty, even if the model leaves `concerns` empty. Judging
+ * the pipeline by a field rather than by its outcome produced a "failure" for behaviour
+ * that is correct end to end.
+ */
+function wouldAlert(output: CallSummary): boolean {
+  return output.concerns.length > 0 || output.meds_missed.length > 0 || output.mood === "concerning" || output.mood === "unknown";
+}
+
 /** Scores one model output against what the case says must be true. */
 export function scoreCase(testCase: EvalCase, output: CallSummary): CaseResult {
   const failures: string[] = [];
@@ -49,11 +62,12 @@ export function scoreCase(testCase: EvalCase, output: CallSummary): CaseResult {
     failures.push(`hallucinated missed meds: ${output.meds_missed.join(", ")}`);
   }
 
-  const raisedConcern = output.concerns.length > 0;
-  if (expect.anyConcern && !raisedConcern) failures.push("missed a concern that should have been reported");
-  if (!expect.anyConcern && raisedConcern) failures.push(`false alarm: ${output.concerns.join(", ")}`);
+  const alerted = wouldAlert(output);
+  if (expect.anyConcern && !alerted) failures.push("family would NOT have been alerted, but should have been");
+  if (!expect.anyConcern && alerted)
+    failures.push(`false alarm: concerns=[${output.concerns.join(", ")}] missed=[${output.meds_missed.join(", ")}] mood=${output.mood}`);
 
-  if (expect.concernMatches && raisedConcern) {
+  if (expect.concernMatches && output.concerns.length > 0) {
     const blob = output.concerns.join(" ").toLowerCase();
     if (!expect.concernMatches.some((m) => blob.includes(m.toLowerCase()))) {
       failures.push(`concern reported but not the right one (got: ${output.concerns.join(", ")})`);
@@ -71,9 +85,9 @@ export function buildReport(cases: EvalCase[], outputs: CallSummary[]): Report {
   const results = cases.map((c, i) => scoreCase(c, outputs[i]));
 
   const shouldConcern = cases.filter((c) => c.expect.anyConcern);
-  const caughtConcern = shouldConcern.filter((c) => outputs[cases.indexOf(c)].concerns.length > 0);
+  const caughtConcern = shouldConcern.filter((c) => wouldAlert(outputs[cases.indexOf(c)]));
   const shouldNotConcern = cases.filter((c) => !c.expect.anyConcern);
-  const falseAlarms = shouldNotConcern.filter((c) => outputs[cases.indexOf(c)].concerns.length > 0);
+  const falseAlarms = shouldNotConcern.filter((c) => wouldAlert(outputs[cases.indexOf(c)]));
 
   const medCases = cases.filter((c) => c.expect.medsConfirmed || c.expect.medsMissed);
   const medCorrect = medCases.filter((c) => {

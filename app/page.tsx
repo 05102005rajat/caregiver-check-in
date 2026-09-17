@@ -44,10 +44,9 @@ export default function Home() {
               Set up check-ins
             </Link>
           </div>
-          <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 text-left max-w-md mx-auto">
-            Heads up: text alerts to family are temporarily not sending while our phone
-            number finishes carrier verification. Calls, transcripts, and the dashboard
-            all work normally in the meantime.
+          <p className="text-sm text-slate-500 max-w-md mx-auto">
+            Alerts currently go out by email. Text messaging is being added once carrier
+            verification completes.
           </p>
         </section>
 

@@ -32,7 +32,14 @@ describe("scoreCase", () => {
   it("fails when a concern that mattered was missed", () => {
     const result = scoreCase(testCase({ anyConcern: true }), output({ concerns: [] }));
     expect(result.passed).toBe(false);
-    expect(result.failures[0]).toContain("missed a concern");
+    expect(result.failures[0]).toContain("would NOT have been alerted");
+  });
+
+  it("counts a missed medication as an alert, matching what production actually does", () => {
+    // Production escalates on meds_missed even when `concerns` is empty, so scoring the
+    // concerns array alone would fail behaviour that is correct end to end.
+    const result = scoreCase(testCase({ anyConcern: true }), output({ concerns: [], meds_missed: ["Lisinopril"] }));
+    expect(result.passed).toBe(true);
   });
 
   it("fails on a false alarm", () => {
