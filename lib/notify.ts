@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendSms } from "@/lib/twilio";
 import { sendEmail } from "@/lib/email";
+import { log } from "@/lib/log";
 import type { FamilyContact } from "@/types/db";
 
 type NotifyFlag = "notify_on_miss" | "notify_on_concern";
@@ -27,10 +28,11 @@ async function sendAlert(
   try {
     const sid = await sendSms(phone, body);
     await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
+    log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
   } catch (err) {
     // Don't let a Twilio failure be silently equivalent to "the family was told" —
     // record it so it's visible (e.g. via Supabase) rather than only in server logs.
-    console.error(`Failed to SMS ${contactId ?? "caregiver"}`, err);
+    log.error("notify.sms_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: phone, err });
     await db.from("messages").insert({
       ...common,
       recipient: phone,
@@ -46,7 +48,7 @@ async function sendAlert(
     const messageId = await sendEmail(email, "Caregiver Check-In update", body);
     await db.from("messages").insert({ ...common, recipient: email, twilio_sid: messageId, status: "sent", channel: "email" });
   } catch (err) {
-    console.error(`Failed to email ${contactId ?? "caregiver"}`, err);
+    log.error("notify.email_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: email, err });
     await db.from("messages").insert({
       ...common,
       recipient: email,
@@ -97,7 +99,7 @@ export async function notifyFamilyContacts(
       .limit(1)
       .maybeSingle();
     if (recent) {
-      console.info(`Suppressed duplicate alert for parent ${parentId} (fingerprint ${fingerprint})`);
+      log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint });
       return;
     }
   }

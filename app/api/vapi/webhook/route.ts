@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
+import { log } from "@/lib/log";
 import { scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
@@ -87,7 +88,7 @@ export async function POST(request: Request) {
   }
 
   if (!call) {
-    console.error(`No calls row for vapi_call_id ${vapiCallId}`);
+    log.error("webhook.unmatched_call", { vapi_call_id: vapiCallId, ended_reason: endedReason });
     return NextResponse.json({ ok: true });
   }
 
@@ -124,8 +125,10 @@ export async function POST(request: Request) {
     .select()
     .maybeSingle();
   if (!claimed) {
+    log.info("webhook.duplicate_delivery_ignored", { call_id: call.id, vapi_call_id: vapiCallId });
     return NextResponse.json({ ok: true }); // lost the race to a concurrent delivery
   }
+  log.info("webhook.received", { call_id: call.id, parent_id: call.parent_id, vapi_call_id: vapiCallId, status: targetStatus });
   if (targetStatus === "no_answer") {
     return NextResponse.json({ ok: true });
   }
@@ -168,7 +171,7 @@ export async function POST(request: Request) {
   try {
     extracted = await summarizeCall(transcript);
   } catch (err) {
-    console.error("Claude summarization failed", err);
+    log.error("webhook.summarize_failed", { call_id: call.id, parent_id: call.parent_id, err });
     const { error } = await db
       .from("calls")
       .update({ status: "completed", transcript, concerns: keywordMatches })

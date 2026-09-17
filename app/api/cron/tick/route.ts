@@ -15,6 +15,7 @@ import {
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
+import { log } from "@/lib/log";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
@@ -391,7 +392,12 @@ export async function GET(request: Request) {
     .from("cron_heartbeat")
     .update({ last_tick_at: now.toISOString() })
     .eq("id", true);
-  if (heartbeatError) console.error("Failed to update cron heartbeat", heartbeatError);
+  if (heartbeatError) log.error("cron.heartbeat_failed", { err: heartbeatError });
+
+  // Every tick leaves a trace, including the quiet ones — "the scheduler ran and decided
+  // there was nothing to do" and "the scheduler never ran" look identical otherwise, and
+  // that distinction is the whole question when a call doesn't happen.
+  log.info("cron.tick", { parents: parents.length, calls_triggered: callsTriggered });
 
   return NextResponse.json({ ok: true, callsTriggered });
 }

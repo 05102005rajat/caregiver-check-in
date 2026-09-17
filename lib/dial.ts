@@ -1,4 +1,5 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { log } from "@/lib/log";
 import { triggerVapiCall } from "@/lib/vapi";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import type { Appointment, Medication, Parent } from "@/types/db";
@@ -51,10 +52,12 @@ export async function dialAndRecord(
     // real signal, or — on the very first dial — skipped the entire retry budget outright.
     // Routing this into the same no_answer/retry_count pipeline as a real no-answer means
     // it gets the same number of chances before genuinely giving up and alerting family.
-    console.error("Vapi call trigger failed", err);
+    log.error("dial.trigger_failed", { call_id: callId, parent_id: parent.id, err });
     await db.from("calls").update({ status: "no_answer", called_at: new Date().toISOString() }).eq("id", callId);
     return;
   }
+
+  log.info("dial.placed", { call_id: callId, parent_id: parent.id, vapi_call_id: vapiCall.id, meds: medsDue.length });
 
   const { error } = await db
     .from("calls")
@@ -64,7 +67,7 @@ export async function dialAndRecord(
     // The call was actually placed — don't mark this 'failed', that would misreport a
     // successful dial and orphan the row from the webhook's vapi_call_id lookup for no reason
     // beyond our own bookkeeping hiccup. Leave status as-is and just log for investigation.
-    console.error(`Failed to record vapi_call_id ${vapiCall.id} for calls row ${callId}`, error);
+    log.error("dial.persist_vapi_id_failed", { call_id: callId, parent_id: parent.id, vapi_call_id: vapiCall.id, err: error });
   }
 }
 
