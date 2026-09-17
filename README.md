@@ -84,14 +84,15 @@ tested without re-running an LLM.
 "We use Claude" isn't a safety argument. `evals/` scores the pipeline against transcripts
 covering the cases where being wrong actually matters — deliberately split between *must
 catch* (fall, chest pain, a concern mentioned after saying they're fine, refusal,
-uncertainty) and *must not over-report* (a chronic complaint the person calls routine).
+uncertainty) and *must not over-report* (a chronic complaint the person calls routine, or
+a watch item the family already told us about).
 
 ```bash
 npm run eval     # spends real Anthropic tokens; run on prompt/model changes
 ```
 
 ```
-Passed:              12/12
+Passed:              15/15
 Concern recall:      100%   ← missing these is the dangerous direction
 False alarm rate:      0%   ← this is what burns caregivers out
 Medication accuracy: 100%
