@@ -21,25 +21,54 @@ async function sendAlert(
   body: string,
   fingerprint?: string
 ) {
+  // Honour opt-outs. The public form and every message promise that replying STOP or
+  // asking us to remove a number takes effect — a promise with no mechanism behind it is
+  // worse than not making it, and for SMS it's a compliance obligation, not a courtesy.
+  const { data: optOut } = await db
+    .from("sms_opt_ins")
+    .select("revoked_at")
+    .eq("phone", phone)
+    .not("revoked_at", "is", null)
+    .limit(1)
+    .maybeSingle();
+  const suppressed = Boolean(optOut);
+  if (suppressed) {
+    log.info("notify.suppressed_opt_out", { parent_id: parentId, call_id: callId, recipient: phone });
+  }
+
   const common = { parent_id: parentId, call_id: callId, contact_id: contactId, fingerprint, body };
   // `recipient` is denormalized on purpose: contact_id goes null if that contact is
   // later removed from the setup form (ON DELETE SET NULL), and "who did we actually
   // notify" has to stay answerable after the fact for a care product.
-  try {
-    const sid = await sendSms(phone, body);
-    await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
-    log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
-  } catch (err) {
-    // Don't let a Twilio failure be silently equivalent to "the family was told" —
-    // record it so it's visible (e.g. via Supabase) rather than only in server logs.
-    log.error("notify.sms_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: phone, err });
+  if (suppressed) {
+    // Recorded rather than silently skipped, so the caregiver can see this person wasn't
+    // contacted and why. Email is a separate channel and a separate consent — opting out
+    // of texts shouldn't silently cut someone off from everything.
     await db.from("messages").insert({
       ...common,
       recipient: phone,
       status: "failed",
       channel: "sms",
-      error: err instanceof Error ? err.message : String(err),
+      delivery_status: "undelivered",
+      error: "Recipient has opted out of text messages",
     });
+  } else {
+    try {
+      const sid = await sendSms(phone, body);
+      await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
+      log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
+    } catch (err) {
+      // Don't let a Twilio failure be silently equivalent to "the family was told" —
+      // record it so it's visible (e.g. via Supabase) rather than only in server logs.
+      log.error("notify.sms_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: phone, err });
+      await db.from("messages").insert({
+        ...common,
+        recipient: phone,
+        status: "failed",
+        channel: "sms",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   if (!email) return;

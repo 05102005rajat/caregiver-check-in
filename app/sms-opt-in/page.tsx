@@ -15,8 +15,9 @@ export default function SmsOptInPage() {
         or something sounds concerning, we notify the family members they&apos;ve chosen.
       </p>
       <p>
-        Use this form to sign yourself up for those alerts. Texting is optional — you can submit this
-        form without agreeing to receive messages.
+        Use this form to record your consent to receive those alerts. You&apos;ll start receiving them
+        once the family member who set up the check-ins adds you as a contact. Texting is optional —
+        you can submit this form without agreeing to receive messages.
       </p>
 
       <div className="not-prose border border-slate-200 rounded-xl p-5 bg-slate-50 my-2">

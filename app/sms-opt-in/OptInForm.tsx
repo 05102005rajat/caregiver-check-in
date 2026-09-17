@@ -2,13 +2,7 @@
 
 import { useState } from "react";
 
-/**
- * Stored verbatim alongside the opt-in, so what someone agreed to stays answerable even
- * after this page is edited. Wording follows Twilio's required elements: who is sending,
- * what kind of messages, frequency, rates, and both HELP and STOP.
- */
-export const CONSENT_TEXT =
-  "By checking this box, I agree to receive informational SMS text messages from Caregiver Check-In about my family member's daily check-in calls — sent only when a check-in is missed or a concern is detected, typically no more than a few messages per week. Message and data rates may apply. Reply HELP for help or STOP to unsubscribe at any time.";
+import { CONSENT_TEXT } from "@/lib/consent";
 
 export default function OptInForm() {
   const [name, setName] = useState("");
@@ -27,7 +21,7 @@ export default function OptInForm() {
       const res = await fetch("/api/sms-opt-in", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, phone, email, consented, consent_text: CONSENT_TEXT }),
+        body: JSON.stringify({ name, phone, email, consented, terms_accepted: agreedTerms }),
       });
       if (res.ok) {
         setStatus("done");
@@ -48,8 +42,11 @@ export default function OptInForm() {
         <p className="font-medium text-emerald-900">Thanks — you&apos;re all set.</p>
         <p className="text-sm text-emerald-800 mt-1">
           {consented
-            ? "We've recorded your consent to receive text alerts. You can reply STOP to any message to unsubscribe at any time."
-            : "We've recorded your details. You did not opt in to text messages, so we won't send you any."}
+            ? // Consent alone doesn't enrol anyone — alerts are sent to the contacts a caregiver
+              // lists for a specific person. Saying "you're now receiving alerts" would be a
+              // promise this form can't keep on its own.
+              "We've recorded your consent to receive text alerts. You'll start getting them once the family member setting up check-ins adds you as a contact. You can reply STOP to any message to unsubscribe at any time."
+            : "We've recorded your details, and that you did not agree to text messages — so we won't send you any."}
         </p>
       </div>
     );
