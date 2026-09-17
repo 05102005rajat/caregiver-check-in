@@ -102,6 +102,27 @@ system that ships rather than the model in isolation. It has already earned its 
 first run found that a call the parent hangs up on immediately produced no concern about
 half the time, which is now determined structurally instead of being left to the model.
 
+### Tenant isolation is tested adversarially
+
+The most sensitive row in this system is a transcript of an elderly person's
+conversation, and the boundary protecting it is RLS plus a hand-maintained "derive
+ownership from the session, never the request body" convention — both invisible to the
+type checker and to every other test here.
+
+```bash
+npm run security   # creates two throwaway caregivers, attacks one from the other, cleans up
+```
+
+17 checks, phrased as attacks: caregiver B attempting to read, alter, or delete A's
+parent, medications, contacts, watch items, calls, messages and transcripts, plus the
+privilege-escalation path through the setup RPC, plus the same attempted anonymously.
+Two controls confirm the suite isn't passing vacuously.
+
+This is not theoretical: a `SECURITY DEFINER` RPC taking `caregiver_id` as a parameter
+was briefly callable with the public anon key, which would have let anyone rewrite
+another household's parent phone number and redirect their check-in calls. Nothing in CI
+could have caught that. This does.
+
 ---
 
 ## Reliability

@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "TZ=UTC vitest run",
-    "eval": "tsx evals/run.ts"
+    "eval": "tsx evals/run.ts",
+    "security": "tsx security/isolation.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
