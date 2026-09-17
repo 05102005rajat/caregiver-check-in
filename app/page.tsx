@@ -12,7 +12,7 @@ const STEPS = [
   },
   {
     title: "You stay in the loop",
-    body: "Review the full transcript and summary on your dashboard any time. If something needs attention, family contacts are notified. A healthy check-in sends no notification at all.",
+    body: "Review the full transcript and summary on your dashboard any time. If something needs attention, family contacts are notified. A healthy check-in sends nothing at all.",
   },
 ];
 
@@ -32,7 +32,7 @@ export default function Home() {
             </h1>
             <p className="text-slate-500 text-lg max-w-lg mx-auto">
               An AI assistant calls your parent every day, confirms their medications and
-              appointments, and only texts you when something actually needs your
+              appointments, and only tells you when something actually needs your
               attention.
             </p>
           </div>
