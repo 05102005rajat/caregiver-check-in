@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scanForConcernKeywords } from "./safety";
+import { scanForConcernKeywords, hasParentResponse } from "./safety";
 
 const KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
@@ -23,5 +23,30 @@ describe("scanForConcernKeywords", () => {
 
   it("returns an empty array when nothing matches", () => {
     expect(scanForConcernKeywords("I had a lovely lunch and a nap", KEYWORDS)).toEqual([]);
+  });
+});
+
+describe("hasParentResponse", () => {
+  it("is false for the real transcript of a call the parent hung up on", () => {
+    // Verbatim shape of a production call where the parent answered and immediately hung up.
+    expect(hasParentResponse("AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?\n")).toBe(false);
+  });
+
+  it("is true as soon as the parent says anything, even one word", () => {
+    expect(hasParentResponse("AI: How are you?\nUser: Fine.\n")).toBe(true);
+  });
+
+  it("tolerates alternative speaker labels rather than assuming one transcript format", () => {
+    expect(hasParentResponse("AI: Hello?\nCustomer: yes hello")).toBe(true);
+    expect(hasParentResponse("Assistant: Hello?\nHuman: hi")).toBe(true);
+  });
+
+  it("is false for an empty or whitespace transcript", () => {
+    expect(hasParentResponse("")).toBe(false);
+    expect(hasParentResponse("   \n  ")).toBe(false);
+  });
+
+  it("does not count the assistant merely saying the word 'user'", () => {
+    expect(hasParentResponse("AI: I'll let the user know about that.\n")).toBe(false);
   });
 });

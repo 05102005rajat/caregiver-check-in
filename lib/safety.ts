@@ -1,3 +1,6 @@
+/** Fallback list when a parent has no custom concern_keywords configured. */
+export const DEFAULT_CONCERN_KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -15,4 +18,21 @@ function escapeRegExp(s: string): string {
  */
 export function scanForConcernKeywords(transcript: string, keywords: string[]): string[] {
   return keywords.filter((k) => new RegExp(`\\b${escapeRegExp(k)}\\b`, "i").test(transcript));
+}
+
+/**
+ * Whether the parent actually said anything at all.
+ *
+ * A call where they answer and immediately hang up produces a transcript containing only
+ * the assistant's greeting. That is NOT a healthy check-in — nobody confirmed a
+ * medication and nobody confirmed they're okay — but it also isn't a no-answer, so it
+ * lands as "completed" and looks fine.
+ *
+ * The evaluation set (evals/cases.ts, case `hangup-no-content`) showed Claude flags this
+ * only about half the time, which is exactly the kind of judgement that shouldn't be left
+ * to a model: a family silently never hearing that their parent hung up is the failure
+ * this product exists to prevent. Determined structurally instead.
+ */
+export function hasParentResponse(transcript: string): boolean {
+  return /^\s*(user|customer|human)\s*:/im.test(transcript);
 }

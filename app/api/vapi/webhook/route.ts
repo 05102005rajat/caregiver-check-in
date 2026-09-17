@@ -5,7 +5,7 @@ import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import { scanForConcernKeywords } from "@/lib/safety";
+import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
 import type { Appointment, Call, EscalationRules, Medication, Parent } from "@/types/db";
@@ -14,8 +14,6 @@ export const dynamic = "force-dynamic";
 
 // Vapi endedReason values that mean the call never actually connected to a person.
 const NO_ANSWER_REASONS = new Set(["customer-did-not-answer", "customer-busy", "voicemail", "no-answer"]);
-
-const DEFAULT_CONCERN_KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
 // Only validates the fields this route actually reads — Vapi's full event payload has
 // many more fields we don't touch, so this isn't a complete schema of their API.
@@ -210,7 +208,12 @@ export async function POST(request: Request) {
     console.warn(`Claude returned medication name(s) not matching call ${call.id}'s actual medications; dropped`);
   }
 
-  const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches]));
+  // Structural backstop, independent of what Claude concluded: if the parent never
+  // actually spoke, this was not a check-in, regardless of how the transcript reads.
+  // See lib/safety.hasParentResponse — the eval set showed the model only catches this
+  // about half the time, and "nobody heard from Mom" must never depend on a coin flip.
+  const noResponse = !hasParentResponse(transcript) ? ["Parent didn't respond — call ended without a conversation"] : [];
+  const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse]));
 
   const { error: finalUpdateError } = await db
     .from("calls")
