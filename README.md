@@ -1,157 +1,200 @@
 # Caregiver Check-In
 
-A web app where a caregiver sets up daily check-in calls for a parent or loved one. A
-scheduler calls the parent at the right times, confirms medications and appointments via
-an AI voice assistant (Vapi), and texts the family only when something needs attention.
+An AI assistant phones an aging parent every day, confirms their medications and
+appointments, and tells the family **only when something actually needs attention**.
 
-Full product spec: see `mvp-build-spec.md` if present, or the commit history — this repo
-was built incrementally against that spec, evening by evening.
+The product thesis is the last part. A system that reports everything is as useless to a
+caregiver as one that reports nothing — the moment alerts read as noise, people stop
+reading them, and then the one that matters gets ignored too. So a clean check-in sends
+no notification at all, and the dashboard leads with *what changed* rather than a wall of
+transcripts.
 
-## What it does
+The parent needs nothing but a phone. No app, no device, no wearable.
 
-1. A caregiver signs in (Supabase magic-link auth) and fills out `/setup`: their own
-   info, their parent's info, medications (with times and an optional "how to recognize
-   it" description), appointments, family contacts to notify, and escalation rules.
-2. A scheduler (`/api/cron/tick`, pinged externally every 5 minutes) finds medications
-   due in the next 5-minute window and places an outbound call via Vapi.
-3. The Vapi assistant ("Rosie") has a warm, scripted conversation: confirms meds, checks
-   in on appointments, asks if anything's needed, reads back what it heard.
-4. When the call ends, Vapi POSTs an end-of-call report to `/api/vapi/webhook`, which:
-   - Marks a no-answer/voicemail for retry (the cron retries per `escalation_rules`,
-     and sends a miss-alert SMS once retries are exhausted).
-   - Otherwise summarizes the transcript via Claude into structured JSON (meds
-     confirmed/missed, concerns, mood), **plus a deterministic keyword scan** of the
-     raw transcript as a backstop in case Claude fails or under-classifies.
-   - Texts family contacts only if something was missed or concerning ("no news is
-     good news" — a clean call sends no text). If a contact also has an email on file,
-     the same alert is sent by email too (`lib/email.ts`, via SendGrid) — a backup
-     channel with no carrier compliance gate, useful while SMS is pending Twilio
-     toll-free verification.
+---
 
-     **Known limitation:** the SendGrid sender is currently a personal Gmail address
-     (Single Sender Verification, not a real authenticated domain). Gmail enforces
-     DMARC on its own domain, so mail claiming to be `@gmail.com` but not actually sent
-     through Google's servers is **silently dropped** by any Gmail *recipient* — no
-     bounce, nothing in spam. Verified working to non-Gmail addresses (e.g. `.edu`).
-     Fix: buy a real domain and do SendGrid Domain Authentication instead of Single
-     Sender Verification.
-5. The caregiver can check `/dashboard` at any time to see recent calls (status,
-   summary, meds confirmed/missed, concerns) and expand any call's full transcript,
-   plus a health banner if the scheduler has gone quiet or a call is stuck.
+## How it works
 
-## First-call consent (spec section 8)
+```
+  setup (caregiver)                    every 5 min
+        │                                   │
+        ▼                                   ▼
+  parent · medications · appointments   scheduler ──► what's due now?
+  family contacts · escalation rules         │        (timezone-aware, DST-safe)
+                                             ▼
+                                        outbound call (Vapi) ──► parent
+                                             │
+                                             ▼
+                                        transcript
+                                             │
+                    ┌────────────────────────┼────────────────────────┐
+                    ▼                        ▼                        ▼
+            Claude extraction        keyword backstop        structural checks
+            meds/concerns/mood       (LLM-independent)       (did they speak at all?)
+                    └────────────────────────┼────────────────────────┘
+                                             ▼
+                                      change detection
+                              (vs. this parent's own baseline)
+                                             │
+                          ┌──────────────────┴──────────────────┐
+                          ▼                                     ▼
+                   nothing changed                        something changed
+                   → no notification                      → SMS + email, de-duplicated
+                                                          → surfaced on dashboard
+```
 
-California is all-party consent, so the assistant asks for it before doing anything
-else on a parent's very first call: *"Is now a good time to talk... this call may be
-recorded so your family can check summaries later — is that okay?"* (see the system
-prompt). The result is reported back via the `record_consent` Vapi Tool →
-`app/api/vapi/consent/route.ts`, which stamps `parents.consent_given_at`.
+1. **Setup** (`/setup`) — caregiver signs in via Supabase magic link and enters their
+   parent's details, medications (with times, optional date ranges for short courses, and
+   an optional "how to recognize it" description), appointments, and who to notify.
+   Saved as a single Postgres transaction.
+2. **Scheduler** (`/api/cron/tick`, pinged externally every 5 minutes) — finds what's due
+   in the parent's own timezone and places the call. Appointment-only days are covered
+   too, not just medication times.
+3. **The call** — Vapi assistant ("Rosie") confirms medications by name, follows up when
+   one isn't confirmed rather than just acknowledging it, mentions appointments, and asks
+   what the family should know.
+4. **Understanding** (`/api/vapi/webhook`) — Claude extracts structured facts; a
+   deterministic keyword scan and structural checks run independently so a model failure
+   can't silently drop a real emergency.
+5. **Deciding** — application code, not the model, decides what happens. Only genuine
+   changes against that parent's recent baseline are escalated.
+6. **Dashboard** (`/dashboard`) — leads with "is Mom okay, and does anything need me?",
+   then what changed, then call history with transcripts and alert delivery status.
 
-Until consent is recorded, `/api/cron/tick` still places the first call (so Rosie has a
-chance to ask), but blocks all *subsequent* automatic scheduled calls
-(`consentBlocksNewCalls` in `app/api/cron/tick/route.ts`) — it won't keep cold-calling a
-parent who hasn't consented. The caregiver's manual "Call now to test" button can also
-be used to (re)obtain consent if the first real call didn't get a clear answer.
+---
 
-## Monitoring
+## Safety architecture
 
-`/api/health` reports unhealthy (503) if `/api/cron/tick` hasn't run in the last 15
-minutes (point an external uptime monitor at it if you want a ping/alert outside the
-app). The `/dashboard` page shows the same signal as a banner, plus flags any call
-that's been stuck `in_progress` for more than 10 minutes — check it periodically
-instead of relying solely on family SMS, since a clean call intentionally sends no
-text ("no news is good news").
+Concern detection is deliberately **not** a single LLM call. Three independent layers,
+because the failure this product exists to prevent is a family never hearing that
+something was wrong:
 
-## Architecture
+| Layer | Catches | Independent of |
+|---|---|---|
+| Claude extraction | Nuance a keyword list can't — *"I just feel off, not myself"* | — |
+| Keyword scan (`lib/safety.ts`) | Emergency words if the model fails, errors, or under-classifies | The model |
+| Structural checks | Parent never actually spoke; empty transcripts; no-answer | The model *and* the transcript's content |
+
+The model answers **"what did they say?"**. Application code answers **"what do we do
+about it?"** — that separation is deliberate, so behaviour can be reasoned about and
+tested without re-running an LLM.
+
+### Measured, not asserted
+
+"We use Claude" isn't a safety argument. `evals/` scores the pipeline against transcripts
+covering the cases where being wrong actually matters — deliberately split between *must
+catch* (fall, chest pain, a concern mentioned after saying they're fine, refusal,
+uncertainty) and *must not over-report* (a chronic complaint the person calls routine).
+
+```bash
+npm run eval     # spends real Anthropic tokens; run on prompt/model changes
+```
+
+```
+Passed:              12/12
+Concern recall:      100%   ← missing these is the dangerous direction
+False alarm rate:      0%   ← this is what burns caregivers out
+Medication accuracy: 100%
+```
+
+The runner applies the same deterministic backstops as production, so it measures the
+system that ships rather than the model in isolation. It has already earned its keep: its
+first run found that a call the parent hangs up on immediately produced no concern about
+half the time, which is now determined structurally instead of being left to the model.
+
+---
+
+## Reliability
+
+Every duplicate-execution risk is **database-enforced**, not just guarded in application
+logic:
+
+| Risk | Guard |
+|---|---|
+| Two cron ticks dialing the same slot | `unique (parent_id, scheduled_for)` |
+| Two calls active for one parent at once | `calls_parent_active_unique` partial index |
+| Vapi redelivering an end-of-call webhook | Atomic conditional claim on the call's current status |
+| A retry racing another tick | Optimistic-concurrency claim on `(status, retry_count)` |
+| Telling a family the same thing twice | Alert fingerprints over structured facts, 20h window |
+| Partial setup writes | Single transaction (`save_parent_setup` RPC) |
+
+Other properties worth knowing:
+
+- **Failure is never silent.** A Vapi trigger failure routes into the same retry pipeline
+  as a genuine no-answer rather than burning the retry budget. A notification that fails
+  to send is recorded and shown to the caregiver as *"they were not notified"* — a
+  caregiver believing family was told when the text silently failed is the worst outcome
+  this system has.
+- **Delayed ticks recover.** "Due by now" rather than a narrow window, with a catch-up
+  cutoff so a badly-delayed tick reports a miss instead of placing a confusing call about
+  a medication from hours ago.
+- **DST-safe scheduling**, verified under a UTC system clock against both transition days.
+- **Structured JSON logging** carrying `parent_id`/`call_id` through scheduler → dial →
+  webhook → notification, so "why didn't Mom get her call?" is answerable by filtering
+  logs rather than reading them.
+
+---
+
+## Consent
+
+California is all-party consent. On a parent's first call the assistant asks for
+recording consent in its opening line, and the result is recorded via a Vapi tool →
+`/api/vapi/consent` → `parents.consent_given_at`.
+
+Until consent is recorded the scheduler places the first call (so Rosie can ask) but
+blocks all *subsequent* automatic calls — it won't repeatedly cold-call someone who
+hasn't agreed.
+
+SMS opt-in for family contacts is a **separate** consent: the caregiver entering a
+relative's number isn't that person's consent to be texted, so the setup form requires an
+explicit per-contact confirmation, enforced client- and server-side. Documented publicly
+at `/sms-consent`.
+
+---
+
+## Layout
 
 ```
 /app
-  /page.tsx                    landing page
-  /login, /auth/callback       Supabase magic-link auth
-  /setup                       the caregiver setup form
-  /api/parents                 saves the setup form (upserts caregiver+parent,
-                                replaces meds/appointments/contacts/rules)
-  /api/cron/tick                the scheduler: finds due meds, dials, retries
-  /api/vapi/webhook             end-of-call handling: summarize, notify, retry-mark
+  page.tsx  privacy/  terms/  sms-consent/   public pages
+  login/  auth/callback/                     Supabase magic-link auth
+  setup/                                     caregiver setup wizard
+  dashboard/                                 caregiver view: status, changes, history
+  admin/                                     operator console (allowlist-gated)
+  api/parents/                               setup save (one transaction) + load
+  api/cron/tick/                             scheduler: due work, retries, reapers
+  api/vapi/webhook/                          end-of-call: understand, decide, notify
+  api/vapi/consent/                          records recording consent
+  api/health/                                scheduler liveness (503 when stale)
 /lib
-  /supabase/{client,server,middleware,admin}.ts   Supabase clients (browser/server/
-                                                    proxy-session-refresh/service-role)
-  /schedule.ts                 timezone-aware "what's due now" + local-time helpers
-  /vapi.ts                     triggers an outbound Vapi call
-  /claude.ts                   transcript -> structured summary via Anthropic API
-  /twilio.ts                   sends SMS via Twilio's REST API (API Key auth)
-  /notify.ts                   texts every family contact with a given notify flag
-  /safety.ts                   deterministic concern-keyword scan (Claude backstop)
-  /format.ts                   shared meds/appointments -> human-readable string
-/types/db.ts                    TypeScript types mirroring the Supabase schema
-/supabase/migrations           SQL migrations, run in order against your Supabase project
+  schedule.ts      timezone/DST-aware "what's due now", local day bounds
+  dial.ts          places a call and records the outcome
+  claude.ts        transcript → structured facts
+  safety.ts        keyword + structural backstops, independent of the model
+  insights.ts      change detection vs. baseline; alert fingerprints
+  notify.ts        SMS + email fan-out, de-duplicated
+  log.ts           structured JSON logging
+/evals             scored evaluation set for transcript understanding
+/supabase/migrations
 ```
 
-## Data model
+### Data model
 
-Postgres tables (see `supabase/migrations/`): `caregivers`, `parents`, `medications`,
-`appointments`, `family_contacts`, `escalation_rules`, `calls`, `messages`. Row-Level
-Security scopes every table to the logged-in caregiver's own data
-(`caregivers.id = auth.uid()`, everything else joins through `parents.caregiver_id`).
-API routes that need to write across a caregiver's own boundary (`/api/parents`) or
-write system-generated data the caregiver only reads (`calls`, `messages`, written by
-the cron/webhook routes) use the service-role client, which bypasses RLS — those two
-routes are the only places that invariant needs to be preserved.
+`caregivers` → `parents` → (`medications`, `appointments`, `family_contacts`,
+`escalation_rules`, `calls` → `messages`).
 
-`calls` is the audit trail: `scheduled_for`, `called_at`, `status`, `retry_count`,
-`vapi_call_id`, `transcript`, `summary`, `meds_confirmed`, `concerns`.
+Row-Level Security scopes everything to the signed-in caregiver (`caregivers.id =
+auth.uid()`, the rest joining through `parents.caregiver_id`). The service-role client
+bypasses RLS and is used only by `/api/parents` (which re-derives ownership from the
+session, never the request body), the system-to-system cron/webhook routes, and `/admin`.
+Any new route using that client must preserve the same invariant by hand.
 
-## Environment variables
+`calls` is the audit trail; `messages` records every notification attempt including
+failures, with the recipient denormalized so history survives a contact being removed.
 
-See `.env.local.example` for the full list. Summary of where each comes from:
+---
 
-| Variable | Where to get it |
-|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Supabase project → Settings → API |
-| `VAPI_API_KEY` | Vapi dashboard → API Keys (the **private** key) |
-| `VAPI_ASSISTANT_ID` | Vapi → your assistant's page |
-| `VAPI_PHONE_NUMBER_ID` | Vapi → Phone Numbers → your number |
-| `VAPI_WEBHOOK_SECRET` | Any random string you generate — must match the `x-webhook-secret` HTTP header configured on the Vapi phone number/assistant's Server URL |
-| `TWILIO_ACCOUNT_SID` | Twilio Console → Account |
-| `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` | Twilio Console → API keys & tokens → Create API key (used instead of the classic Auth Token) |
-| `TWILIO_FROM_NUMBER` | A Twilio number capable of SMS (only needed once escalation texts are in use — outbound calling itself uses Vapi's own number, not Twilio) |
-| `ANTHROPIC_API_KEY` | console.anthropic.com |
-| `CRON_SECRET` | Any random string you generate — sent as `Authorization: Bearer <value>` by whatever pings `/api/cron/tick` |
-
-## Supabase setup
-
-1. Create a free project at supabase.com.
-2. SQL Editor → run each file in `supabase/migrations/` **in numeric order**.
-3. Settings → API → copy the three keys into `.env.local` / your deploy target's env vars.
-
-## Vapi setup
-
-1. Create an assistant, paste the system prompt (see the spec / commit history for the
-   exact text), set voice/model/max-duration.
-2. Get a phone number: **Free Vapi Number** works with no Twilio number needed at all.
-   (Twilio trial accounts no longer include a free usable number — importing one
-   requires adding funds to Twilio, which isn't necessary just to make calls.)
-3. On the phone number (or assistant), set **Server URL** to
-   `https://<your-deploy>/api/vapi/webhook` and add an HTTP header
-   `x-webhook-secret: <your VAPI_WEBHOOK_SECRET>`.
-
-## Twilio setup (only needed for SMS escalation)
-
-Calling works entirely through Vapi's own number. Twilio is only needed once you want
-the actual miss-alert/concern SMS to send: buy/verify a number capable of SMS, set
-`TWILIO_FROM_NUMBER`, and note Twilio trial accounts require adding funds to get a
-real usable number (the trial's demo/playground number shown on the dashboard is not
-an owned number and can't be imported into Vapi or used to send SMS).
-
-## Cron
-
-`/api/cron/tick` is a plain `CRON_SECRET`-protected route, not tied to any specific
-scheduler. **Vercel's Hobby plan only allows daily cron jobs**, so `vercel.json`
-intentionally does not declare a cron (a sub-daily schedule there hard-blocks
-deployment on Hobby). Instead, ping the route every 5 minutes from an external
-scheduler (e.g. cron-job.org) with header `Authorization: Bearer <CRON_SECRET>`.
-
-## Local development
+## Setup
 
 ```bash
 npm install
@@ -159,37 +202,56 @@ cp .env.local.example .env.local   # fill in real values
 npm run dev
 ```
 
-## Production deployment
+**Supabase** — create a project, run every file in `supabase/migrations/` in numeric
+order, copy the keys from Settings → API.
 
-Deployed via Vercel, connected to this GitHub repo for auto-deploy on push to `main`.
-Set every env var in Vercel (Project Settings → Environment Variables) across
-Production/Preview/Development before the first deploy — `NEXT_PUBLIC_*` vars must be
-added as `Config` type (not `Secret`), since they're exposed to the browser by design.
+**Vapi** — create an assistant and paste the system prompt, then set its Server URL to
+`https://<deploy>/api/vapi/webhook` with an `x-webhook-secret` header. A free Vapi number
+works; no Twilio number is needed for calling.
 
-## Security notes
+**Cron** — `/api/cron/tick` is a plain `CRON_SECRET`-protected route. Vercel's Hobby plan
+only permits daily crons (and a sub-daily schedule in `vercel.json` hard-blocks
+deployment there), so ping it every 5 minutes from an external scheduler with
+`Authorization: Bearer <CRON_SECRET>`.
 
-- RLS is the primary access boundary for anything a caregiver reads/writes directly.
-- `/api/parents`, `/api/cron/tick`, and `/api/vapi/webhook` use the service-role client
-  (bypasses RLS) — `/api/parents` re-derives the caregiver id from the authenticated
-  session (`auth.uid()`) before writing, and the other two are system-to-system routes
-  gated by their own shared secrets, not user auth. Any future route added to this
-  admin-client pattern needs to preserve that same "derive ownership, don't trust the
-  request body" invariant manually.
-- Concern detection is **not purely LLM-based**: `lib/safety.ts` runs a deterministic
-  keyword scan (`escalation_rules.concern_keywords`) alongside Claude's classification,
-  specifically so a Claude outage or misclassification can't silently drop a real
-  emergency mention.
+**Twilio/SendGrid** — only needed for alerts, not for calling.
 
-## Known limitations (v1, matches spec section 10)
+| Variable | Source |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API |
+| `VAPI_API_KEY`, `VAPI_ASSISTANT_ID`, `VAPI_PHONE_NUMBER_ID` | Vapi dashboard |
+| `VAPI_WEBHOOK_SECRET` | Random string; must match the header on Vapi's Server URL |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_FROM_NUMBER` | Twilio Console (API key, not the classic auth token) |
+| `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` | SendGrid; sender must be verified |
+| `ANTHROPIC_API_KEY` | console.anthropic.com |
+| `CRON_SECRET` | Random string, sent by whatever pings the scheduler |
+| `ADMIN_EMAILS` | Comma-separated allowlist for `/admin`; unset means nobody has access |
 
-- One parent per caregiver (enforced via a DB unique constraint).
-- No daily digest, no mood trends over time.
-- Not HIPAA-reviewed — this is a direct-to-consumer tool, not a covered entity's system.
-- Setup writes (`/api/parents`) are not atomic across all five tables — a failure
-  partway through is designed to never *lose* existing data (new rows are inserted
-  before old ones are deleted), but isn't a single transaction. A Postgres RPC wrapping
-  the whole operation in `BEGIN`/`COMMIT` would close this gap.
-- Monitoring is pull-based (`/api/health` + the `/dashboard` banner), not push —
-  nothing pages you automatically if you don't check. Fine for a single household
-  watching its own dashboard; wire `/api/health` into an external alerting service
-  before this serves people who won't think to check.
+Deployed on Vercel. `NEXT_PUBLIC_*` vars must be `Config` type, not `Secret`, since
+they're exposed to the browser by design.
+
+---
+
+## Known limitations
+
+Current and accurate:
+
+- **SMS delivery is blocked** pending Twilio toll-free verification. Alerts are attempted,
+  recorded, and shown as failed on the dashboard rather than silently dropped.
+- **Email to Gmail recipients is unreliable.** The SendGrid sender is a personal Gmail
+  address via Single Sender Verification, and Gmail's DMARC policy means mail claiming to
+  be `@gmail.com` but not sent through Google is silently dropped. Verified working to
+  non-Gmail addresses. Fix is a real domain with SendGrid domain authentication.
+- **Monitoring is pull-based** — `/api/health`, the dashboard banner, and `/admin` all
+  require someone to look. Nothing pages you. Point an external uptime monitor at
+  `/api/health` before this serves families who won't think to check.
+- **One parent per caregiver**, enforced by a unique constraint.
+- **No long-term trends or digests** — change detection compares against a short rolling
+  baseline, not months of history.
+- **Not HIPAA-reviewed.** Direct-to-consumer tool, not a covered entity's system.
+- **No opt-out keyword handling** (STOP/HELP) on outbound SMS.
+
+## Not a medical service
+
+This does not diagnose, treat, or advise. Rosie escalates information to humans and tells
+anyone describing an emergency to call 911. See `/terms`.
