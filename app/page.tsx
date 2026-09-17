@@ -95,6 +95,17 @@ export default function Home() {
             </p>
           </div>
         </section>
+
+        <section className="max-w-2xl mx-auto px-4 pb-10">
+          <p className="text-sm text-slate-500 bg-white border border-slate-200 rounded-xl p-4">
+            Caregiver Check-In is not a medical or emergency service and does not provide
+            medical advice. In a medical emergency, call 911 directly — see our{" "}
+            <a href="/terms" className="underline text-slate-900">
+              Terms of Service
+            </a>{" "}
+            for details.
+          </p>
+        </section>
       </main>
 
       <MarketingFooter />
