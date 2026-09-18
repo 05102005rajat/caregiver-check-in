@@ -192,10 +192,10 @@ async function slotFor(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
   scheduledFor: string
-): Promise<{ known: boolean; found: boolean; state: string | null }> {
+): Promise<{ known: boolean; found: boolean; state: string | null; expiresAt: Date | null }> {
   const { data, error } = await db
     .from("call_slots")
-    .select("id, state")
+    .select("id, state, expires_at")
     .eq("parent_id", parentId)
     .eq("due_at", scheduledFor)
     .limit(1)
@@ -208,9 +208,14 @@ async function slotFor(
     // the reaper leaves the row alone for this tick, and the degraded heartbeat surfaces
     // the read failure instead of either guess being made silently.
     log.error("cron.slot_lookup_failed", { parent_id: parentId, scheduled_for: scheduledFor, err: error });
-    return { known: false, found: false, state: null };
+    return { known: false, found: false, state: null, expiresAt: null };
   }
-  return { known: true, found: Boolean(data), state: (data?.state as string) ?? null };
+  return {
+    known: true,
+    found: Boolean(data),
+    state: (data?.state as string) ?? null,
+    expiresAt: data?.expires_at ? new Date(data.expires_at as string) : null,
+  };
 }
 
 /**
@@ -277,11 +282,16 @@ async function reapStaleScheduled(
       // longer erase the consent gate's evidence. The previous attempt to preserve it —
       // stamping called_at when vapi_call_id proved a dial — was dead code: vapi_call_id is
       // written by the very update whose failure strands the row, so it is always null here.
-      const { error } = await db
+      // .select() like the give-up branch below. Without it, two overlapping ticks both
+      // match the guard, both believe they abandoned the row, and both text the family
+      // about the same missed check-in — rule #2, in the one branch never converted.
+      const { data: abandoned, error } = await db
         .from("calls")
         .update({ status: "failed" })
         .eq("id", row.id)
-        .eq("status", "scheduled");
+        .eq("status", "scheduled")
+        .select("id")
+        .maybeSingle();
       if (error) {
         // Don't log success after a failure: the row stays 'scheduled' and is re-abandoned
         // every tick, and a cheerful "abandoned" line each time hides that it never worked.
@@ -289,6 +299,7 @@ async function reapStaleScheduled(
         ok = false;
         continue;
       }
+      if (!abandoned) continue; // another tick abandoned it and owns the message
       log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for });
 
       // Tell the family. The row still occupies (parent_id, scheduled_for), so the slot
@@ -424,6 +435,22 @@ async function reapStaleScheduled(
     // than SLOT_CATCHUP_MINUTES, and re-dialled — placing a real call to the parent
     // seconds after telling their family it was too late to place one. The slot's own
     // state is the authority on whether that slot is still live.
+    // The slot's own expires_at, not the flat catch-up constant. An appointment reminder is
+    // clamped to the appointment's start time precisely because "a reminder after the fact
+    // is worse than none" — and this path ignored that, so a 09:00 reminder for a 10:00
+    // appointment, stranded by a failed post-dial write and first seen at 10:30, was still
+    // 90 minutes late by the constant's reckoning and got re-dialled: a call telling someone
+    // about an appointment that began half an hour ago.
+    if (slot.expiresAt && slot.expiresAt.getTime() <= now.getTime()) {
+      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      if (error) {
+        log.error("cron.stale_close_after_slot_expiry_failed", { call_id: row.id, err: error });
+        ok = false;
+      }
+      log.info("cron.stale_row_past_slot_expiry", { call_id: row.id, parent_id: parent.id, expires_at: slot.expiresAt.toISOString() });
+      continue;
+    }
+
     if (slot.state === "expired" || slot.state === "cancelled") {
       const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
       if (error) log.error("cron.stale_close_after_slot_done_failed", { call_id: row.id, err: error });
@@ -619,11 +646,15 @@ export async function GET(request: Request) {
   // it" — see neverOurs in lib/slots.ts.
   const { data: priorHeartbeat, error: priorHeartbeatError } = await db
     .from("cron_heartbeat")
-    .select("last_tick_at")
+    .select("last_attempted_at")
     .eq("id", true)
     .maybeSingle();
   if (priorHeartbeatError) log.error("cron.heartbeat_read_failed", { err: priorHeartbeatError });
-  const lastTickAt = priorHeartbeat?.last_tick_at ? new Date(priorHeartbeat.last_tick_at as string) : null;
+  // last_attempted_at, not last_tick_at (migration 0035). last_tick_at is withheld whenever
+  // ANY household is degraded, so reading it here let one broken household convince the
+  // planner that the scheduler had been down for everybody — and every mid-day medication
+  // edit then manufactured a missed-check-in text.
+  const lastTickAt = priorHeartbeat?.last_attempted_at ? new Date(priorHeartbeat.last_attempted_at as string) : null;
 
   // Paged. PostgREST caps an unbounded select at its configured maximum and says nothing
   // about it, so past that cap some households simply stop being processed: no call, no
@@ -808,6 +839,14 @@ export async function GET(request: Request) {
   // cron-job.org and to /api/health. On a product whose promise is that silence means
   // everything is fine, that is the worst-shaped failure available. Withholding the
   // heartbeat turns it into the one alarm this system already has.
+  // Stamped whether or not the tick was healthy: it records that we ran, which is what
+  // lib/slots.ts needs to tell a real missed check-in from a slot added after the fact.
+  const { error: attemptedError } = await db
+    .from("cron_heartbeat")
+    .update({ last_attempted_at: now.toISOString() })
+    .eq("id", true);
+  if (attemptedError) log.error("cron.heartbeat_attempted_failed", { err: attemptedError });
+
   if (degradedParents > 0) {
     log.error("cron.tick_degraded", { parents: parentList.length, degraded_parents: degradedParents, calls_triggered: callsTriggered });
     return NextResponse.json(

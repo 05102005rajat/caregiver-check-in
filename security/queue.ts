@@ -311,6 +311,43 @@ async function main() {
       `state=${apptUncovered!.state} call_id=${apptUncovered!.call_id} — dispatch did not act, so the check above proves nothing`
     );
 
+    // ---- cancelling a hold must not swallow a miss that was never reported ----
+    // A lapsed slot is a check-in that really was missed. expireLapsedSlots skips one for a
+    // tick whenever its calls lookup errors, and cancelling it then is permanent: during a
+    // pause coverageStartsAt sits in the future, so it is never re-planned, never revived,
+    // and nobody is ever told.
+    const unreportedDue = new Date(realNow.getTime() - 5 * 60 * 60000).toISOString();
+    const { data: unreported, error: unreportedError } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: unreportedDue, expires_at: new Date(realNow.getTime() - 2 * 60 * 60000).toISOString(),
+        kind: "medication", med_names: ["UnreportedMed"], state: "pending",
+      })
+      .select("id")
+      .single();
+    if (unreportedError || !unreported) throw new Error(`unreported fixture failed: ${unreportedError?.message}`);
+    await cancelPendingSlots(admin as never, pid, "harness_pause", realNow);
+    const { data: afterCancel } = await admin.from("call_slots").select("state").eq("id", unreported.id).single();
+    check(
+      "cancelling a hold leaves a lapsed, unreported slot alone",
+      afterCancel!.state === "pending",
+      `state=${afterCancel!.state} — a real missed check-in was cancelled and can never be reported`
+    );
+    // And expiry must then still be able to report it.
+    await expireLapsedSlots(admin as never, parent, realNow);
+    const { data: unreportedMsgs } = await admin
+      .from("messages")
+      .select("id")
+      .eq("parent_id", pid)
+      .eq("fingerprint", tooLateFingerprint(unreportedDue));
+    check(
+      "that slot is still reportable after the cancel",
+      (unreportedMsgs ?? []).length > 0,
+      `${(unreportedMsgs ?? []).length} messages`
+    );
+    // That cancel took the day's live slots with it, which the checks below need back.
+    await materializeSlots(admin as never, parent, ctx, realNow);
+
     // ---- a slot revived after a hold must pick up edits made during it ----
     // The medication reconcile loop reads a snapshot taken before the revive, so a slot
     // revived on the same tick used to keep the list it was cancelled with: a caregiver who

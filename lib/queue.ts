@@ -408,8 +408,9 @@ export async function dispatchDueSlots(
           // didn't go out" for a day the parent WAS rung. Surfaced instead of looped.
           log.error("cron.appointment_covered_write_failed", { parent_id: parent.id, slot_id: slot.id, err: coveredError });
           ok = false;
+        } else {
+          log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id, call_id: covering.callId });
         }
-        log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id, call_id: covering.callId });
         continue;
       }
     }
@@ -453,8 +454,9 @@ export async function dispatchDueSlots(
     if (releaseError) {
       log.error("cron.slot_release_failed", { parent_id: parent.id, slot_id: slot.id, err: releaseError });
       ok = false;
+    } else {
+      log.info("cron.slot_released", { parent_id: parent.id, slot_id: slot.id, reason: outcome.reason });
     }
-    log.info("cron.slot_released", { parent_id: parent.id, slot_id: slot.id, reason: outcome.reason });
   }
   return { triggered, ok };
 }
@@ -648,11 +650,17 @@ export async function cancelPendingSlots(
   reason: string,
   now: Date
 ): Promise<boolean> {
+  // Only slots that are still live. A slot past its expires_at is a check-in that really
+  // was missed and has not been reported yet — expireLapsedSlots skips it for a tick
+  // whenever its calls lookup errors, and cancelling it then is permanent: during a pause
+  // coverageStartsAt sits in the future, so it is never re-planned, never revived, and
+  // nobody is ever told. Left pending for the next tick's expiry to account for.
   const { data, error } = await db
     .from("call_slots")
     .update({ state: "cancelled", updated_at: now.toISOString() })
     .eq("parent_id", parentId)
     .eq("state", "pending")
+    .gt("expires_at", now.toISOString())
     .select("id");
   if (error) {
     // A failed cancel leaves the slots pending, and the hold branches now expire lapsed

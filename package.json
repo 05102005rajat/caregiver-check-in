@@ -12,7 +12,8 @@
     "eval:conversation": "tsx evals/conversation.ts",
     "security": "tsx security/isolation.ts",
     "security:refusal": "tsx security/refusal.ts",
-    "security:queue": "tsx security/queue.ts"
+    "security:queue": "tsx security/queue.ts",
+    "security:all": "npm run security && npm run security:refusal && npm run security:queue"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",

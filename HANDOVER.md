@@ -24,7 +24,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
   `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
   Eight rounds of `/code-review` ran against this branch; every finding is either fixed or
   argued against in the commit that declined it.
-- **Migrations 0001–0034 applied and verified against the live database.** `0031`,
+- **Migrations 0001–0034 applied and verified; `0035` is NOT applied.** `0031`,
   `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
   checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
   both CHECK constraints bite, and RLS hides `call_slots` from anon while the service role
@@ -316,7 +316,8 @@ Two behaviours worth knowing:
 
 ```bash
 npm test                  # 139 unit tests
-npm run security          # 31 tenant-isolation checks against real Supabase
+npm run security:all      # all three real-database suites, below, in order
+npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 8 checks: an out-of-hours refusal must alert the family
 npm run security:queue    # 17 checks: the call queue, driven with a controlled clock
 npm run eval              # 19 summarizer cases (costs Anthropic tokens)
