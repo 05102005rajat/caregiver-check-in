@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SLOT_CATCHUP_MINUTES, coverageStartsAt, planSlotsForDay } from "./slots";
+import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsForNearestSlot, planSlotsForDay } from "./slots";
 import { isWithinCallingHours } from "./callwindow";
 import type { Appointment, Medication } from "@/types/db";
 
@@ -171,5 +171,38 @@ describe("coverageStartsAt", () => {
         created_at: "2026-09-01T00:00:00Z",
       }).toISOString()
     ).toBe("2026-09-10T18:00:00.000Z");
+  });
+});
+
+describe("medsForNearestSlot", () => {
+  const meds = [
+    med({ id: "m1", name: "Morning", time_of_day: "08:00:00" }),
+    med({ id: "m2", name: "Midday", time_of_day: "12:00:00" }),
+    med({ id: "m3", name: "MiddayTwo", time_of_day: "12:00:00" }),
+    med({ id: "m4", name: "Evening", time_of_day: "18:00:00" }),
+  ];
+
+  it("returns only the most recent due slot, not every dose since midnight", () => {
+    // 13:00 PDT. medsDueNow is cumulative by design, so handing its whole result to a call
+    // asks an elderly person about breakfast and lunch at once and reports each unconfirmed
+    // one as missed. A scheduled call only ever carries one slot.
+    const at = new Date("2026-09-10T20:00:00Z");
+    expect(medsForNearestSlot(meds, TZ, at).map((m) => m.name).sort()).toEqual(["Midday", "MiddayTwo"]);
+  });
+
+  it("carries every medication sharing that slot's time", () => {
+    const at = new Date("2026-09-10T20:00:00Z");
+    expect(medsForNearestSlot(meds, TZ, at)).toHaveLength(2);
+  });
+
+  it("excludes a dose that isn't due yet", () => {
+    // 09:00 PDT — the 18:00 pill must not be asked about, which was the original defect.
+    const at = new Date("2026-09-10T16:00:00Z");
+    expect(medsForNearestSlot(meds, TZ, at).map((m) => m.name)).toEqual(["Morning"]);
+  });
+
+  it("returns nothing before the first dose of the day", () => {
+    const at = new Date("2026-09-10T14:00:00Z"); // 07:00 PDT
+    expect(medsForNearestSlot(meds, TZ, at)).toEqual([]);
   });
 });

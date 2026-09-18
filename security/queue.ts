@@ -185,6 +185,66 @@ async function main() {
       slots.find((s) => s.id === elapsed.id)!.state === "expired",
       "an expired slot was overwritten as cancelled"
     );
+
+    // ---- resume must give the day back ----
+    // The slots above were just cancelled. A caregiver who pauses at 10:00 and resumes at
+    // 11:00 gets a tick that re-plans the day; if materialising can't re-open a cancelled
+    // row, this evening's check-in is never dialled, never expires and never alerts.
+    await materializeSlots(admin as never, parent, ctx, realNow);
+    slots = await slotsOf(pid);
+    const revived = slots.find((s) => s.id === future.id)!;
+    check(
+      "re-materialising after a cancel gives the day back (pause then resume)",
+      revived.state === "pending",
+      `state=${revived.state} — the rest of the day stays cancelled and is never called or reported`
+    );
+
+    // ---- a slot whose call actually happened must not be reported as missed ----
+    // A provider error releases the slot to pending and routes the call into the retry
+    // pipeline; a retry can then connect. If expiry only looks at the slot, it reuses the
+    // now-completed calls row and texts "check-in was missed" about a call that happened.
+    const servedDue = new Date(realNow.getTime() - 30 * 60000).toISOString();
+    const { data: servedCall } = await admin
+      .from("calls")
+      .insert({ parent_id: pid, scheduled_for: servedDue, status: "completed", called_at: servedDue, dial_attempted_at: servedDue })
+      .select("id")
+      .single();
+    await admin.from("call_slots").insert({
+      parent_id: pid, due_at: servedDue, expires_at: new Date(realNow.getTime() - 60000).toISOString(),
+      kind: "medication", med_names: ["EarlyMed"], state: "pending",
+    });
+    await expireLapsedSlots(admin as never, parent, realNow);
+    const servedFp = tooLateFingerprint(servedDue);
+    const { data: servedMsgs } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", servedFp);
+    check(
+      "a slot whose call actually connected is NOT reported as missed",
+      (servedMsgs ?? []).length === 0,
+      `${(servedMsgs ?? []).length} messages — the family was told a completed check-in was missed`
+    );
+    await admin.from("calls").delete().eq("id", servedCall!.id);
+
+    // ---- a slot stranded mid-dispatch must be recovered ----
+    // The claim writes 'dispatched' before dialing. If the invocation dies in between, the
+    // slot matches neither the dispatch query nor the expiry query: no call, no alert, no
+    // trace. `calls` rows got a reaper for exactly this; slots need one too.
+    const strandedDue = new Date(realNow.getTime() - 20 * 60000).toISOString();
+    const { data: stranded } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: strandedDue, expires_at: new Date(realNow.getTime() + 60 * 60000).toISOString(),
+        kind: "medication", med_names: ["EarlyMed"], state: "dispatched", call_id: null,
+        updated_at: new Date(realNow.getTime() - 30 * 60000).toISOString(),
+      })
+      .select("id")
+      .single();
+    await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { data: strandedAfter } = await admin.from("call_slots").select("state,call_id").eq("id", stranded!.id).single();
+    check(
+      "a slot stranded in dispatched is recovered, not lost",
+      strandedAfter!.state !== "dispatched" || strandedAfter!.call_id !== null,
+      `state=${strandedAfter!.state} call_id=${strandedAfter!.call_id} — stuck forever, invisible to both queries`
+    );
+
   } finally {
     if (pid) {
       await admin.from("call_slots").delete().eq("parent_id", pid);

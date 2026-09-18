@@ -179,3 +179,18 @@ export function coverageStartsAt(parent: {
     )
   );
 }
+
+/**
+ * The medications belonging to the most recent slot that is due — what a scheduled call for
+ * that slot would carry, and nothing else.
+ *
+ * Used by the manual test call. medsDueNow is cumulative across the local day by design
+ * (that is what makes catch-up work), so handing its whole result to a call asks an elderly
+ * person about every dose since breakfast and reports each unconfirmed one as missed.
+ */
+export function medsForNearestSlot(medications: Medication[], timezone: string, now: Date = new Date()): Medication[] {
+  const due = medsDueNow(medications, timezone, now);
+  if (due.length === 0) return [];
+  const latest = due.reduce((acc, m) => (m.time_of_day > acc ? m.time_of_day : acc), due[0].time_of_day);
+  return due.filter((m) => m.time_of_day === latest);
+}

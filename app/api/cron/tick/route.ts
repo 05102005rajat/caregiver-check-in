@@ -9,7 +9,7 @@ import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint, tooLateFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import type { Appointment, Call, CallSlot, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
+import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
@@ -217,7 +217,10 @@ async function reapStaleScheduled(
         // Normalised: the slot loop's too-late branch fingerprints scheduledFor.toISOString()
         // ("…T16:00:00.000Z") while Postgres hands back "…T16:00:00+00:00". Same slot, same
         // alert kind, different string — so the two paths would not dedupe against each other.
-        { fingerprint: tooLateFingerprint(row.scheduled_for) }
+        // severity 'safety' like every other path sharing this fingerprint. Without it this
+        // one alert got the 20-hour routine window instead of 4, so it deduped against a
+        // different span of time than the branches it is supposed to agree with.
+        { fingerprint: tooLateFingerprint(row.scheduled_for), severity: "safety" }
       );
       continue;
     }
@@ -392,7 +395,12 @@ export async function GET(request: Request) {
   // for `calls`. Ordered by a stable unique key so paging can't skip or repeat a row.
   const parentList: Parent[] = [];
   const PARENT_PAGE_SIZE = 500;
-  for (let from = 0; ; from += PARENT_PAGE_SIZE) {
+  // Advances by what came back and stops on an empty page, rather than treating a short
+  // page as the last one. PostgREST enforces its own `max-rows` cap: if that is set below
+  // PARENT_PAGE_SIZE then *every* page is short, so "short means last" stops after one page
+  // and silently drops every household past the cap — which is the exact failure this loop
+  // was added to prevent, and the one migration 0024 fixed for `calls`.
+  for (let from = 0; ; ) {
     const { data: page, error: parentsError } = await db
       .from("parents")
       .select("*")
@@ -402,8 +410,9 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: parentsError.message }, { status: 500 });
     }
     const rows = (page ?? []) as Parent[];
+    if (rows.length === 0) break;
     parentList.push(...rows);
-    if (rows.length < PARENT_PAGE_SIZE) break;
+    from += rows.length;
   }
   if (parentList.length === 0) {
     const { error } = await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);

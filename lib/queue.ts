@@ -1,6 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
-import { appointmentsToday, formatLocalTime } from "@/lib/schedule";
+import { appointmentsToday, formatLocalTime, localDayBoundsUtc } from "@/lib/schedule";
 import { coverageStartsAt, planSlotsForDay } from "@/lib/slots";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
@@ -17,6 +17,12 @@ import type { Appointment, CallSlot, Medication, Parent, WatchItem } from "@/typ
  * a real cron tick, which on this product means placing real phone calls to a real elderly
  * person, so in practice it was never exercised at all.
  */
+
+/**
+ * How long a slot may sit claimed-but-undialled before another tick takes it back. Matches
+ * the 10-minute buffer the `calls` reapers use — two maximum call durations.
+ */
+const STRANDED_DISPATCH_MINUTES = 10;
 
 /** What a queue operation needs to know about the household, beyond the parent row. */
 export interface QueueContext {
@@ -53,6 +59,70 @@ export async function materializeSlots(
     });
   }
 
+  // Reconcile what is already queued for today against what the plan now says. Inserting
+  // and never revisiting was wrong in two ways, both of them silent:
+  //
+  //   - a cancelled slot could never come back. cancelPendingSlots drops the whole
+  //     remaining day when a parent is paused, and `ignoreDuplicates` meant the tick after
+  //     Resume re-planned that slot and changed nothing. The evening check-in was never
+  //     dialled, never expired and never alerted — the exact failure this queue exists to
+  //     make impossible.
+  //   - a slot outlived the medication it was for. The old scheduler re-derived from the
+  //     current rows every tick, so editing a dose from 18:00 to 19:00 simply moved the
+  //     call; here it left the 18:00 slot standing and added a 19:00 one, ringing twice.
+  const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
+  const plannedByDue = new Map(slots.map((slot) => [slot.dueAt.getTime(), slot]));
+
+  const { data: existing, error: existingError } = await db
+    .from("call_slots")
+    .select("id, due_at, med_names, state")
+    .eq("parent_id", parent.id)
+    .gte("due_at", startUtc.toISOString())
+    .lte("due_at", endUtc.toISOString());
+  if (existingError) {
+    log.error("cron.existing_slots_query_failed", { parent_id: parent.id, err: existingError });
+    return;
+  }
+
+  const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "med_names" | "state">>;
+  const sameMeds = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+
+  // Still pending but no longer planned at all: the medication moved or was removed.
+  // Only pending rows — a dispatched or expired slot is history, not a plan.
+  const orphaned = rows.filter((r) => r.state === "pending" && !plannedByDue.has(new Date(r.due_at).getTime()));
+  if (orphaned.length > 0) {
+    const { error } = await db.from("call_slots").delete().in("id", orphaned.map((r) => r.id)).eq("state", "pending");
+    if (error) log.error("cron.orphan_slots_delete_failed", { parent_id: parent.id, err: error });
+    else log.info("cron.orphan_slots_deleted", { parent_id: parent.id, count: orphaned.length });
+  }
+
+  // Planned again after being cancelled: the hold that cancelled it is over.
+  // planSlotsForDay only plans slots at or after coverageStartsAt, so a slot that elapsed
+  // during the pause is not planned and therefore never revived.
+  const revivable = rows.filter((r) => r.state === "cancelled" && plannedByDue.has(new Date(r.due_at).getTime()));
+  if (revivable.length > 0) {
+    const { error } = await db
+      .from("call_slots")
+      .update({ state: "pending", updated_at: now.toISOString() })
+      .in("id", revivable.map((r) => r.id))
+      .eq("state", "cancelled");
+    if (error) log.error("cron.revive_slots_failed", { parent_id: parent.id, err: error });
+    else log.info("cron.slots_revived", { parent_id: parent.id, count: revivable.length });
+  }
+
+  // Same time, different medications.
+  for (const row of rows) {
+    if (row.state !== "pending") continue;
+    const planned = plannedByDue.get(new Date(row.due_at).getTime());
+    if (!planned || sameMeds(row.med_names, planned.medNames)) continue;
+    const { error } = await db
+      .from("call_slots")
+      .update({ med_names: planned.medNames, updated_at: now.toISOString() })
+      .eq("id", row.id)
+      .eq("state", "pending");
+    if (error) log.error("cron.slot_meds_update_failed", { parent_id: parent.id, slot_id: row.id, err: error });
+  }
+
   if (slots.length === 0) return;
 
   const { error } = await db.from("call_slots").upsert(
@@ -76,6 +146,26 @@ export async function dispatchDueSlots(
   ctx: QueueContext,
   now: Date
 ): Promise<number> {
+  // A claim writes 'dispatched' before the dial. If the invocation dies in between — a
+  // Vercel timeout, a crash — the slot matches neither the dispatch query (pending) nor the
+  // expiry query (pending) and sits there forever: no call, no alert, no trace. `calls` rows
+  // have had a reaper for exactly this since 0027; slots need the same. Released rather than
+  // failed, because expires_at still bounds it and expiry is the one place that declares a
+  // miss. call_id is the discriminator: a slot that really dialled has one.
+  const strandedBefore = new Date(now.getTime() - STRANDED_DISPATCH_MINUTES * 60000).toISOString();
+  const { data: stranded, error: strandedError } = await db
+    .from("call_slots")
+    .update({ state: "pending", updated_at: now.toISOString() })
+    .eq("parent_id", parent.id)
+    .eq("state", "dispatched")
+    .is("call_id", null)
+    .lt("updated_at", strandedBefore)
+    .select("id");
+  if (strandedError) log.error("cron.stranded_slots_release_failed", { parent_id: parent.id, err: strandedError });
+  else if ((stranded ?? []).length > 0) {
+    log.warn("cron.stranded_slots_released", { parent_id: parent.id, count: stranded!.length });
+  }
+
   const { data: dueSlots, error } = await db
     .from("call_slots")
     .select("*")
@@ -158,6 +248,41 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
   }
 
   for (const slot of (lapsed ?? []) as CallSlot[]) {
+    // Did we actually ring for this slot? A slot is released back to pending whenever a
+    // dial doesn't produce a call, including a provider error — and a provider error routes
+    // the `calls` row into the retry pipeline, where a retry can connect. The slot is still
+    // pending when its deadline passes, so expiring it blindly reuses the now-completed call
+    // row and texts the family "check-in was missed" about a check-in that happened.
+    //
+    // dial_attempted_at is the right question to ask, and it is stamped before the dial
+    // precisely so it survives whatever happens afterwards (0027). If it is set, we rang,
+    // and the webhook and retry pipeline own reporting the outcome — not this branch.
+    const { data: existingCall } = await db
+      .from("calls")
+      .select("id, status, dial_attempted_at")
+      .eq("parent_id", parent.id)
+      .eq("scheduled_for", slot.due_at)
+      .maybeSingle();
+
+    if (existingCall?.dial_attempted_at) {
+      const { data: served } = await db
+        .from("call_slots")
+        .update({ state: "dispatched", call_id: existingCall.id, updated_at: now.toISOString() })
+        .eq("id", slot.id)
+        .eq("state", "pending")
+        .select("id")
+        .maybeSingle();
+      if (served) {
+        log.info("cron.slot_rang_after_all", {
+          parent_id: parent.id,
+          slot_id: slot.id,
+          call_id: existingCall.id,
+          call_status: existingCall.status,
+        });
+      }
+      continue;
+    }
+
     const { data: claimed } = await db
       .from("call_slots")
       .update({ state: "expired", updated_at: now.toISOString() })
@@ -170,34 +295,35 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     // A `calls` row so the miss is visible where the caregiver actually looks. Same
     // placeholder the old too-late branches wrote, and the unique (parent_id, scheduled_for)
     // index still makes it idempotent.
-    let callId: string | null = null;
-    const { data: inserted, error: insertError } = await db
-      .from("calls")
-      .insert({
-        parent_id: parent.id,
-        scheduled_for: slot.due_at,
-        status: "failed",
-        scheduled_meds: slot.med_names,
-      })
-      .select("id")
-      .single();
-    if (insertError) {
-      if (insertError.code !== "23505") {
-        log.error("cron.expired_slot_call_insert_failed", { parent_id: parent.id, slot_id: slot.id, err: insertError });
-        continue;
-      }
-      // A row for this slot already exists — it was dialled and failed, or a refusal closed
-      // it out. Reuse it rather than abandoning the alert, which is what a bare `continue`
-      // on 23505 used to do.
-      const { data: existing } = await db
+    let callId: string | null = existingCall?.id ?? null;
+    if (!callId) {
+      const { data: inserted, error: insertError } = await db
         .from("calls")
+        .insert({
+          parent_id: parent.id,
+          scheduled_for: slot.due_at,
+          status: "failed",
+          scheduled_meds: slot.med_names,
+        })
         .select("id")
-        .eq("parent_id", parent.id)
-        .eq("scheduled_for", slot.due_at)
-        .maybeSingle();
-      callId = existing?.id ?? null;
-    } else {
-      callId = inserted?.id ?? null;
+        .single();
+      if (insertError) {
+        // 23505 means a row appeared between the read above and this insert. Re-read rather
+        // than abandoning the alert, which is what a bare `continue` used to do.
+        if (insertError.code !== "23505") {
+          log.error("cron.expired_slot_call_insert_failed", { parent_id: parent.id, slot_id: slot.id, err: insertError });
+          continue;
+        }
+        const { data: raced } = await db
+          .from("calls")
+          .select("id")
+          .eq("parent_id", parent.id)
+          .eq("scheduled_for", slot.due_at)
+          .maybeSingle();
+        callId = raced?.id ?? null;
+      } else {
+        callId = inserted?.id ?? null;
+      }
     }
     if (!callId) {
       log.error("cron.expired_slot_no_call_row", { parent_id: parent.id, slot_id: slot.id });

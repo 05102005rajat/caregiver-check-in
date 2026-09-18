@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  endOfLocalDay,
   reminderSlotFor,
   appointmentsToday,
   formatLocalTime,
@@ -272,5 +273,39 @@ describe("localDayBoundsUtc", () => {
     } finally {
       process.env.TZ = originalTZ;
     }
+  });
+});
+
+describe("endOfLocalDay", () => {
+  const TZ = "America/Los_Angeles";
+
+  it("is the next local midnight on an ordinary day", () => {
+    // 13:00 PDT on the 10th -> 00:00 PDT on the 11th (07:00Z).
+    expect(endOfLocalDay(TZ, new Date("2026-09-10T20:00:00Z")).toISOString()).toBe("2026-09-11T07:00:00.000Z");
+  });
+
+  // A local day is not always 24 hours. "now + 24h - elapsed" ran a spring-forward pause to
+  // 01:00 the next day and ended a fall-back one at 23:00 the same day, and the dashboard
+  // names that instant back to the caregiver — the contradiction the option was fixed for.
+  // These must be timed BEFORE the transition, not after it. The arithmetic version this
+  // replaced only goes wrong when the DST change falls between `now` and the next midnight;
+  // an afternoon case on the same day agrees with the correct answer and proves nothing.
+  // The first draft of these tests did exactly that and passed against the bug.
+  it("is still local midnight on the spring-forward day (23-hour day)", () => {
+    // 2027-03-14 is the US DST start (02:00 PST -> 03:00 PDT). 00:30 PST, before the jump.
+    const end = endOfLocalDay(TZ, new Date("2027-03-14T08:30:00Z"));
+    expect(end.toISOString()).toBe("2027-03-15T07:00:00.000Z");
+    expect(formatLocalTime(end, TZ)).toBe("12:00am");
+  });
+
+  it("is still local midnight on the fall-back day (25-hour day)", () => {
+    // 2026-11-01 is the US DST end (02:00 PDT -> 01:00 PST). 00:30 PDT, before the fall back.
+    const end = endOfLocalDay(TZ, new Date("2026-11-01T07:30:00Z"));
+    expect(end.toISOString()).toBe("2026-11-02T08:00:00.000Z");
+    expect(formatLocalTime(end, TZ)).toBe("12:00am");
+  });
+
+  it("rolls over month and year ends", () => {
+    expect(endOfLocalDay(TZ, new Date("2026-12-31T20:00:00Z")).toISOString()).toBe("2027-01-01T08:00:00.000Z");
   });
 });

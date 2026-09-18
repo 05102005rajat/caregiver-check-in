@@ -156,3 +156,26 @@ export function medsAtLocalTime(medications: Medication[], scheduledFor: Date, t
   const key = `${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}`;
   return medications.filter((m) => m.time_of_day.startsWith(key));
 }
+
+/**
+ * The instant the parent's local day ends — their next local midnight.
+ *
+ * Resolved as a calendar date, not "24 hours minus what has elapsed", because a local day
+ * is 23 or 25 hours long across a DST transition. The arithmetic version ran a
+ * spring-forward pause to 01:00 the next day and ended a fall-back one at 23:00 the same
+ * day, and the dashboard then names that wrong instant back to the caregiver.
+ */
+export function endOfLocalDay(timezone: string, now: Date = new Date()): Date {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
+  // Date.UTC normalises the rollover, including month and year ends.
+  const tomorrow = new Date(Date.UTC(get("year"), get("month") - 1, get("day") + 1));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const localMidnight = `${tomorrow.getUTCFullYear()}-${pad(tomorrow.getUTCMonth() + 1)}-${pad(tomorrow.getUTCDate())}T00:00:00`;
+  return fromZonedTime(localMidnight, timezone);
+}

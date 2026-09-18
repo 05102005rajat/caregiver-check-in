@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { endOfLocalDay } from "@/lib/schedule";
 
 /**
  * "Today" means the rest of today, not the next 24 hours.
@@ -22,24 +23,7 @@ const OPTIONS: Array<{ label: string; until: (timezone: string) => Date }> = [
   { label: "2 weeks", until: () => new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) },
 ];
 
-/** The instant the parent's local day ends, i.e. their next local midnight. */
-function endOfLocalDay(timezone: string): Date {
-  const now = new Date();
-  // Their current wall-clock time, read back through Intl so this works for any zone the
-  // browser isn't in.
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    hour: "numeric",
-    minute: "numeric",
-    second: "numeric",
-    hour12: false,
-  }).formatToParts(now);
-  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? 0);
-  // 24:00:00 is how Intl can render midnight with hour12:false; treat it as 0.
-  const hours = get("hour") % 24;
-  const msElapsed = ((hours * 60 + get("minute")) * 60 + get("second")) * 1000;
-  return new Date(now.getTime() + (24 * 60 * 60 * 1000 - msElapsed));
-}
+
 
 export default function PauseControl({
   parentName,

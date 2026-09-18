@@ -3,7 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { CALLING_HOURS_END, CALLING_HOURS_START, describeLocalTime } from "@/lib/callwindow";
-import { appointmentsToday, medsDueNow } from "@/lib/schedule";
+import { appointmentsToday } from "@/lib/schedule";
+import { medsForNearestSlot } from "@/lib/slots";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires an immediate real call to the caregiver's own parent, bypassing the schedule. */
@@ -46,17 +47,18 @@ export async function POST() {
     db,
     parent,
     caregiver?.name ?? "your family",
-    // The medications due by now, via the same medsDueNow the scheduler uses. This said
-    // "exactly as a scheduled call computes them" while calling medsAtLocalTime, which
-    // matches time_of_day against the current HH:mm *exactly* — so unless the caregiver
-    // happened to press the button on the very minute of a dose, it returned nothing and
-    // Rosie never mentioned medication at all. The one button whose job is to let someone
-    // verify their setup works was the one that didn't exercise it.
+    // The most recent due slot's medications — one slot, which is what a scheduled call
+    // actually carries.
     //
-    // Still not "every active medication", which is what the original defect was: at 10am
-    // this excludes an 8pm pill, so Rosie can't ask about a dose that isn't due, report it
-    // unconfirmed, and text the family "Not taken: ..." about medication that isn't late.
-    medsDueNow((medications ?? []) as Medication[], parent.timezone, testCallAt),
+    // This has now been wrong in both directions. It used medsAtLocalTime, matching
+    // time_of_day against the current HH:mm exactly, so unless the caregiver pressed the
+    // button on the very minute of a dose it sent nothing and Rosie never mentioned
+    // medication — the one button whose job is to prove the setup works didn't exercise it.
+    // Plain medsDueNow overcorrects the other way: it is cumulative for the local day, so at
+    // 8pm it asks about the 08:00, 12:00 and 18:00 doses at once, and every one the parent
+    // doesn't confirm comes back as meds_missed and texts the family "Not taken: ...".
+    // A scheduled call never does that; it carries a single slot.
+    medsForNearestSlot((medications ?? []) as Medication[], parent.timezone, testCallAt),
     appointmentsToday((appointments ?? []) as Appointment[], parent.timezone),
     testCallAt,
     (watchItems ?? []) as WatchItem[],
