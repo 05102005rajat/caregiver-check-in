@@ -101,10 +101,16 @@ export default async function DashboardPage() {
         <p className="text-slate-500 mt-1">{parent.name}&apos;s check-in history</p>
       </div>
 
-      {/* Mirrors the cron's own gate (a call with status <> 'failed'), not merely "a call
-          row exists" — a parent whose only calls were rejected by Vapi still gets dialed,
-          so claiming check-ins are paused would contradict what the system actually does. */}
-      {!parent.consent_given_at && !parent.consent_refused_at && calls.some((c) => c.status !== "failed") && (
+      {/* Mirrors the cron's gate exactly (parents_with_calls, migration 0025): a dial was
+          attempted, or one is in flight. The old condition here was status <> 'failed',
+          which drifted when the gate moved onto called_at — a parent who never answers and
+          exhausts retries ends with every row 'failed' but with called_at set, so the
+          scheduler treated them as gated and stopped calling while this banner and its
+          recovery button both disappeared. That is exactly the "calls quietly stop and the
+          caregiver assumes it's broken" state the banner exists to prevent. */}
+      {!parent.consent_given_at &&
+        !parent.consent_refused_at &&
+        calls.some((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress") && (
         // Without this the caregiver has no way to discover that automatic calls are
         // blocked — they'd just notice calls quietly stopping and assume it was broken.
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-4 text-sm text-amber-900">

@@ -161,7 +161,13 @@ async function reapStaleScheduled(
     // every tick forever; closing it out after the window bounds that.
     const scheduledFor = new Date(row.scheduled_for);
     if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
-      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      // Same reasoning as the consent close-out: stamp called_at so abandoning the row
+      // doesn't delete the fact that a dial was attempted, which the consent gate reads.
+      const { error } = await db
+        .from("calls")
+        .update({ status: "failed", called_at: row.called_at ?? row.created_at })
+        .eq("id", row.id)
+        .eq("status", "scheduled");
       if (error) log.error("cron.abandon_stale_scheduled_failed", { call_id: row.id, err: error });
       log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for });
       continue;
@@ -392,16 +398,28 @@ async function processParent(
     const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
     const { data: strandedScheduled } = await db
       .from("calls")
-      .select("id")
+      .select("id, created_at, called_at")
       .eq("parent_id", parent.id)
       .eq("status", "scheduled")
       .lt("created_at", staleThreshold);
 
-    const stranded = (strandedScheduled ?? []).map((r) => r.id as string);
-    if (stranded.length > 0) {
-      const { error } = await db.from("calls").update({ status: "failed" }).in("id", stranded).eq("status", "scheduled");
-      if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, err: error });
-      log.info("cron.cleared_stranded_no_consent", { parent_id: parent.id, cleared: stranded.length });
+    for (const row of (strandedScheduled ?? []) as Array<{ id: string; created_at: string; called_at: string | null }>) {
+      // called_at is stamped alongside status, not just status. A row is stranded at
+      // 'scheduled' precisely because the post-dial write that sets called_at failed, so
+      // it counts as a prior call *only* through status in ('scheduled','in_progress').
+      // Flipping it to 'failed' therefore removed it from parents_with_calls and re-opened
+      // the gate on the next tick — the same erasure 0025 fixed for no_answer rows, just
+      // by a different route. A dial was genuinely attempted here (dialAndRecord ran), so
+      // recording created_at as the attempt time is honest as well as necessary.
+      const { error } = await db
+        .from("calls")
+        .update({ status: "failed", called_at: row.called_at ?? row.created_at })
+        .eq("id", row.id)
+        .eq("status", "scheduled");
+      if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, call_id: row.id, err: error });
+    }
+    if ((strandedScheduled ?? []).length > 0) {
+      log.info("cron.cleared_stranded_no_consent", { parent_id: parent.id, cleared: strandedScheduled!.length });
     }
   } else if (ctx.rules) {
     await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now, ctx.watchItems);

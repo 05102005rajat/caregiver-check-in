@@ -74,16 +74,31 @@ export async function POST(request: Request) {
       );
     }
   } else {
-    // A refusal used to write nothing at all, which made it indistinguishable from "hasn't
-    // been asked yet" and had two bad consequences: the retry path re-dialled the same day,
-    // moments after Rosie promised she wouldn't ring again; and the caregiver was never
-    // told, so the scheduler simply went quiet — which in a product built on "no news is
-    // good news" reads exactly like everything working.
+    // A refusal is recorded, honoured and reported. Writing nothing (the original
+    // behaviour) made it indistinguishable from "hasn't been asked yet": the retry path
+    // re-dialled the same day moments after Rosie promised otherwise, and the caregiver was
+    // never told — which in a product built on "no news is good news" reads exactly like
+    // everything working.
+    //
+    // Withdrawal counts too, not just a first refusal.
+    //
+    // This was guarded by .is("consent_given_at", null), which meant an already-consented
+    // parent saying "stop calling me" matched zero rows: nothing recorded, nobody told, and
+    // consentBlocksNewCalls needs consent_refused_at AND no consent_given_at — so the daily
+    // calls carried on after Rosie had promised they wouldn't. Someone withdrawing consent
+    // is the clearest possible instruction this system can receive, and it was the one case
+    // it ignored. Clearing consent_given_at here is what makes the gate actually close.
+    const { data: prior } = await db
+      .from("parents")
+      .select("consent_given_at, consent_refused_at")
+      .eq("id", parentId)
+      .maybeSingle();
+    const isWithdrawal = Boolean(prior?.consent_given_at);
+
     const { data: refused, error } = await db
       .from("parents")
-      .update({ consent_refused_at: new Date().toISOString() })
+      .update({ consent_refused_at: new Date().toISOString(), consent_given_at: null })
       .eq("id", parentId)
-      .is("consent_given_at", null)
       .is("consent_refused_at", null)
       .select("id")
       .maybeSingle();
@@ -93,13 +108,11 @@ export async function POST(request: Request) {
       log.error("consent.persist_refusal_failed", { parent_id: parentId, err: error });
     }
 
-    // Only when the refusal was actually recorded. The tool is reachable on any call and
-    // the prompt tells the model to use it whenever someone "seems unwilling", so an
-    // already-consented parent could otherwise trigger "we've stopped calling" while the
-    // scheduler carried on calling normally — an alert that contradicts the system's own
-    // behaviour. No row updated means nothing changed, so there is nothing to announce.
+    // Only announce when something actually changed. The remaining no-op case is a repeat
+    // refusal (consent_refused_at already set) — real, but already reported, and telling
+    // the caregiver again every time they retry would be its own kind of noise.
     if (!refused) {
-      log.info("consent.refusal_not_recorded", { parent_id: parentId });
+      log.info("consent.refusal_already_recorded", { parent_id: parentId });
       return NextResponse.json({ ok: true, result: "Understood." });
     }
 
@@ -112,8 +125,12 @@ export async function POST(request: Request) {
       parentId,
       "notify_on_miss",
       activeCall.id,
-      `${parentName} declined the daily check-in calls when asked for permission to record, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the test call button.`,
-      { fingerprint: alertFingerprint("consent-refused", [parentId]) }
+      isWithdrawal
+        ? `${parentName} asked us to stop the daily check-in calls, so we've stopped. They'd agreed before, so this is a change of mind rather than a first refusal — it may be worth a conversation. If they'd like to start again, use the button on your dashboard.`
+        : `${parentName} declined the daily check-in calls when asked for permission to record, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the button on your dashboard.`,
+      // Withdrawal and first refusal are genuinely different events for a family, so they
+      // don't dedupe against each other.
+      { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId]) }
     );
   }
 

@@ -140,12 +140,24 @@ export async function POST(request: Request) {
   ]);
   const parent = parentRow as Parent | null;
   if (!parent) {
-    // "We could not read the parent row" is not the same as "they did not consent", but the
-    // discard branch below cannot tell them apart — it would destroy the transcript, skip
-    // Claude, send nothing to the family, and log it as a refusal. A transient read failure
-    // must be retryable instead, so return 5xx and let Vapi redeliver; the atomic claim
-    // above makes redelivery safe.
-    log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id });
+    // "We could not read the parent row" is not the same as "they did not consent" — the
+    // discard branch below cannot tell them apart and would destroy the transcript, skip
+    // Claude, alert nobody, and log it as a refusal. So this has to be retryable.
+    //
+    // Retryable means releasing the claim first. The claim above already moved the row to
+    // 'completed', and isAlreadyProcessed() returns early for 'completed' — so returning
+    // 503 while still holding it makes Vapi's redelivery a silent no-op and strands the
+    // call as "completed" with a null transcript, which the dashboard renders as a normal,
+    // healthy check-in. Putting the status back is what actually makes the retry work.
+    const { error: releaseError } = await db
+      .from("calls")
+      .update({ status: call.status })
+      .eq("id", call.id)
+      .eq("status", targetStatus);
+    if (releaseError) {
+      log.error("webhook.claim_release_failed", { call_id: call.id, err: releaseError });
+    }
+    log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id, claim_released: !releaseError });
     return NextResponse.json({ ok: false, error: "Could not load parent" }, { status: 503 });
   }
   const parentName = parent.name;
