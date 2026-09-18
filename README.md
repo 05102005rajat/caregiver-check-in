@@ -227,9 +227,14 @@ npm run dev
 **Supabase** — create a project, run every file in `supabase/migrations/` in numeric
 order, copy the keys from Settings → API.
 
-**Vapi** — create an assistant and paste the system prompt, then set its Server URL to
-`https://<deploy>/api/vapi/webhook` with an `x-webhook-secret` header. A free Vapi number
-works; no Twilio number is needed for calling.
+**Vapi** — create an assistant and paste in `prompts/vapi-system-prompt.txt`, then set its
+Server URL to `https://<deploy>/api/vapi/webhook` with an `x-webhook-secret` header. A free
+Vapi number works; no Twilio number is needed for calling.
+
+> The prompt lives in the repo but **does not deploy with it** — Vapi holds its own copy, so
+> editing the file changes nothing until it is pasted into the dashboard. `npm run
+> eval:conversation` scores the file, not what is live, so a green run on an unpasted change
+> means nothing. Re-paste after every edit.
 
 **Cron** — `/api/cron/tick` is a plain `CRON_SECRET`-protected route. Vercel's Hobby plan
 only permits daily crons (and a sub-daily schedule in `vercel.json` hard-blocks

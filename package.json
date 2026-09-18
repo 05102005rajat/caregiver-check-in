@@ -9,6 +9,7 @@
     "lint": "eslint",
     "test": "TZ=UTC vitest run",
     "eval": "tsx evals/run.ts",
+    "eval:conversation": "tsx evals/conversation.ts",
     "security": "tsx security/isolation.ts"
   },
   "dependencies": {
