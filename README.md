@@ -13,6 +13,12 @@ The parent needs nothing but a phone. No app, no device, no wearable.
 
 ---
 
+> **Working on this codebase?** Read [HANDOVER.md](HANDOVER.md) first. It documents the
+> invariants that have broken repeatedly (the consent gate, alert dedupe, calling hours),
+> how to verify changes by driving the running app rather than reading it, and the nine
+> tests that could not fail. It is loaded automatically via CLAUDE.md.
+
+
 ## How it works
 
 ```
