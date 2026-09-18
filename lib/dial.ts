@@ -7,6 +7,9 @@ import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires the actual Vapi call and records the outcome on an already-created `calls` row. */
+/** Why a dial didn't happen, when it didn't. Callers must not report success blindly. */
+export type DialOutcome = { dialed: true } | { dialed: false; reason: "outside_calling_hours" | "provider_error" };
+
 export async function dialAndRecord(
   db: ReturnType<typeof createAdminClient>,
   callId: string,
@@ -15,7 +18,7 @@ export async function dialAndRecord(
   medsDue: Medication[],
   todaysAppointments: Appointment[],
   watchItems: WatchItem[]
-) {
+): Promise<DialOutcome> {
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
   // switch into the consent question — cuts one full back-and-forth out of the call.
@@ -43,8 +46,18 @@ export async function dialAndRecord(
     });
     // Terminal, not retried: by the time the window reopens this slot is many hours stale,
     // and a "did you take your 9am pill?" call at 8am tomorrow is its own kind of confusing.
-    await db.from("calls").update({ status: "failed" }).eq("id", callId).eq("status", "scheduled");
-    return;
+    //
+    // Scoped to both active statuses, not just 'scheduled'. processRetries claims a row by
+    // setting it 'in_progress' BEFORE calling here, so a 'scheduled'-only guard matched
+    // nothing on that path: the row stayed in_progress, the reaper flipped it to no_answer
+    // ten minutes later, the next tick retried, the dial was refused again — looping until
+    // the family was texted "didn't answer after 2 tries" about calls never placed.
+    await db
+      .from("calls")
+      .update({ status: "failed" })
+      .eq("id", callId)
+      .in("status", ["scheduled", "in_progress"]);
+    return { dialed: false, reason: "outside_calling_hours" };
   }
 
   // Recorded before the dial, not after. Everything else we know about a call — status,
@@ -98,7 +111,7 @@ export async function dialAndRecord(
     // it gets the same number of chances before genuinely giving up and alerting family.
     log.error("dial.trigger_failed", { call_id: callId, parent_id: parent.id, err });
     await db.from("calls").update({ status: "no_answer", called_at: new Date().toISOString() }).eq("id", callId);
-    return;
+    return { dialed: false, reason: "provider_error" };
   }
 
   log.info("dial.placed", { call_id: callId, parent_id: parent.id, vapi_call_id: vapiCall.id, meds: medsDue.length });
@@ -113,6 +126,8 @@ export async function dialAndRecord(
     // beyond our own bookkeeping hiccup. Leave status as-is and just log for investigation.
     log.error("dial.persist_vapi_id_failed", { call_id: callId, parent_id: parent.id, vapi_call_id: vapiCall.id, err: error });
   }
+
+  return { dialed: true };
 }
 
 /** Creates a calls row for `scheduledFor` and dials, skipping if that exact slot already exists. */
@@ -124,7 +139,7 @@ export async function scheduleAndDial(
   todaysAppointments: Appointment[],
   scheduledFor: Date,
   watchItems: WatchItem[]
-): Promise<boolean> {
+): Promise<DialOutcome> {
   // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
   const { data: callRow, error: insertError } = await db
@@ -142,10 +157,12 @@ export async function scheduleAndDial(
 
   if (insertError) {
     if (insertError.code !== "23505") console.error("Failed to create calls row", insertError);
-    return false; // already scheduled this slot, or a real error either way nothing to dial
+    return { dialed: false, reason: "provider_error" }; // already scheduled, or a real error
   }
-  if (!callRow) return false;
+  if (!callRow) return { dialed: false, reason: "provider_error" };
 
-  await dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems);
-  return true;
+  // Returns what actually happened to the *call*, not whether the row was inserted. The
+  // test-call route reports success from this value, and a refused dial reported as true
+  // told a caregiver "calling now" while nothing was placed.
+  return dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems);
 }

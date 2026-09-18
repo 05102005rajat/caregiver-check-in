@@ -60,7 +60,9 @@ describe("retryDecision", () => {
     expect(decision).toBe("exhausted");
   });
 
-  it("gives up on a slot that is hours stale instead of calling about a long-gone dose", () => {
+  it("reports lateness as too_late, not exhausted — nobody ignored anything", () => {
+    // The distinction is load-bearing: processRetries texts "didn't answer after N tries"
+    // on "exhausted", which would be a false statement about the parent after an outage.
     // The 9am-slot-dialled-at-8pm case. This path had no lateness check at all: it asked
     // only whether retry_after_minutes had elapsed, so a scheduler outage turned into a
     // late-evening call about a morning medication.
@@ -73,7 +75,7 @@ describe("retryDecision", () => {
         rules(),
         elevenHoursLater
       )
-    ).toBe("exhausted");
+    ).toBe("too_late");
   });
 
   it("still retries a slot that is late but not absurdly so", () => {
@@ -99,7 +101,7 @@ describe("retryDecision", () => {
         rules(),
         new Date(lateAttempt.getTime() + 31 * 60 * 1000)
       )
-    ).toBe("exhausted");
+    ).toBe("too_late");
   });
 
   it("respects a custom max_retries", () => {

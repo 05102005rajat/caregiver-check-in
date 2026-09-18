@@ -1,7 +1,13 @@
 import { minutesBetween } from "@/lib/schedule";
 import type { Call, EscalationRules } from "@/types/db";
 
-export type RetryDecision = "wait" | "retry" | "exhausted";
+/**
+ * "exhausted" means they didn't pick up after the configured attempts. "too_late" means we
+ * stopped trying because the slot is stale — nobody ignored anything. Conflating them told
+ * families "didn't answer their 9:00am check-in after 2 tries" about a call attempted once,
+ * after an outage, which is both false and alarming in the wrong direction.
+ */
+export type RetryDecision = "wait" | "retry" | "exhausted" | "too_late";
 
 /**
  * How stale a slot may be before retrying it stops making sense.
@@ -21,7 +27,7 @@ export function retryDecision(call: Call, rules: EscalationRules, now: Date = ne
   // Judged from the slot it was for, not from the last attempt — otherwise a chain of
   // retries walks the call arbitrarily far from the time it was actually about.
   const minutesLate = (now.getTime() - new Date(call.scheduled_for).getTime()) / 60000;
-  if (minutesLate > MAX_RETRY_LATENESS_MINUTES) return "exhausted";
+  if (minutesLate > MAX_RETRY_LATENESS_MINUTES) return "too_late";
 
   if (minutesBetween(now, new Date(call.called_at)) < rules.retry_after_minutes) return "wait";
   return call.retry_count >= rules.max_retries ? "exhausted" : "retry";

@@ -154,7 +154,11 @@ export async function notifyFamilyContacts(
       .eq("parent_id", parentId)
       .eq("fingerprint", fingerprint)
       .eq("status", "sent")
-      .not("delivery_status", "in", "(undelivered,failed)")
+      // NULL-safe on purpose. `NOT (delivery_status IN (...))` evaluates to NULL — i.e. no
+      // match — for the 17-of-21 rows that have no callback yet, so the previous form
+      // excluded almost every message and dedupe silently stopped suppressing anything.
+      // The comment above said nulls still count; the query did the opposite.
+      .or("delivery_status.is.null,delivery_status.not.in.(undelivered,failed)")
       .gte("sent_at", since)
       .limit(1)
       .maybeSingle();

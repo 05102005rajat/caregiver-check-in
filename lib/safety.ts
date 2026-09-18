@@ -44,7 +44,12 @@ export function scanForConcernKeywords(transcript: string, keywords: string[]): 
  * provider changed something and both backstops are now degraded.
  */
 export function hasRecognisableSpeakerLabels(transcript: string): boolean {
-  return SPEAKER_LINE.test(transcript);
+  // Deliberately checks for ANY labelled turn, not just a parent turn. A call where they
+  // answered and never spoke legitimately contains only "AI:" lines — reporting that as an
+  // unrecognised format would fire the provider-changed alarm on every silent call, which
+  // is exactly the sort of alert nobody reads by week two. hasParentResponse is the thing
+  // that answers "did they speak", and it answers it separately.
+  return /^\s*[A-Za-z][A-Za-z ]{0,15}:/m.test(transcript);
 }
 
 /** Matches a parent/customer turn. Real Vapi transcripts use "User:" (and "AI:" for Rosie). */
@@ -52,7 +57,7 @@ const SPEAKER_LINE = /^\s*(user|customer|human)\s*:/im;
 
 function parentTurnsOnly(transcript: string): string {
   const lines = transcript.split("\n");
-  const parentLines = lines.filter((line) => /^\s*(user|customer|human)\s*:/i.test(line));
+  const parentLines = lines.filter((line) => /^\s*(user|customer|human)\s*:/i.test(line.trim()));
   // If the transcript doesn't use recognizable speaker labels, scanning everything is the
   // safe failure: over-reporting a concern beats missing one.
   return parentLines.length > 0 ? parentLines.join("\n") : transcript;

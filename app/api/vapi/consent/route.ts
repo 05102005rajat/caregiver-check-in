@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import { CONSENT_VERSION } from "@/lib/consent";
+import { SPOKEN_CONSENT_VERSION } from "@/lib/greeting";
 
 export const dynamic = "force-dynamic";
 
@@ -120,7 +120,7 @@ export async function POST(request: Request) {
     parent_id: parentId,
     from: priorState,
     to: nextState,
-    consent_wording_version: CONSENT_VERSION,
+    consent_wording_version: SPOKEN_CONSENT_VERSION,
     asked_via: "consentGreeting",
   });
 

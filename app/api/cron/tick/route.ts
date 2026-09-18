@@ -70,7 +70,7 @@ async function processRetries(
     const decision = retryDecision(call, rules);
     if (decision === "wait") continue;
 
-    const nextStatus = decision === "exhausted" ? "failed" : "in_progress";
+    const nextStatus = decision === "exhausted" || decision === "too_late" ? "failed" : "in_progress";
 
     // Optimistic-concurrency claim: only proceeds if the row is still exactly as we
     // read it. If an overlapping cron tick already claimed it, this affects 0 rows and
@@ -113,7 +113,14 @@ async function processRetries(
               const todaysAppts = appointmentsToday(appointments, parent.timezone, scheduledFor);
               return todaysAppts.length > 0 ? `Their ${formatAppointments(todaysAppts)} appointment was scheduled.` : "";
             })();
-      const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
+      // Two different facts, two different sentences. "Didn't answer after N tries" is a
+      // statement about the parent; when we gave up because the slot went stale it is a
+      // statement about us, and saying the first would be untrue and alarming in a way that
+      // points the family at the wrong thing.
+      const body =
+        decision === "too_late"
+          ? `Heads up: ${parent.name}'s ${time} check-in didn't go out — our scheduler fell behind and it's now too late to call about it. Please check in with them directly. ${subject}`.trim()
+          : `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
         fingerprint: alertFingerprint("miss", [call.scheduled_for]),
         severity: "safety",
@@ -218,21 +225,27 @@ async function reapStaleScheduled(
     // loop could place ~22 real phone calls to the same person. The comment above used to
     // argue MAX_CATCHUP_MINUTES bounded it; it bounds the duration, not the count.
     //
-    // Claimed optimistically on retry_count so two overlapping ticks can't both re-dial.
+    // Claimed on called_at rather than retry_count. retry_count is processRetries' counter
+    // against rules.max_retries: spending it here meant a row re-dialled twice by the reaper
+    // arrived at no_answer already "exhausted", and the family was told the parent didn't
+    // answer after 2 tries with no retry ever actually placed. One counter, two meanings.
+    //
+    // called_at advances on each reaper attempt, so it both claims the row against an
+    // overlapping tick and bounds the attempts by age.
+    const attempts = row.called_at ? Math.floor((now.getTime() - new Date(row.created_at).getTime()) / (10 * 60 * 1000)) : 0;
     const { data: claimed } = await db
       .from("calls")
-      .update({ retry_count: row.retry_count + 1 })
+      .update({ called_at: now.toISOString() })
       .eq("id", row.id)
       .eq("status", "scheduled")
-      .eq("retry_count", row.retry_count)
       .select("id")
       .maybeSingle();
     if (!claimed) continue;
 
-    if (row.retry_count >= MAX_STALE_REDIALS) {
+    if (attempts >= MAX_STALE_REDIALS) {
       const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
       if (error) log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: error });
-      log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, attempts: row.retry_count });
+      log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, attempts });
       continue;
     }
 
@@ -320,6 +333,12 @@ async function processParent(
     Math.max(
       parent.paused_until ? new Date(parent.paused_until).getTime() : 0,
       parent.resumed_at ? new Date(parent.resumed_at).getTime() : 0,
+      // A deliberate pre-warm hold is not a period we failed to cover. Omitting it meant
+      // that when a caregiver held the first call until 2pm, the first tick afterwards saw
+      // every earlier slot that day as due-and-too-late and texted "their 8:00am check-in
+      // was missed" for a day the system had chosen not to call — the same burst the
+      // paused_until/resumed_at terms exist to prevent, re-opened one path over.
+      parent.first_call_after ? new Date(parent.first_call_after).getTime() : 0,
       parent.created_at ? new Date(parent.created_at).getTime() : 0
     )
   );
@@ -383,7 +402,7 @@ async function processParent(
         continue;
       }
 
-      const dialed = await scheduleAndDial(
+      const outcome = await scheduleAndDial(
         db,
         parent,
         ctx.caregiverName,
@@ -392,7 +411,7 @@ async function processParent(
         scheduledFor,
         ctx.watchItems
       );
-      if (dialed) callsTriggered += 1;
+      if (outcome.dialed) callsTriggered += 1;
     }
 
     // Appointment-only fallback: the loop above only ever fires for a due medication, so
@@ -436,7 +455,7 @@ async function processParent(
           });
           continue;
         }
-        const dialed = await scheduleAndDial(
+        const outcome = await scheduleAndDial(
           db,
           parent,
           ctx.caregiverName,
@@ -445,7 +464,7 @@ async function processParent(
           scheduledFor,
           ctx.watchItems
         );
-        if (dialed) callsTriggered += 1;
+        if (outcome.dialed) callsTriggered += 1;
       }
     }
 
@@ -632,11 +651,18 @@ export async function GET(request: Request) {
   // the raw conversation goes. Run here rather than as a separate job so it cannot be
   // forgotten, and bounded so one slow sweep can't stall a tick that has calls to place.
   const retentionCutoff = new Date(now.getTime() - TRANSCRIPT_RETENTION_DAYS * 86400000).toISOString();
+  // Ordered because PostgREST rejects a limited UPDATE without one — the previous form
+  // errored on every tick and only produced a log line, while /privacy told people
+  // transcripts "are automatically deleted after 30 days". Keyed off created_at rather than
+  // called_at: a call whose post-dial write failed keeps called_at null yet still receives a
+  // transcript from the webhook, so exactly the rows produced by known bookkeeping failures
+  // were the ones retained forever.
   const { data: expired, error: retentionError } = await db
     .from("calls")
     .update({ transcript: null })
-    .lt("called_at", retentionCutoff)
+    .lt("created_at", retentionCutoff)
     .not("transcript", "is", null)
+    .order("created_at", { ascending: true })
     .select("id")
     .limit(500);
   if (retentionError) {

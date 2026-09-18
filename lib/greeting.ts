@@ -32,6 +32,14 @@
  *   avoid — the same failure mode as pressuring them about a pill. Making refusal safe is
  *   what makes the yes worth having.
  */
+/**
+ * Version of the SPOKEN consent wording. Distinct from CONSENT_VERSION in lib/consent.ts,
+ * which versions the SMS opt-in checkbox copy — logging that one against a verbal consent
+ * pointed the record at the wrong document entirely, and would re-label call-consent
+ * records whenever unrelated SMS copy changed. Bump this whenever consentGreeting changes.
+ */
+export const SPOKEN_CONSENT_VERSION = "2026-09-18.1";
+
 export function consentGreeting(parentName: string, assistantName: string, caregiverName: string): string {
   return (
     `Hi ${parentName}, I'm ${assistantName} — ${caregiverName} asked me to check in with you each day. ` +

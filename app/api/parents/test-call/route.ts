@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
+import { CALLING_HOURS_END, CALLING_HOURS_START, describeLocalTime } from "@/lib/callwindow";
 import { appointmentsToday, medsAtLocalTime } from "@/lib/schedule";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
@@ -41,7 +42,7 @@ export async function POST() {
   // scheduleAndDial's insert is atomically guarded by a unique index on parent_id for
   // any active (scheduled/in_progress) call, so a double-click or two open tabs can't
   // both place a real Vapi call — one insert wins, the other fails and returns false here.
-  const dialed = await scheduleAndDial(
+  const outcome = await scheduleAndDial(
     db,
     parent,
     caregiver?.name ?? "your family",
@@ -57,7 +58,20 @@ export async function POST() {
     (watchItems ?? []) as WatchItem[]
   );
 
-  if (!dialed) {
+  if (!outcome.dialed) {
+    // Reporting the row insert as success meant that at 21:30 local this returned ok:true
+    // and the UI said "Calling now", while dialAndRecord had silently refused the window
+    // and no call was placed. This is the documented way out of the consent gate — both the
+    // dashboard banner and the refusal SMS point at it — so a caregiver acting on that
+    // instruction in the evening was told it worked and nothing happened.
+    if (outcome.reason === "outside_calling_hours") {
+      return NextResponse.json(
+        {
+          error: `It's ${describeLocalTime(new Date(), parent.timezone)} where ${parent.name} is. Check-in calls only go out between ${CALLING_HOURS_START}:00 and ${CALLING_HOURS_END}:00 — try again in the morning.`,
+        },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { error: "There's already an active call for this parent — wait for it to finish first" },
       { status: 409 }

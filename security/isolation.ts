@@ -196,8 +196,45 @@ async function main() {
       anonRpc !== null && afterAnon?.phone === "+15555550102",
       `rpc error: ${anonRpc?.message ?? "NONE — call succeeded"}; phone is now ${afterAnon?.phone}`
     );
-    // Snapshot the other tenant before deleting, so "didn't touch B" is measured rather
-    // than assumed to be 1.
+    // Give B a real household that SHARES a family-contact number with A. Without this,
+    // "deleting one household does not touch another" compared 0 to 0 and would have passed
+    // unchanged if delete_parent_household emptied the entire database — which matters
+    // because that function deletes sms_opt_ins by bare phone number, with no household
+    // scoping (0021 keys that table on phone alone). Two adult children listing the same
+    // sibling is the ordinary case, and it is the case this check exists to protect.
+    const SHARED_CONTACT_PHONE = "+15555550103";
+    const { data: bParentId, error: bSetupError } = await admin.rpc("save_parent_setup", {
+      p_caregiver_id: b.id,
+      p_caregiver_email: b.email,
+      p_caregiver_name: "Caregiver B",
+      p_caregiver_phone: "+15555550201",
+      p_parent_name: "Parent B",
+      p_parent_phone: "+15555550202",
+      p_parent_timezone: "America/Los_Angeles",
+      p_assistant_name: "Rosie",
+      p_medications: [],
+      p_appointments: [],
+      p_family_contacts: [
+        { name: "Shared Sibling", phone: SHARED_CONTACT_PHONE, email: "", role: "son", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true },
+      ],
+      p_watch_items: [],
+      p_retry_after_minutes: 30,
+      p_max_retries: 2,
+    });
+    if (bSetupError || !bParentId) throw new Error(`B setup failed: ${bSetupError?.message}`);
+
+    // A consent record for the shared number, belonging to B as much as to A.
+    await admin.from("sms_opt_ins").upsert(
+      {
+        phone: SHARED_CONTACT_PHONE,
+        name: "Shared Sibling",
+        consented_at: new Date().toISOString(),
+        consent_text: "evidence that must survive A's deletion",
+        consent_version: "probe",
+      },
+      { onConflict: "phone" }
+    );
+
     const { count: bHouseholdsBefore } = await admin
       .from("parents")
       .select("id", { count: "exact", head: true })
@@ -244,9 +281,26 @@ async function main() {
     const { count: bParentLeft } = await admin.from("parents").select("id", { count: "exact", head: true }).eq("caregiver_id", b.id);
     check(
       "deleting one household does not touch another",
-      (bParentLeft ?? 0) === (bHouseholdsBefore ?? 0),
-      `caregiver B had ${bHouseholdsBefore ?? 0} parent(s), now has ${bParentLeft ?? 0}`
+      (bHouseholdsBefore ?? 0) === 1 && (bParentLeft ?? 0) === 1,
+      `caregiver B had ${bHouseholdsBefore ?? 0} parent(s), now has ${bParentLeft ?? 0} (both must be 1, or this check proves nothing)`
     );
+
+    // The sharp edge: sms_opt_ins has no household scoping, so deleting A must not take
+    // B's consent evidence for a number they both use.
+    const { data: sharedOptIn } = await admin
+      .from("sms_opt_ins")
+      .select("consent_text, consented_at")
+      .eq("phone", SHARED_CONTACT_PHONE)
+      .maybeSingle();
+    check(
+      "deleting a household leaves another household's consent record for a shared number",
+      Boolean(sharedOptIn?.consent_text) && Boolean(sharedOptIn?.consented_at),
+      sharedOptIn ? "row present but consent evidence was stripped" : "row was deleted outright"
+    );
+
+    // B's own caregiver row must survive too.
+    const { count: bCaregiverLeft } = await admin.from("caregivers").select("id", { count: "exact", head: true }).eq("id", b.id);
+    check("deleting a household leaves the other caregiver's record", (bCaregiverLeft ?? 0) === 1, `${bCaregiverLeft ?? 0} row(s)`);
 
     // Only skip the finally-sweep when everything really did go. Clearing this
     // unconditionally would abandon probe rows in exactly the failure case where they exist.
@@ -254,14 +308,19 @@ async function main() {
 
   } finally {
     // Clean up regardless of outcome — a failed run must not leave probe households behind.
-    if (parentA) {
-      await admin.from("messages").delete().eq("parent_id", parentA);
-      await admin.from("calls").delete().eq("parent_id", parentA);
+    // Both households now, since B has a real one (it is what makes the cross-tenant
+    // deletion check non-vacuous), plus the shared opt-in row that check depends on.
+    const { data: probeParents } = await admin.from("parents").select("id").in("caregiver_id", [a.id, b.id]);
+    for (const row of probeParents ?? []) {
+      const pid = row.id as string;
+      await admin.from("messages").delete().eq("parent_id", pid);
+      await admin.from("calls").delete().eq("parent_id", pid);
       for (const t of ["medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
-        await admin.from(t).delete().eq("parent_id", parentA);
+        await admin.from(t).delete().eq("parent_id", pid);
       }
-      await admin.from("parents").delete().eq("id", parentA);
+      await admin.from("parents").delete().eq("id", pid);
     }
+    await admin.from("sms_opt_ins").delete().eq("phone", "+15555550103");
     await admin.from("caregivers").delete().in("id", [a.id, b.id]);
     await admin.auth.admin.deleteUser(a.id);
     await admin.auth.admin.deleteUser(b.id);

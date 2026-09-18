@@ -20,14 +20,23 @@ describe("the speaker-label format the safety backstop depends on", () => {
     expect(scanForConcernKeywords(fromAssistantOnly, DEFAULT_CONCERN_KEYWORDS)).toEqual([]);
   });
 
-  it("recognises a transcript with no parent turns as exactly that", () => {
-    expect(hasParentResponse("AI: Hi Margaret, are you there?\nAI: Hello?")).toBe(false);
-    expect(hasRecognisableSpeakerLabels("AI: Hi Margaret, are you there?")).toBe(false);
+  it("separates 'they never spoke' from 'we can't parse this'", () => {
+    // A silent call is a real, expected outcome and must not fire the provider-changed
+    // alarm — the format is fine, the person just didn't say anything.
+    const silent = "AI: Hi Margaret, are you there?\nAI: Hello?";
+    expect(hasParentResponse(silent)).toBe(false);
+    expect(hasRecognisableSpeakerLabels(silent)).toBe(true);
+  });
+
+  it("treats an unlabelled blob as unparseable", () => {
+    expect(hasRecognisableSpeakerLabels("hi margaret are you there hello")).toBe(false);
   });
 
   it("flags an unrecognised format instead of pretending it parsed", () => {
     // The shape a provider change might take — no error today, just silent degradation.
     const renamed = REAL_VAPI_TRANSCRIPT.replace(/^User:/gm, "Caller:").replace(/^AI:/gm, "Agent:");
-    expect(hasRecognisableSpeakerLabels(renamed)).toBe(false);
+    // Still a labelled transcript, so not an unparseable blob — but no turn we can
+    // attribute to the parent, which is the half the safety scan depends on.
+    expect(hasParentResponse(renamed)).toBe(false);
   });
 });
