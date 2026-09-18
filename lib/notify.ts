@@ -41,22 +41,39 @@ async function sendAlert(
   // `recipient` is denormalized on purpose: contact_id goes null if that contact is
   // later removed from the setup form (ON DELETE SET NULL), and "who did we actually
   // notify" has to stay answerable after the fact for a care product.
+  // Every insert below is checked. A dropped `messages` row is not cosmetic: the dashboard
+  // shows no alert for a call where the family *was* texted, the operator view's failed-
+  // notification list is incomplete, and — worst — the fingerprint/sent_at dedupe lookup
+  // finds nothing, so the identical alert re-sends on the next call inside the window.
+  const recordMessage = async (row: Record<string, unknown>, channel: string) => {
+    const { error } = await db.from("messages").insert(row);
+    if (error) {
+      log.error("notify.message_insert_failed", {
+        parent_id: parentId,
+        call_id: callId,
+        channel,
+        recipient: row.recipient,
+        err: error,
+      });
+    }
+  };
+
   if (suppressed) {
     // Recorded rather than silently skipped, so the caregiver can see this person wasn't
     // contacted and why. Email is a separate channel and a separate consent — opting out
     // of texts shouldn't silently cut someone off from everything.
-    await db.from("messages").insert({
+    await recordMessage({
       ...common,
       recipient: phone,
       status: "failed",
       channel: "sms",
       delivery_status: "undelivered",
       error: "Recipient has opted out of text messages",
-    });
+    }, "sms");
   } else {
     try {
       const sid = await sendSms(phone, body);
-      await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
+      await recordMessage({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" }, "sms");
       log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
     } catch (err) {
       // A 21610 is the carrier telling us this person sent STOP. Record it so we stop
@@ -68,13 +85,13 @@ async function sendAlert(
       // Don't let a Twilio failure be silently equivalent to "the family was told" —
       // record it so it's visible (e.g. via Supabase) rather than only in server logs.
       log.error("notify.sms_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: phone, err });
-      await db.from("messages").insert({
+      await recordMessage({
         ...common,
         recipient: phone,
         status: "failed",
         channel: "sms",
         error: err instanceof Error ? err.message : String(err),
-      });
+      }, "sms");
     }
   }
 
@@ -82,16 +99,16 @@ async function sendAlert(
 
   try {
     const messageId = await sendEmail(email, "Caregiver Check-In update", body);
-    await db.from("messages").insert({ ...common, recipient: email, twilio_sid: messageId, status: "sent", channel: "email" });
+    await recordMessage({ ...common, recipient: email, twilio_sid: messageId, status: "sent", channel: "email" }, "email");
   } catch (err) {
     log.error("notify.email_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: email, err });
-    await db.from("messages").insert({
+    await recordMessage({
       ...common,
       recipient: email,
       status: "failed",
       channel: "email",
       error: err instanceof Error ? err.message : String(err),
-    });
+    }, "email");
   }
 }
 

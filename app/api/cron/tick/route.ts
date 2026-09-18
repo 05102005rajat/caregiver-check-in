@@ -213,6 +213,22 @@ async function processParent(
   const consentBlocksNewCalls =
     Boolean(parent.consent_refused_at && !parent.consent_given_at) || (ctx.hasPriorCalls && !parent.consent_given_at);
 
+  // The earliest slot we're willing to report as "missed" today.
+  //
+  // medsDueNow is cumulative across the local day (that's what makes catch-up work after a
+  // delayed tick), so the first tick after a pause ends — or after a caregiver finishes
+  // setup in the evening — sees every slot from that whole day as due. Each one is past
+  // MAX_CATCHUP_MINUTES, so each took the "too late" branch and sent its own text: the
+  // family got a burst of "their 9:00am check-in was missed" for a day nobody was ever
+  // going to be called on. Ending a pause is precisely when they should hear nothing, and
+  // a brand-new account has no missed history to report.
+  const coverageStartsAt = new Date(
+    Math.max(
+      parent.paused_until ? new Date(parent.paused_until).getTime() : 0,
+      parent.created_at ? new Date(parent.created_at).getTime() : 0
+    )
+  );
+
   const due = medsDueNow(ctx.medications, parent.timezone, now);
   const distinctSlotTimes = [...new Set(due.map((m) => m.time_of_day))];
 
@@ -223,6 +239,17 @@ async function processParent(
       const scheduledFor = scheduledForToday(slotTime, parent.timezone, now);
 
       if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
+        // A slot that elapsed before we were responsible for this parent (during a pause,
+        // or before the account existed) was never ours to miss. Skip silently rather than
+        // texting the family about it.
+        if (scheduledFor < coverageStartsAt) {
+          log.info("cron.slot_before_coverage", {
+            parent_id: parent.id,
+            scheduled_for: scheduledFor.toISOString(),
+            coverage_starts_at: coverageStartsAt.toISOString(),
+          });
+          continue;
+        }
         // Only one active (scheduled/in_progress) call per parent is ever allowed at a
         // time (calls_parent_active_unique). Checked fresh on every slot (not once
         // before the loop) since an earlier slot in this very loop may have just been
@@ -335,9 +362,28 @@ async function processParent(
   // had promised she wouldn't ring again. Any outstanding no-answer rows are closed out
   // instead, so they don't sit in the queue waiting for consent that isn't coming.
   if (consentBlocksNewCalls) {
-    const stranded = ctx.noAnswerCalls.map((c) => c.id);
+    // Also clear any row stuck at 'scheduled'. reapStaleScheduled lives inside the gate
+    // above, so once the gate closes it never runs again — and a row left 'scheduled' by a
+    // failed post-dial write holds the calls_parent_active_unique index forever. That made
+    // /api/parents/test-call return 409 "there's already an active call" permanently, and
+    // the test call is the only documented way back out of the consent gate: both the
+    // dashboard banner and the refusal SMS tell the caregiver to use it. The recovery path
+    // was blocked by the very state it was meant to recover from.
+    const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
+    const { data: strandedScheduled } = await db
+      .from("calls")
+      .select("id")
+      .eq("parent_id", parent.id)
+      .eq("status", "scheduled")
+      .lt("created_at", staleThreshold);
+
+    const stranded = [...ctx.noAnswerCalls.map((c) => c.id), ...(strandedScheduled ?? []).map((r) => r.id as string)];
     if (stranded.length > 0) {
-      const { error } = await db.from("calls").update({ status: "failed" }).in("id", stranded).eq("status", "no_answer");
+      const { error } = await db
+        .from("calls")
+        .update({ status: "failed" })
+        .in("id", stranded)
+        .in("status", ["no_answer", "scheduled"]);
       if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, err: error });
       // Deliberately no "missed call" alert here: the call wasn't missed, it was declined,
       // and the caregiver was already told that once by the consent webhook. Sending a
@@ -432,7 +478,12 @@ export async function GET(request: Request) {
     // permanently read as "no prior calls" whenever that bookkeeping write fails, since
     // vapi_call_id is one of the fields that write sets — silently disabling the consent
     // gate and letting the system keep cold-calling the parent without consent.
-    anyCalls: db.from("calls").select("parent_id").in("parent_id", parentIds).neq("status", "failed"),
+    // Aggregated server-side (migration 0024) rather than fetching every call row and
+    // de-duplicating here. PostgREST silently caps response rows, so the old approach
+    // meant that once total call history outgrew the cap, parents whose rows fell outside
+    // the page read as "never called" — flipping consentBlocksNewCalls to false and
+    // resuming cold-calls to people who never consented, with nothing in the logs.
+    anyCalls: db.rpc("parents_with_calls", { p_parent_ids: parentIds }),
   });
 
   const caregiverNameById = new Map<string, string>(
@@ -445,7 +496,15 @@ export async function GET(request: Request) {
     ((rulesRes.data ?? []) as EscalationRules[]).map((r) => [r.parent_id, r])
   );
   const noAnswerByParent = groupByParentId((noAnswerRes.data ?? []) as Call[]);
-  const parentIdsWithPriorCalls = new Set((anyCallsRes.data ?? []).map((r) => r.parent_id as string));
+  if (anyCallsRes.error) {
+    // Fail closed: if we can't tell who has already been called, assume everyone has, so
+    // the consent gate stays shut rather than defaulting to "never called" and cold-calling.
+    log.error("cron.prior_calls_lookup_failed", { err: anyCallsRes.error });
+  }
+  const priorCallLookupFailed = Boolean(anyCallsRes.error);
+  const parentIdsWithPriorCalls = new Set(
+    ((anyCallsRes.data ?? []) as Array<{ parent_id: string }>).map((r) => r.parent_id)
+  );
 
   const counts = await Promise.all(
     parentList.map((parent) =>
@@ -456,7 +515,9 @@ export async function GET(request: Request) {
         watchItems: watchByParent.get(parent.id) ?? [],
         rules: rulesByParent.get(parent.id) ?? null,
         noAnswerCalls: noAnswerByParent.get(parent.id) ?? [],
-        hasPriorCalls: parentIdsWithPriorCalls.has(parent.id),
+        // On lookup failure every parent is treated as already-called, which keeps the
+        // consent gate shut. The opposite default would cold-call people who never agreed.
+        hasPriorCalls: priorCallLookupFailed || parentIdsWithPriorCalls.has(parent.id),
       })
     )
   );

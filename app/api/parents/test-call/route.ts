@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
-import { appointmentsToday } from "@/lib/schedule";
+import { appointmentsToday, medsAtLocalTime } from "@/lib/schedule";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires an immediate real call to the caregiver's own parent, bypassing the schedule. */
@@ -36,6 +36,8 @@ export async function POST() {
     db.from("watch_items").select("*").eq("parent_id", parent.id),
   ]);
 
+  const testCallAt = new Date();
+
   // scheduleAndDial's insert is atomically guarded by a unique index on parent_id for
   // any active (scheduled/in_progress) call, so a double-click or two open tabs can't
   // both place a real Vapi call — one insert wins, the other fails and returns false here.
@@ -43,9 +45,15 @@ export async function POST() {
     db,
     parent,
     caregiver?.name ?? "your family",
-    (medications ?? []) as Medication[],
+    // Only the medications actually due around now, exactly as a scheduled call computes
+    // them. Passing every active medication meant Rosie asked someone at 10am about their
+    // 8pm pills; anything they hadn't taken yet came back as meds_missed, survived the
+    // isKnownMed check (it was in this call's own scheduled_meds snapshot), and texted the
+    // family "Not taken: ..." for medication that wasn't late at all — a false alarm
+    // produced by the button whose whole job is to prove the system works.
+    medsAtLocalTime((medications ?? []) as Medication[], testCallAt, parent.timezone),
     appointmentsToday((appointments ?? []) as Appointment[], parent.timezone),
-    new Date(),
+    testCallAt,
     (watchItems ?? []) as WatchItem[]
   );
 

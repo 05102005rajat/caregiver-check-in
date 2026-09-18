@@ -72,9 +72,35 @@ async function main() {
   console.log(`False alarm rate:    ${(report.falseAlarmRate * 100).toFixed(0)}%  (this is what burns caregivers out)`);
   console.log(`Medication accuracy: ${(report.medicationAccuracy * 100).toFixed(0)}%`);
 
+  console.log(`Unknown-mood rate:   ${(report.unknownMoodRate * 100).toFixed(0)}%  (high means the model isn't parsing, not that it's judging well)`);
+
+  // Everything below used to be advisory: the only gate was concernRecall, so a run with
+  // 15 of 19 cases failing still exited 0 and reported success.
+  const reasons: string[] = [];
+
   // Recall is the number that must never silently regress.
-  if (report.concernRecall < 1) {
-    console.log("\nFAIL: a concern that should have been reported was missed.");
+  if (report.concernRecall < 1) reasons.push("a concern that should have been reported was missed");
+
+  // The gate that made the gate meaningless: normalize() defaults mood to "unknown" for any
+  // malformed, truncated or empty model response, and wouldAlert treats "unknown" as
+  // alerting. So if the model returned garbage for every single case, every case "would
+  // alert", recall came out 1.0, and the suite passed having measured nothing at all.
+  // Any substantial unknown-mood rate means these numbers describe parse failures.
+  if (report.unknownMoodRate > 0.25) {
+    reasons.push(
+      `${(report.unknownMoodRate * 100).toFixed(0)}% of outputs had mood "unknown" — the model is likely failing to return usable JSON, which inflates concern recall rather than demonstrating it`
+    );
+  }
+
+  if (report.passed < report.total) reasons.push(`${report.total - report.passed} of ${report.total} cases failed`);
+  if (report.falseAlarmRate > 0) reasons.push(`false alarm rate is ${(report.falseAlarmRate * 100).toFixed(0)}%`);
+  if (report.medicationAccuracy < 1) {
+    reasons.push(`medication accuracy is ${(report.medicationAccuracy * 100).toFixed(0)}%`);
+  }
+
+  if (reasons.length > 0) {
+    console.log("\nFAIL:");
+    for (const reason of reasons) console.log(`  - ${reason}`);
     process.exit(1);
   }
 }

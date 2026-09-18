@@ -155,6 +155,27 @@ export async function POST(request: Request) {
   // So: keep the fact that a call happened, discard what was said, and don't send it to
   // Claude either. The caregiver has already been told about a refusal by /api/vapi/consent.
   if (!parent?.consent_given_at) {
+    // Not storing the words is right. Dropping the emergency backstop with them is not:
+    // someone can decline recording and, in the same breath, say "I fell and I can't get
+    // up". The keyword scan exists precisely so a Claude outage or misclassification can't
+    // silently swallow that, and returning early here swallowed it by construction.
+    //
+    // So the scan runs in memory and the alert deliberately carries no quotes, no summary
+    // and no detail — only that something in the call needs a human. That keeps the safety
+    // promise without keeping anything we have no permission to keep.
+    const urgent = scanForConcernKeywords(transcript, concernKeywords);
+    if (urgent.length > 0) {
+      await notifyFamilyContacts(
+        db,
+        call.parent_id,
+        "notify_on_concern",
+        call.id,
+        `Please check on ${parentName} directly. Something they said during today's call may need attention. They didn't agree to the call being recorded, so we haven't kept any details.`,
+        { fingerprint: alertFingerprint("no-consent-urgent", [call.id]) }
+      );
+      log.error("webhook.urgent_without_consent", { call_id: call.id, parent_id: call.parent_id, matches: urgent.length });
+    }
+
     const { error } = await db
       .from("calls")
       .update({ status: "completed", transcript: null, summary: null })

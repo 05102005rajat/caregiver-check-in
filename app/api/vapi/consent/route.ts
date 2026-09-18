@@ -37,14 +37,25 @@ export async function POST(request: Request) {
   // The webhook secret alone would otherwise be a standing credential to set consent for
   // any parent_id. Requiring a currently-active call for that parent narrows a leaked
   // secret's blast radius to "during a call already in progress," not "at any time."
+  // 'scheduled' counts as active too. A call whose post-dial bookkeeping write failed stays
+  // 'scheduled' while genuinely ringing, and rejecting consent for it was expensive out of
+  // all proportion: a parent who clearly said yes had their consent dropped, after which
+  // the end-of-call webhook saw consent_given_at null and destroyed the transcript and
+  // summary, and the cron gate blocked every future call — three irreversible outcomes from
+  // one lost write.
   const { data: activeCall } = await db
     .from("calls")
     .select("id")
     .eq("parent_id", parentId)
-    .eq("status", "in_progress")
+    .in("status", ["in_progress", "scheduled"])
     .limit(1)
     .maybeSingle();
   if (!activeCall) {
+    // Logged at error, and distinctly: the consequences above are silent and permanent, and
+    // the only other trace is webhook.transcript_discarded_no_consent — which is exactly
+    // what a genuine refusal looks like. Without this, a dropped yes is indistinguishable
+    // from a real no.
+    log.error("consent.no_active_call", { parent_id: parentId, consented });
     return NextResponse.json({ error: "No active call for this parent" }, { status: 409 });
   }
 

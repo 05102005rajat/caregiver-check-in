@@ -5,6 +5,7 @@ import type { Call, Message, Parent } from "@/types/db";
 import CallRow from "./CallRow";
 import PauseControl from "./PauseControl";
 import DangerZone from "./DangerZone";
+import TestCallButton from "./TestCallButton";
 
 export const dynamic = "force-dynamic";
 
@@ -103,16 +104,32 @@ export default async function DashboardPage() {
       {/* Mirrors the cron's own gate (a call with status <> 'failed'), not merely "a call
           row exists" — a parent whose only calls were rejected by Vapi still gets dialed,
           so claiming check-ins are paused would contradict what the system actually does. */}
-      {!parent.consent_given_at && calls.some((c) => c.status !== "failed") && (
+      {!parent.consent_given_at && !parent.consent_refused_at && calls.some((c) => c.status !== "failed") && (
         // Without this the caregiver has no way to discover that automatic calls are
         // blocked — they'd just notice calls quietly stopping and assume it was broken.
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-4 text-sm text-amber-900">
           <p className="font-medium">Recording consent not yet given</p>
           <p className="mt-1">
             {parent.name} hasn&apos;t agreed to the call being recorded yet, so automatic check-ins are
-            paused until they do. Use &ldquo;Call now to test&rdquo; on the setup page — Rosie will ask again at
-            the start of that call.
+            paused until they do. It&apos;s worth speaking to them yourself first — then use the button
+            below, and Rosie will ask again at the start of that call.
           </p>
+          <TestCallButton parentName={parent.name} />
+        </div>
+      )}
+      {!parent.consent_given_at && parent.consent_refused_at && (
+        // A refusal is not the same as "hasn't answered yet": Rosie promised not to ring
+        // again, and the scheduler honours that. Saying only "not yet given" here would
+        // imply the system is still trying, which it deliberately is not.
+        <div className="rounded-xl border border-slate-300 bg-slate-50 p-4 mb-4 text-sm text-slate-700">
+          <p className="font-medium">{parent.name} declined the calls</p>
+          <p className="mt-1">
+            On{" "}
+            {new Date(parent.consent_refused_at).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}{" "}
+            {parent.name} said they&apos;d rather not be recorded, so we stopped calling and haven&apos;t
+            rung since. If they change their mind, talk to them first and then use the button below.
+          </p>
+          <TestCallButton parentName={parent.name} />
         </div>
       )}
       {parent.consent_given_at && (

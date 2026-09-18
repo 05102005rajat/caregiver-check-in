@@ -73,7 +73,9 @@ async function main() {
       p_parent_timezone: "America/Los_Angeles",
       p_assistant_name: "Rosie",
       p_medications: [{ name: "SecretMed", dose: "", time_of_day: "09:00", notes: "", description: "", start_date: "", end_date: "" }],
-      p_appointments: [],
+      // Seeded deliberately: with an empty list the "B cannot read A's appointments"
+      // assertion below passed identically with RLS switched off entirely.
+      p_appointments: [{ title: "Secret cardiology appt", starts_at: new Date(Date.now() + 86400000).toISOString(), location: "", notes: "" }],
       p_family_contacts: [
         { name: "Contact A", phone: "+15555550103", email: "", role: "son", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true },
       ],
@@ -100,6 +102,18 @@ async function main() {
 
     const { data: ownTranscript } = await a.client.from("calls").select("transcript").eq("parent_id", parentA);
     check("caregiver A can read their own transcript (control)", (ownTranscript ?? []).some((c) => c.transcript === "SECRET TRANSCRIPT"));
+
+    // Every child table gets a control read as A. Without these, an RLS change that made a
+    // table unreadable by everyone — or a fixture that stopped seeding it — would satisfy
+    // the "B sees nothing" assertions below while proving nothing at all.
+    for (const table of CHILD_TABLES) {
+      const { data, error } = await a.client.from(table).select("*").eq("parent_id", parentA);
+      check(
+        `caregiver A can read their own ${table} (control)`,
+        !error && (data ?? []).length > 0,
+        error ? `error: ${error.message}` : `saw 0 rows — fixture seeds none, so the isolation check below is vacuous`
+      );
+    }
 
     // --- B must not reach any of it ---
     const { data: stolenParent } = await b.client.from("parents").select("*").eq("id", parentA);
