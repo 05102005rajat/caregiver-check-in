@@ -98,10 +98,11 @@ npm run eval     # spends real Anthropic tokens; run on prompt/model changes
 ```
 
 ```
-Passed:              15/15
+Passed:              19/19
 Concern recall:      100%   ← missing these is the dangerous direction
 False alarm rate:      0%   ← this is what burns caregivers out
 Medication accuracy: 100%
+Unknown-mood rate:     0%   ← high means it's measuring parse failures, not judgement
 ```
 
 The runner applies the same deterministic backstops as production, so it measures the
@@ -120,10 +121,16 @@ type checker and to every other test here.
 npm run security   # creates two throwaway caregivers, attacks one from the other, cleans up
 ```
 
-17 checks, phrased as attacks: caregiver B attempting to read, alter, or delete A's
+28 checks, phrased as attacks: caregiver B attempting to read, alter, or delete A's
 parent, medications, contacts, watch items, calls, messages and transcripts, plus the
-privilege-escalation path through the setup RPC, plus the same attempted anonymously.
-Two controls confirm the suite isn't passing vacuously.
+privilege-escalation path through the setup RPC, plus the same attempted anonymously, plus
+household deletion driven through the real transaction it uses in production.
+
+Every child table has a matching control read as its owner. That is not decoration: the
+appointments check once passed identically with RLS switched off entirely, because the
+fixture seeded no appointments, and the "deleting one household doesn't touch another"
+check once compared 0 to 0 because the second caregiver had no household. A check that
+cannot fail is worse than no check, because it is counted.
 
 This is not theoretical: a `SECURITY DEFINER` RPC taking `caregiver_id` as a parameter
 was briefly callable with the public anon key, which would have let anyone rewrite
@@ -143,8 +150,11 @@ logic:
 | Two calls active for one parent at once | `calls_parent_active_unique` partial index |
 | Vapi redelivering an end-of-call webhook | Atomic conditional claim on the call's current status |
 | A retry racing another tick | Optimistic-concurrency claim on `(status, retry_count)` |
-| Telling a family the same thing twice | Alert fingerprints over structured facts, 20h window |
+| Telling a family the same thing twice | Alert fingerprints over structured facts — 4h for safety alerts, 20h for routine ones |
 | Partial setup writes | Single transaction (`save_parent_setup` RPC) |
+| Partial deletion after promising "nothing is left" | Single transaction (`delete_parent_household` RPC) |
+| Calling at an unreasonable hour | 08:00–21:00 in the parent's timezone, enforced inside `dialAndRecord` |
+| Re-dialling a stranded row forever | Age-bounded, capped attempts |
 
 Other properties worth knowing:
 
