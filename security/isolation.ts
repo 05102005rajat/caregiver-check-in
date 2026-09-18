@@ -196,38 +196,61 @@ async function main() {
       anonRpc !== null && afterAnon?.phone === "+15555550102",
       `rpc error: ${anonRpc?.message ?? "NONE — call succeeded"}; phone is now ${afterAnon?.phone}`
     );
-    // --- Deletion actually deletes. The privacy policy promises this, and the failure
-    //     mode is silent: telling someone their parent's transcripts are gone while rows
-    //     remain is worse than not offering deletion at all. Mirrors the ordered sweep in
-    //     /api/parents/delete rather than trusting cascade rules.
-    // escalation_rules is keyed by parent_id with no `id` column, so selecting "id" there
-    // errors, leaves count undefined, and the table silently drops out of the residue
-    // total — the one check whose entire job is "nothing was left behind".
-    const CLEANUP_TABLES = ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"] as const;
-    let deleteErrors = 0;
-    for (const t of CLEANUP_TABLES) {
-      const { error: delError } = await admin.from(t).delete().eq("parent_id", parentA);
-      if (delError) deleteErrors += 1;
-    }
-    await admin.from("parents").delete().eq("id", parentA);
+    // Snapshot the other tenant before deleting, so "didn't touch B" is measured rather
+    // than assumed to be 1.
+    const { count: bHouseholdsBefore } = await admin
+      .from("parents")
+      .select("id", { count: "exact", head: true })
+      .eq("caregiver_id", b.id);
 
+    // --- Deletion actually deletes, through the code that actually runs. ---
+    //
+    // This used to issue its own service-role DELETEs and then count the rows it had just
+    // deleted, which is near-tautological: it proved Postgres can delete, not that the
+    // product's deletion path works. It now calls delete_parent_household (0028), the one
+    // transaction /api/parents/delete invokes, so a regression there fails here.
+    const { error: delRpcError } = await admin.rpc("delete_parent_household", {
+      p_caregiver_id: a.id,
+      p_parent_id: parentA,
+    });
+
+    const CLEANUP_TABLES = ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"] as const;
     let residue = 0;
     for (const t of CLEANUP_TABLES) {
+      // escalation_rules is keyed by parent_id with no `id` column, so selecting "id" there
+      // errors, leaves count undefined, and the table silently drops out of the residue
+      // total — the one check whose entire job is "nothing was left behind".
       const { count, error: countError } = await admin.from(t).select("parent_id", { count: "exact", head: true }).eq("parent_id", parentA);
-      // An unreadable table can't be claimed as empty.
-      if (countError) residue += 1;
+      if (countError) residue += 1; // an unreadable table can't be claimed as empty
       residue += count ?? 0;
     }
     const { count: parentsLeft } = await admin.from("parents").select("id", { count: "exact", head: true }).eq("id", parentA);
-    const fullyDeleted = residue === 0 && (parentsLeft ?? 0) === 0 && deleteErrors === 0;
     check(
-      "deleting a household leaves no transcripts or other rows behind",
-      fullyDeleted,
-      `${residue} child row(s), ${parentsLeft} parent row(s) remain, ${deleteErrors} delete error(s)`
+      "delete_parent_household leaves no transcripts or other rows behind",
+      !delRpcError && residue === 0 && (parentsLeft ?? 0) === 0,
+      `rpc error: ${delRpcError?.message ?? "none"}; ${residue} child row(s), ${parentsLeft ?? 0} parent row(s) left`
     );
+
+    // The caregiver's own record holds their name, phone and email. "Delete everything"
+    // leaving it behind was silent retention the UI never mentioned.
+    const { count: caregiverLeft } = await admin.from("caregivers").select("id", { count: "exact", head: true }).eq("id", a.id);
+    check(
+      "deleting a household also removes the caregiver's own details",
+      (caregiverLeft ?? 0) === 0,
+      `${caregiverLeft ?? 0} caregiver row(s) left`
+    );
+
+    // It must NOT delete another household on the way past.
+    const { count: bParentLeft } = await admin.from("parents").select("id", { count: "exact", head: true }).eq("caregiver_id", b.id);
+    check(
+      "deleting one household does not touch another",
+      (bParentLeft ?? 0) === (bHouseholdsBefore ?? 0),
+      `caregiver B had ${bHouseholdsBefore ?? 0} parent(s), now has ${bParentLeft ?? 0}`
+    );
+
     // Only skip the finally-sweep when everything really did go. Clearing this
     // unconditionally would abandon probe rows in exactly the failure case where they exist.
-    if (fullyDeleted) parentA = "";
+    if (!delRpcError && residue === 0 && (parentsLeft ?? 0) === 0) parentA = "";
 
   } finally {
     // Clean up regardless of outcome — a failed run must not leave probe households behind.
