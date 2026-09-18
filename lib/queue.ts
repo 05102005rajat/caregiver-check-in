@@ -151,6 +151,7 @@ export async function materializeSlots(
     return false;
   }
 
+  let ok = true;
   const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "med_names" | "state">>;
   const sameMeds = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
@@ -159,8 +160,10 @@ export async function materializeSlots(
   const orphaned = rows.filter((r) => r.state === "pending" && !plannedByDue.has(new Date(r.due_at).getTime()));
   if (orphaned.length > 0) {
     const { error } = await db.from("call_slots").delete().in("id", orphaned.map((r) => r.id)).eq("state", "pending");
-    if (error) log.error("cron.orphan_slots_delete_failed", { parent_id: parent.id, err: error });
-    else log.info("cron.orphan_slots_deleted", { parent_id: parent.id, count: orphaned.length });
+    if (error) {
+      log.error("cron.orphan_slots_delete_failed", { parent_id: parent.id, err: error });
+      ok = false;
+    } else log.info("cron.orphan_slots_deleted", { parent_id: parent.id, count: orphaned.length });
   }
 
   // Planned again after being cancelled: the hold that cancelled it is over.
@@ -173,8 +176,13 @@ export async function materializeSlots(
       .update({ state: "pending", updated_at: now.toISOString() })
       .in("id", revivable.map((r) => r.id))
       .eq("state", "cancelled");
-    if (error) log.error("cron.revive_slots_failed", { parent_id: parent.id, err: error });
-    else {
+    if (error) {
+      // The damaging one. After pause -> resume, a failed revive leaves the rest of the day
+      // cancelled: never dispatched, never expired, never alerted — and the tick used to
+      // report success, which is exactly what the degraded mechanism exists to catch.
+      log.error("cron.revive_slots_failed", { parent_id: parent.id, err: error });
+      ok = false;
+    } else {
       log.info("cron.slots_revived", { parent_id: parent.id, count: revivable.length });
       // The medication loop below reads this snapshot and skips anything that wasn't
       // pending when it was taken, so a slot revived on this same tick would keep the
@@ -194,10 +202,13 @@ export async function materializeSlots(
       .update({ med_names: planned.medNames, updated_at: now.toISOString() })
       .eq("id", row.id)
       .eq("state", "pending");
-    if (error) log.error("cron.slot_meds_update_failed", { parent_id: parent.id, slot_id: row.id, err: error });
+    if (error) {
+      log.error("cron.slot_meds_update_failed", { parent_id: parent.id, slot_id: row.id, err: error });
+      ok = false;
+    }
   }
 
-  if (slots.length === 0) return true;
+  if (slots.length === 0) return ok;
 
   const { error } = await db.from("call_slots").upsert(
     slots.map((slot) => ({
@@ -214,7 +225,7 @@ export async function materializeSlots(
     log.error("cron.materialize_slots_failed", { parent_id: parent.id, err: error });
     return false;
   }
-  return true;
+  return ok;
 }
 
 /** Rings everything that is due and hasn't lapsed. Returns how many calls were placed. */
@@ -255,8 +266,11 @@ export async function dispatchDueSlots(
     .is("call_id", null)
     .lt("updated_at", strandedBefore)
     .select("id");
-  if (strandedError) log.error("cron.stranded_slots_release_failed", { parent_id: parent.id, err: strandedError });
-  else if ((stranded ?? []).length > 0) {
+  let ok = true;
+  if (strandedError) {
+    log.error("cron.stranded_slots_release_failed", { parent_id: parent.id, err: strandedError });
+    ok = false;
+  } else if ((stranded ?? []).length > 0) {
     log.warn("cron.stranded_slots_released", { parent_id: parent.id, count: stranded!.length });
   }
 
@@ -346,7 +360,10 @@ export async function dispatchDueSlots(
         .update({ call_id: outcome.callId, updated_at: new Date().toISOString() })
         .eq("id", slot.id)
         .eq("state", "dispatched");
-      if (linkError) log.error("cron.slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
+      if (linkError) {
+        log.error("cron.slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
+        ok = false;
+      }
       continue;
     }
 
@@ -361,10 +378,13 @@ export async function dispatchDueSlots(
       .update({ state: "pending", updated_at: new Date().toISOString() })
       .eq("id", slot.id)
       .eq("state", "dispatched");
-    if (releaseError) log.error("cron.slot_release_failed", { parent_id: parent.id, slot_id: slot.id, err: releaseError });
+    if (releaseError) {
+      log.error("cron.slot_release_failed", { parent_id: parent.id, slot_id: slot.id, err: releaseError });
+      ok = false;
+    }
     log.info("cron.slot_released", { parent_id: parent.id, slot_id: slot.id, reason: outcome.reason });
   }
-  return { triggered, ok: true };
+  return { triggered, ok };
 }
 
 /**
@@ -383,6 +403,7 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     return false;
   }
 
+  let ok = true;
   for (const slot of (lapsed ?? []) as CallSlot[]) {
     // Did we actually ring for this slot? A slot is released back to pending whenever a
     // dial doesn't produce a call, including a provider error — and a provider error routes
@@ -405,6 +426,7 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       // missed" about a call that was placed and connected — the exact false alarm that
       // guard was added to prevent. The slot stays pending and the next tick decides.
       log.error("cron.expiry_call_lookup_failed", { parent_id: parent.id, slot_id: slot.id, err: existingCallError });
+      ok = false;
       continue;
     }
 
@@ -470,7 +492,20 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       }
     }
     if (!callId) {
+      // The slot is already claimed as expired, so bailing here consumes a genuine missed
+      // check-in with no calls row, no alert, and — because this function returned true —
+      // a stamped heartbeat and a green /api/health. Put it back so the next tick retries,
+      // and report the tick as degraded. HANDOVER rule #1 says write the fact down before
+      // the operation that can fail; the fact was written, but the obligation to tell
+      // someone was thrown away with it.
       log.error("cron.expired_slot_no_call_row", { parent_id: parent.id, slot_id: slot.id });
+      const { error: revertError } = await db
+        .from("call_slots")
+        .update({ state: "pending", updated_at: now.toISOString() })
+        .eq("id", slot.id)
+        .eq("state", "expired");
+      if (revertError) log.error("cron.expired_slot_revert_failed", { parent_id: parent.id, slot_id: slot.id, err: revertError });
+      ok = false;
       continue;
     }
 
@@ -479,7 +514,10 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       .update({ call_id: callId, updated_at: new Date().toISOString() })
       .eq("id", slot.id)
       .eq("state", "expired");
-    if (linkError) log.error("cron.expired_slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
+    if (linkError) {
+      log.error("cron.expired_slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
+      ok = false;
+    }
 
     const dueAt = new Date(slot.due_at);
     const time = formatLocalTime(dueAt, parent.timezone);
@@ -504,7 +542,7 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     });
     log.info("cron.slot_expired", { parent_id: parent.id, slot_id: slot.id, due_at: slot.due_at, kind: slot.kind });
   }
-  return true;
+  return ok;
 }
 
 /**

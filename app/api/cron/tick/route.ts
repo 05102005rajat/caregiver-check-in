@@ -143,7 +143,7 @@ async function processRetries(
       continue;
     }
 
-    await dialAndRecord(
+    const retryOutcome = await dialAndRecord(
       db,
       call.id,
       parent,
@@ -156,6 +156,23 @@ async function processRetries(
       // This branch owns what a refused retry says to the family (see windowClosed above).
       "retry"
     );
+
+    // windowClosed is computed from `now`, before the optimistic claim is awaited. If the
+    // window shuts inside that gap the claim path is taken, dialAndRecord refuses, and the
+    // "retry" purpose deliberately keeps it quiet — so the row lands at failed with neither
+    // branch having said anything. A sub-second race against a five-minute tick, but it is
+    // the silent shape, so it is closed here rather than argued about.
+    if (!retryOutcome.dialed && retryOutcome.reason === "outside_calling_hours") {
+      const time = formatLocalTime(scheduledFor, parent.timezone);
+      await notifyFamilyContacts(
+        db,
+        parent.id,
+        "notify_on_miss",
+        call.id,
+        `Heads up: ${parent.name} didn't answer their ${time} check-in, and it's now too late in the evening for us to try again. Please check in with them directly.`,
+        { fingerprint: alertFingerprint("miss", [call.scheduled_for]), severity: "safety" }
+      );
+    }
   }
 }
 
@@ -171,7 +188,7 @@ async function slotFor(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
   scheduledFor: string
-): Promise<{ found: boolean; state: string | null }> {
+): Promise<{ known: boolean; found: boolean; state: string | null }> {
   const { data, error } = await db
     .from("call_slots")
     .select("id, state")
@@ -180,10 +197,16 @@ async function slotFor(
     .limit(1)
     .maybeSingle();
   if (error) {
+    // Neither default is safe. "scheduled" re-dials a manual test call and can text the
+    // family "their 3:42pm check-in didn't go out" about a call the caregiver started from
+    // the dashboard; "manual" stays quiet about a real missed obligation whose slot is
+    // already dispatched and will therefore never expire. So this answers "I don't know",
+    // the reaper leaves the row alone for this tick, and the degraded heartbeat surfaces
+    // the read failure instead of either guess being made silently.
     log.error("cron.slot_lookup_failed", { parent_id: parentId, scheduled_for: scheduledFor, err: error });
-    return { found: true, state: null };
+    return { known: false, found: false, state: null };
   }
-  return { found: Boolean(data), state: (data?.state as string) ?? null };
+  return { known: true, found: Boolean(data), state: (data?.state as string) ?? null };
 }
 
 /**
@@ -327,7 +350,9 @@ async function reapStaleScheduled(
       // to this row, so it will never expire either — the check-in simply stops existing.
       // Only for a call the queue actually asked for: a stranded manual test call is not a
       // missed check-in and must not be reported to the family as one.
-      if (closed && (await slotFor(db, parent.id, row.scheduled_for)).found) {
+      const giveUpSlot = await slotFor(db, parent.id, row.scheduled_for);
+      if (!giveUpSlot.known) log.error("cron.giveup_alert_skipped_unknown_slot", { call_id: row.id, parent_id: parent.id });
+      if (closed && giveUpSlot.known && giveUpSlot.found) {
         const time = formatLocalTime(scheduledFor, parent.timezone);
         await notifyFamilyContacts(
           db,
@@ -345,6 +370,12 @@ async function reapStaleScheduled(
       ? resolveMedsForSlot(medications, row.scheduled_meds, scheduledFor, parent.timezone)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
     const slot = await slotFor(db, parent.id, row.scheduled_for);
+    if (!slot.known) {
+      // Leave the row exactly as it is and try again next tick, rather than guessing at a
+      // purpose. The claim already advanced stale_redial_at, so this costs one attempt.
+      log.warn("cron.stale_redial_deferred_unknown_slot", { call_id: row.id, parent_id: parent.id });
+      continue;
+    }
 
     // expireLapsedSlots runs earlier in the same tick, and at the boundary the two used to
     // disagree: a 09:00 slot expiring at 11:00 was reported to the family as "too late to

@@ -19,10 +19,12 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ## State as of this handover
 
-- Branch **`scheduler-queue-and-review-fixes`** @ `429ca12`, two commits ahead of `main`
-  (`f6e23be`). **Not merged, not deployed.** Merge with
+- Branch **`scheduler-queue-and-review-fixes`**, several commits ahead of `main` (`f6e23be`).
+  **Not merged, not deployed.** Merge with
   `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
-- **Migrations 0001–0033 all applied and verified against the live database.** `0031`,
+  Eight rounds of `/code-review` ran against this branch; every finding is either fixed or
+  argued against in the commit that declined it.
+- **Migrations 0001–0033 applied and verified against the live database; `0034` is NOT applied.** `0031`,
   `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
   checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
   both CHECK constraints bite, and RLS hides `call_slots` from anon while the service role
@@ -31,7 +33,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **31/31** (was 27/28). Two new runtime suites:
-  `npm run security:refusal` (8/8) and `npm run security:queue` (17/17). 139 unit tests.
+  `npm run security:refusal` (10/10) and `npm run security:queue` (29/29). 157 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off**, transcripts on. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
@@ -42,10 +44,26 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ---
 
+## Deploying this branch — read before the first tick
+
+**Apply `0034` first.** `0033` declared `call_slots.appointment_id` with `on delete cascade`,
+and `save_parent_setup` deletes and re-inserts every appointment row on every save — so any
+setup edit destroys that day's appointment slot, the next tick re-plans it, and it expires
+into a second "the appointment reminder didn't go out" text about a day already reported.
+
+**Pause the live households for the first tick.** The first tick after `0033` materialises
+every already-elapsed slot for the local day (coverage started weeks ago for existing
+households), and any slot with no matching `calls` row at that exact `due_at` expires
+straight into a "check-in was missed" text. Old too-late rows share the fingerprint, but the
+window for `safety` alerts is 4 hours, not 20, so alerts sent earlier that morning will not
+suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, then resume.
+
+---
+
 ## Open work, in the order I'd do it
 
-1. **Merge and deploy the branch.** Both migrations it needs are already applied, so `main`
-   is safe. Watch the first tick after 17:57 PDT — `manju`'s first slot under the new
+1. **Merge and deploy the branch**, after applying `0034` and pausing for the first tick as
+   described above. Watch the first tick after 17:57 PDT — `manju`'s first slot under the new
    queue. Expected: two `call_slots` rows, two calls a minute apart, same as before. A
    read-only dry run of the planner against the live household produced exactly that.
 2. **Confirm an End Call tool exists in the Vapi Tools tab.** `End Call Phrases` is empty

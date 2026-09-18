@@ -96,9 +96,20 @@ async function main() {
     if (m1[0]) console.log(`    body: ${m1[0].body}`);
 
     // ---- CASE 1b: a second pass over the same slot must not text again. ----
+    // The row is put BACK to 'scheduled' first. Without that, the guarded update matches
+    // zero rows, `closed` is null, and the notify block is simply unreachable — so the
+    // assertion held even with fingerprint dedupe deleted outright. It proved the guard
+    // short-circuits, not that dedupe works, which is the "nine tests that could not fail"
+    // shape. Resetting it makes the second pass reach notifyFamilyContacts for real, so
+    // only the fingerprint stops the duplicate.
+    await admin.from("calls").update({ status: "scheduled" }).eq("id", c1.id);
     const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
     const m1b = await msgsFor(fp1);
-    check("re-running the same refused slot does not re-alert", !out1b.dialed && m1b.length === m1.length, `${m1.length} -> ${m1b.length}`);
+    check(
+      "re-running the same refused slot does not re-alert",
+      !out1b.dialed && m1b.length === m1.length,
+      `${m1.length} -> ${m1b.length} messages for the same fingerprint`
+    );
 
     // ---- CASE 2 (CONTROL): a manual test call, refused identically, must NOT alert. ----
     // Without this, "it sent a text" proves only that notify works, not that it fires for
