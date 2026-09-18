@@ -103,7 +103,7 @@ async function main() {
     const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
     const parent = parentRow as Parent;
     const { data: medRows } = await admin.from("medications").select("*").eq("parent_id", pid);
-    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [], sourcesComplete: true, lastTickAt: null };
+    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [], sourcesComplete: true, lastPlannedAt: null };
 
     // ---- materialise ----
     await materializeSlots(admin as never, parent, ctx, realNow);
@@ -326,12 +326,22 @@ async function main() {
       .select("id")
       .single();
     if (unreportedError || !unreported) throw new Error(`unreported fixture failed: ${unreportedError?.message}`);
-    await cancelPendingSlots(admin as never, pid, "harness_pause", realNow);
+    const liveBefore = (await slotsOf(pid)).filter((s) => s.state === "pending" && new Date(s.expires_at) > realNow).length;
+    const cancelOk = await cancelPendingSlots(admin as never, pid, "harness_pause", realNow);
     const { data: afterCancel } = await admin.from("call_slots").select("state").eq("id", unreported.id).single();
+    const liveAfter = (await slotsOf(pid)).filter((s) => s.state === "pending" && new Date(s.expires_at) > realNow).length;
     check(
       "cancelling a hold leaves a lapsed, unreported slot alone",
       afterCancel!.state === "pending",
       `state=${afterCancel!.state} — a real missed check-in was cancelled and can never be reported`
+    );
+    // Positive control. Without it, a cancelPendingSlots that errored or matched nothing
+    // leaves the lapsed fixture pending too and the check above passes green — the
+    // "test that cannot fail" shape HANDOVER enumerates.
+    check(
+      "…while still cancelling the slots that were live (control)",
+      cancelOk && liveBefore > 0 && liveAfter === 0,
+      `ok=${cancelOk} live ${liveBefore} -> ${liveAfter}; the check above proves nothing unless this cancel did something`
     );
     // And expiry must then still be able to report it.
     await expireLapsedSlots(admin as never, parent, realNow);

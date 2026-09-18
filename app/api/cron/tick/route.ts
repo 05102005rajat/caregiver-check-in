@@ -5,7 +5,7 @@ import { retryDecision } from "@/lib/retry";
 import { isWithinCallingHours } from "@/lib/callwindow";
 import { appointmentsToday, formatLocalTime, medsAtLocalTime } from "@/lib/schedule";
 import { SLOT_CATCHUP_MINUTES, medsForSlot as resolveMedsForSlot } from "@/lib/slots";
-import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
+import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots, recordPlanned } from "@/lib/queue";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint, tooLateFingerprint } from "@/lib/insights";
@@ -442,19 +442,66 @@ async function reapStaleScheduled(
     // 90 minutes late by the constant's reckoning and got re-dialled: a call telling someone
     // about an appointment that began half an hour ago.
     if (slot.expiresAt && slot.expiresAt.getTime() <= now.getTime()) {
-      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      // Closing the row is right; closing it QUIETLY was not, and not re-dialling made it
+      // worse than what it replaced. A 20:30 slot clamped to 21:00, dialled, then stranded
+      // by a failed post-dial write, reaches here at 21:05 only 35 minutes late — so the
+      // abandon branch above does not fire, and the slot is 'dispatched' so
+      // expireLapsedSlots never looks at it either. No call, no text, no record. Before
+      // this branch existed the row fell through to dialAndRecord, whose out-of-hours
+      // refusal closes it AND tells the family; stopping the re-dial silently removed that.
+      const { data: closedPastExpiry, error } = await db
+        .from("calls")
+        .update({ status: "failed" })
+        .eq("id", row.id)
+        .eq("status", "scheduled")
+        .select("id")
+        .maybeSingle();
       if (error) {
         log.error("cron.stale_close_after_slot_expiry_failed", { call_id: row.id, err: error });
         ok = false;
+      } else {
+        log.info("cron.stale_row_past_slot_expiry", { call_id: row.id, parent_id: parent.id, expires_at: slot.expiresAt.toISOString() });
       }
-      log.info("cron.stale_row_past_slot_expiry", { call_id: row.id, parent_id: parent.id, expires_at: slot.expiresAt.toISOString() });
+
+      if (closedPastExpiry) {
+        // Marked so the slot is accounted for rather than left sitting at 'dispatched'
+        // forever, and so a second tick cannot report the same miss twice.
+        const { error: slotError } = await db
+          .from("call_slots")
+          .update({ state: "expired", updated_at: now.toISOString() })
+          .eq("parent_id", parent.id)
+          .eq("due_at", row.scheduled_for)
+          .eq("state", "dispatched");
+        if (slotError) {
+          log.error("cron.stale_slot_expire_failed", { call_id: row.id, parent_id: parent.id, err: slotError });
+          ok = false;
+        }
+
+        const time = formatLocalTime(scheduledFor, parent.timezone);
+        await notifyFamilyContacts(
+          db,
+          parent.id,
+          "notify_on_miss",
+          row.id,
+          `Heads up: we couldn't complete ${parent.name}'s check-in around ${time}, and it's now too late to call about it. Please check in with them directly.`,
+          // Shared with every other too-late path, so a slot that several of them notice
+          // still produces one text.
+          { fingerprint: tooLateFingerprint(row.scheduled_for), severity: "safety" }
+        );
+      }
       continue;
     }
 
     if (slot.state === "expired" || slot.state === "cancelled") {
+      // No notification here, deliberately: 'expired' means expireLapsedSlots already told
+      // the family, and 'cancelled' means we stopped being responsible for this slot.
       const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
-      if (error) log.error("cron.stale_close_after_slot_done_failed", { call_id: row.id, err: error });
-      log.info("cron.stale_row_slot_already_closed", { call_id: row.id, parent_id: parent.id, slot_state: slot.state });
+      if (error) {
+        log.error("cron.stale_close_after_slot_done_failed", { call_id: row.id, err: error });
+        ok = false;
+      } else {
+        log.info("cron.stale_row_slot_already_closed", { call_id: row.id, parent_id: parent.id, slot_state: slot.state });
+      }
       continue;
     }
 
@@ -479,8 +526,8 @@ async function reapStaleScheduled(
 
 interface ParentContext {
   caregiverName: string;
-  /** See QueueContext.lastTickAt. */
-  lastTickAt: Date | null;
+  /** See QueueContext.lastPlannedAt. */
+  lastPlannedAt: Date | null;
   /** See QueueContext.sourcesComplete — false when the medications/appointments read failed. */
   sourcesComplete: boolean;
   medications: Medication[];
@@ -544,6 +591,9 @@ async function processParent(
     // tick: write down what today should look like, ring what is due, and account for what
     // lapsed. Each one is a query against explicit columns.
     const materialized = await materializeSlots(db, parent, ctx, now);
+    // Only on success. A tick that ran but could not plan must leave no evidence that it
+    // did, or the slots it failed to queue are dismissed later as never ours to miss.
+    if (materialized && !(await recordPlanned(db, parent.id, now))) degraded = true;
     const dispatched = await dispatchDueSlots(db, parent, ctx, now);
     const expired = await expireLapsedSlots(db, parent, now);
     callsTriggered = dispatched.triggered;
@@ -639,22 +689,6 @@ export async function GET(request: Request) {
 
   const db = createAdminClient();
   const now = new Date();
-
-  // Read before anything is planned. A slot that lapsed while we were ticking and was never
-  // queued cannot have existed then, so reporting it as missed would be a fabrication; one
-  // that lapsed while we were down may be a real missed check-in. Unknown reads as "report
-  // it" — see neverOurs in lib/slots.ts.
-  const { data: priorHeartbeat, error: priorHeartbeatError } = await db
-    .from("cron_heartbeat")
-    .select("last_attempted_at")
-    .eq("id", true)
-    .maybeSingle();
-  if (priorHeartbeatError) log.error("cron.heartbeat_read_failed", { err: priorHeartbeatError });
-  // last_attempted_at, not last_tick_at (migration 0035). last_tick_at is withheld whenever
-  // ANY household is degraded, so reading it here let one broken household convince the
-  // planner that the scheduler had been down for everybody — and every mid-day medication
-  // edit then manufactured a missed-check-in text.
-  const lastTickAt = priorHeartbeat?.last_attempted_at ? new Date(priorHeartbeat.last_attempted_at as string) : null;
 
   // Paged. PostgREST caps an unbounded select at its configured maximum and says nothing
   // about it, so past that cap some households simply stop being processed: no call, no
@@ -786,7 +820,7 @@ export async function GET(request: Request) {
         // and materialisation reconciles, so that empty plan would DELETE today's queue and
         // leave slots that never expire and never alert. Say so instead of guessing.
         sourcesComplete: sourceReadsOk,
-        lastTickAt,
+        lastPlannedAt: parent.last_planned_at ? new Date(parent.last_planned_at) : null,
         medications: medsByParent.get(parent.id) ?? [],
         appointments: apptsByParent.get(parent.id) ?? [],
         watchItems: watchByParent.get(parent.id) ?? [],
@@ -839,8 +873,10 @@ export async function GET(request: Request) {
   // cron-job.org and to /api/health. On a product whose promise is that silence means
   // everything is fine, that is the worst-shaped failure available. Withholding the
   // heartbeat turns it into the one alarm this system already has.
-  // Stamped whether or not the tick was healthy: it records that we ran, which is what
-  // lib/slots.ts needs to tell a real missed check-in from a slot added after the fact.
+  // last_attempted_at records that a tick ran at all, which is useful when reading logs
+  // after the fact. It is deliberately NOT the planning signal any more — that is
+  // parents.last_planned_at, stamped per household only when its day was actually planned
+  // (migration 0036).
   const { error: attemptedError } = await db
     .from("cron_heartbeat")
     .update({ last_attempted_at: now.toISOString() })

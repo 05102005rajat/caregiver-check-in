@@ -85,17 +85,21 @@ function expiryFor(dueAt: Date, timezone: string, notAfter?: Date): Date {
  * manufacture a missed check-in.
  *
  * The medication row cannot answer this — save_parent_setup deletes and re-inserts every
- * row on every save, so its age resets whenever anything is edited. The scheduler's own
- * heartbeat can: if we were ticking while that slot lapsed and never queued it, the dose
- * was not there to queue. If we were NOT ticking, the slot may well have been real and
- * missed because we were down, which is exactly the outage this queue exists to report.
+ * row on every save, so its age resets whenever anything is edited. `parents.last_planned_at`
+ * can: if this household's day was being planned while that slot lapsed and it was never
+ * queued, the dose was not there to queue. If it was NOT being planned, the slot may well
+ * have been real and missed because we were down, which is exactly what this queue exists
+ * to report.
+ *
+ * Per household, not per scheduler. Two global signals were tried first and each failed in
+ * a different direction; migration 0036 records both.
  *
  * Unknown heartbeat means report it. Silence is the failure that matters.
  */
-function neverOurs(dueAt: Date, expiresAt: Date, now: Date, lastTickAt: Date | null): boolean {
+function neverOurs(dueAt: Date, expiresAt: Date, now: Date, lastPlannedAt: Date | null): boolean {
   if (expiresAt.getTime() > now.getTime()) return false; // still live; nothing to fabricate
-  if (!lastTickAt) return false;
-  return lastTickAt.getTime() >= expiresAt.getTime();
+  if (!lastPlannedAt) return false;
+  return lastPlannedAt.getTime() >= expiresAt.getTime();
 }
 
 /**
@@ -117,7 +121,7 @@ export function planSlotsForDay(
   timezone: string,
   now: Date,
   coverageStartsAt: Date,
-  lastTickAt: Date | null = null
+  lastPlannedAt: Date | null = null
 ): SlotPlan {
   const slots: PlannedSlot[] = [];
   const uncallable: UncallableSlot[] = [];
@@ -167,7 +171,7 @@ export function planSlotsForDay(
     if (dueAt < coverageStartsAt) continue;
 
     // Nor is a slot that only appeared after its own deadline had passed.
-    if (neverOurs(dueAt, expiresAt, now, lastTickAt)) continue;
+    if (neverOurs(dueAt, expiresAt, now, lastPlannedAt)) continue;
 
     slots.push({ dueAt, expiresAt, kind: "medication", medNames, appointmentId: null });
   }
@@ -194,7 +198,7 @@ export function planSlotsForDay(
       .filter((c): c is { appointment: Appointment; dueAt: Date } => c.dueAt !== null)
       .filter((c) => c.dueAt >= coverageStartsAt)
       // Same rule as medications.
-      .filter((c) => !neverOurs(c.dueAt, expiryFor(c.dueAt, timezone, new Date(c.appointment.starts_at)), now, lastTickAt))
+      .filter((c) => !neverOurs(c.dueAt, expiryFor(c.dueAt, timezone, new Date(c.appointment.starts_at)), now, lastPlannedAt))
       .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
     const earliest = candidates[0];
     if (earliest) {

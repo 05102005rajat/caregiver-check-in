@@ -24,7 +24,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
   `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
   Eight rounds of `/code-review` ran against this branch; every finding is either fixed or
   argued against in the commit that declined it.
-- **Migrations 0001–0034 applied and verified; `0035` is NOT applied.** `0031`,
+- **Migrations 0001–0035 applied and verified against the live database; `0036` is NOT applied.** `0031`,
   `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
   checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
   both CHECK constraints bite, and RLS hides `call_slots` from anon while the service role
@@ -33,7 +33,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33** (was 27/28). Two new runtime suites:
-  `npm run security:refusal` (10/10) and `npm run security:queue` (32/32). 160 unit tests.
+  `npm run security:refusal` (10/10) and `npm run security:queue` (35/35). 178 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off**, transcripts on. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
@@ -44,7 +44,14 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ---
 
-## Deploying this branch — read before the first tick
+## Deploying — read before the first tick
+
+**`0036` is a hard dependency of the code on `main`.** Without it, `recordPlanned` fails on
+every parent on every tick, which marks the tick degraded, withholds the heartbeat and
+returns 500 — so `/api/health` goes red and stays red. Calls still go out (the 500 happens
+after dispatch), but the alarm is jammed on. Apply it before deploying.
+
+## Older deploy notes
 
 **`0034` is applied**, verified behaviourally rather than by schema read: an appointment was
 deleted the way `save_parent_setup` deletes it, and the slot survived with `appointment_id`
@@ -318,8 +325,8 @@ Two behaviours worth knowing:
 npm test                  # 139 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
-npm run security:refusal  # 8 checks: an out-of-hours refusal must alert the family
-npm run security:queue    # 17 checks: the call queue, driven with a controlled clock
+npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family
+npm run security:queue    # 35 checks: the call queue, driven with a controlled clock
 npm run eval              # 19 summarizer cases (costs Anthropic tokens)
 npm run eval:conversation # 8 personas x3 against the real system prompt (costs tokens, slow)
 npx next build

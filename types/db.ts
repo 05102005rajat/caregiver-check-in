@@ -25,6 +25,9 @@ export interface Parent {
   /** When check-ins were last explicitly resumed. Resume clears paused_until rather than
    *  moving it, so this is the only record that the gap was intentional. */
   resumed_at: string | null;
+  /** When this parent's day was last successfully planned (0036). Not a health signal —
+   *  lib/slots.ts uses it to tell a scheduler outage from a slot added after its deadline. */
+  last_planned_at: string | null;
   /** Scheduler skips this parent until this instant; null means active. */
   paused_until: string | null;
   created_at: string;

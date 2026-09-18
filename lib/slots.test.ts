@@ -98,23 +98,23 @@ describe("planSlotsForDay", () => {
     // A caregiver adding "Metformin, 09:00" at 14:00 is ordinary. The slot would materialise
     // already past its 11:00 expiry, be expired by the same tick, and text the whole family
     // "their 9:00am check-in was missed" for a dose that did not exist that morning.
-    // lastTickAt at 13:55 proves we were ticking through 11:00 and never queued it.
-    const lastTick = new Date("2026-09-10T20:55:00Z");
-    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastTick);
+    // last_planned_at at 13:55 proves this household's day was being planned through 11:00 and never queued it.
+    const lastPlanned = new Date("2026-09-10T20:55:00Z");
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastPlanned);
     expect(slots).toEqual([]);
   });
 
   it("DOES plan that same lapsed slot when the scheduler was down through it (an outage)", () => {
-    // Same slot, same instant — only the heartbeat differs. The scheduler last ticked at
+    // Same slot, same instant — only the signal differs. This household was last planned at
     // 08:55, before the 11:00 expiry, so this may be a genuinely missed check-in and has to
     // be queued so expiry can report it. This is the pair that keeps the fix above from
     // turning an outage into silence.
-    const lastTick = new Date("2026-09-10T15:55:00Z");
-    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastTick);
+    const lastPlanned = new Date("2026-09-10T15:55:00Z");
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastPlanned);
     expect(slots).toHaveLength(1);
   });
 
-  it("plans a lapsed slot when the heartbeat is unknown", () => {
+  it("plans a lapsed slot when the planning signal is unknown", () => {
     // Unknown reads as "report it": silence is the failure that matters.
     const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, null);
     expect(slots).toHaveLength(1);

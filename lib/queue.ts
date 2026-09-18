@@ -40,11 +40,13 @@ export interface QueueContext {
    */
   sourcesComplete: boolean;
   /**
-   * When the scheduler last completed a tick, or null if unknown. Used to tell a slot that
-   * lapsed because we were down (a real missed check-in) from one that only appeared after
-   * its deadline because the caregiver edited the setup form (not a miss at all).
+   * When THIS household's day was last successfully planned, or null if unknown. Used to
+   * tell a slot that lapsed because we were down (a real missed check-in) from one that
+   * only appeared after its deadline because the caregiver edited the setup form (not a
+   * miss at all). Per household on purpose — see migration 0036 for the two global signals
+   * that were tried first and why each one failed in a different direction.
    */
-  lastTickAt: Date | null;
+  lastPlannedAt: Date | null;
 }
 
 /**
@@ -130,7 +132,7 @@ export async function materializeSlots(
     parent.timezone,
     now,
     coverageStartsAt(parent),
-    ctx.lastTickAt
+    ctx.lastPlannedAt
   );
 
   for (const skipped of uncallable) {
@@ -281,6 +283,24 @@ export async function materializeSlots(
     return false;
   }
   return ok;
+}
+
+/**
+ * Stamps that this household's day was planned. Called only when materializeSlots
+ * succeeded, which is the whole point: a tick that ran but could not plan must not leave
+ * evidence that it did, or the slots it failed to queue are later dismissed as never ours.
+ */
+export async function recordPlanned(
+  db: ReturnType<typeof createAdminClient>,
+  parentId: string,
+  now: Date
+): Promise<boolean> {
+  const { error } = await db.from("parents").update({ last_planned_at: now.toISOString() }).eq("id", parentId);
+  if (error) {
+    log.error("cron.record_planned_failed", { parent_id: parentId, err: error });
+    return false;
+  }
+  return true;
 }
 
 /** Rings everything that is due and hasn't lapsed. Returns how many calls were placed. */
