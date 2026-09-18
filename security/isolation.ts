@@ -78,6 +78,8 @@ async function main() {
       p_appointments: [{ title: "Secret cardiology appt", starts_at: new Date(Date.now() + 86400000).toISOString(), location: "", notes: "" }],
       p_family_contacts: [
         { name: "Contact A", phone: "+15555550103", email: "", role: "son", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true },
+        { name: "Orphan A", phone: "+15555550104", email: "", role: "daughter", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true },
+        { name: "Revoked A", phone: "+15555550105", email: "", role: "other", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true },
       ],
       p_watch_items: [{ description: "private watch note", always_alert: false }],
       p_retry_after_minutes: 30,
@@ -203,6 +205,10 @@ async function main() {
     // scoping (0021 keys that table on phone alone). Two adult children listing the same
     // sibling is the ordinary case, and it is the case this check exists to protect.
     const SHARED_CONTACT_PHONE = "+15555550103";
+    // Used only by A, so deleting A must clean them up. SHARED_CONTACT_PHONE above is the
+    // negative case; these are the positive one that makes it meaningful.
+    const ORPHANED_CONTACT_PHONE = "+15555550104";
+    const REVOKED_CONTACT_PHONE = "+15555550105";
     const { data: bParentId, error: bSetupError } = await admin.rpc("save_parent_setup", {
       p_caregiver_id: b.id,
       p_caregiver_email: b.email,
@@ -234,6 +240,36 @@ async function main() {
       },
       { onConflict: "phone" }
     );
+
+    await admin.from("sms_opt_ins").upsert(
+      [
+        {
+          phone: ORPHANED_CONTACT_PHONE,
+          name: "Orphan A",
+          consented_at: new Date().toISOString(),
+          consent_text: "consent nobody else relies on",
+          consent_version: "probe",
+        },
+        {
+          phone: REVOKED_CONTACT_PHONE,
+          name: "Revoked A",
+          consented_at: new Date().toISOString(),
+          consent_text: "consent later withdrawn",
+          consent_version: "probe",
+          revoked_at: new Date().toISOString(),
+        },
+      ],
+      { onConflict: "phone" }
+    );
+
+    // Control: both rows exist before the deletion. Without this, "the row is gone" is also
+    // what you see when the fixture never seeded it — which is precisely how the deletion
+    // check in this file used to compare 0 to 0 and prove nothing.
+    const { count: seededBefore } = await admin
+      .from("sms_opt_ins")
+      .select("phone", { count: "exact", head: true })
+      .in("phone", [ORPHANED_CONTACT_PHONE, REVOKED_CONTACT_PHONE]);
+    check("consent rows for A-only numbers exist before deletion (control)", (seededBefore ?? 0) === 2, `${seededBefore ?? 0} of 2 seeded`);
 
     const { count: bHouseholdsBefore } = await admin
       .from("parents")
@@ -298,6 +334,42 @@ async function main() {
       sharedOptIn ? "row present but consent evidence was stripped" : "row was deleted outright"
     );
 
+    // The other half of the same rule, and the half nothing asserted.
+    //
+    // Everything above proves deletion leaves a SHARED number's consent alone. On its own
+    // that is satisfied just as well by a delete_parent_household that never touches
+    // sms_opt_ins at all — so a regression removing the cleanup entirely would have passed
+    // the whole suite. These two check the positive direction: a number nobody else uses
+    // does get cleaned up, and a carrier-confirmed opt-out survives as a stripped tombstone
+    // rather than being dropped (dropping it would let a future household text a number
+    // whose owner sent STOP, which is the compliance failure 0020/0021 exist to prevent).
+    const { data: orphanOptIn } = await admin
+      .from("sms_opt_ins")
+      .select("phone")
+      .eq("phone", ORPHANED_CONTACT_PHONE)
+      .maybeSingle();
+    check(
+      "deleting a household removes a consent record no surviving household uses",
+      orphanOptIn === null,
+      orphanOptIn ? "row survived — consent evidence for a deleted household is retained indefinitely" : ""
+    );
+
+    const { data: revokedOptIn } = await admin
+      .from("sms_opt_ins")
+      .select("phone, revoked_at, consent_text, name, consented_at")
+      .eq("phone", REVOKED_CONTACT_PHONE)
+      .maybeSingle();
+    check(
+      "a carrier-confirmed opt-out survives deletion as a stripped tombstone",
+      Boolean(revokedOptIn?.revoked_at) &&
+        revokedOptIn?.consent_text === null &&
+        revokedOptIn?.name === null &&
+        revokedOptIn?.consented_at === null,
+      revokedOptIn
+        ? `revoked_at=${revokedOptIn.revoked_at} consent_text=${JSON.stringify(revokedOptIn.consent_text)} name=${JSON.stringify(revokedOptIn.name)}`
+        : "row was deleted outright — this number can be texted again by a future household"
+    );
+
     // B's own caregiver row must survive too.
     const { count: bCaregiverLeft } = await admin.from("caregivers").select("id", { count: "exact", head: true }).eq("id", b.id);
     check("deleting a household leaves the other caregiver's record", (bCaregiverLeft ?? 0) === 1, `${bCaregiverLeft ?? 0} row(s)`);
@@ -320,7 +392,7 @@ async function main() {
       }
       await admin.from("parents").delete().eq("id", pid);
     }
-    await admin.from("sms_opt_ins").delete().eq("phone", "+15555550103");
+    await admin.from("sms_opt_ins").delete().in("phone", ["+15555550103", "+15555550104", "+15555550105"]);
     await admin.from("caregivers").delete().in("id", [a.id, b.id]);
     await admin.auth.admin.deleteUser(a.id);
     await admin.auth.admin.deleteUser(b.id);

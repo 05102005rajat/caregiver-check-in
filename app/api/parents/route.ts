@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { localInputToInstant } from "@/lib/localdatetime";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { setupFormSchema } from "@/lib/validation";
+import { describeSetupIssues, setupFormSchema } from "@/lib/validation";
 import type { Appointment, Caregiver, EscalationRules, FamilyContact, Medication, Parent, WatchItem } from "@/types/db";
 
 /**
@@ -60,7 +60,18 @@ export async function POST(request: Request) {
   const json = await request.json();
   const parsed = setupFormSchema.safeParse(json);
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid input", details: parsed.error.flatten() }, { status: 400 });
+    // `issues` is what the form actually shows. `details` is kept for anything reading the
+    // old shape, but it was never the problem: the messages were always in the response and
+    // the form rendered only `error`, so a caregiver saw "Invalid input" and nothing else.
+    const issues = describeSetupIssues(parsed.error);
+    return NextResponse.json(
+      {
+        error: issues.length === 1 ? issues[0] : "Some details need fixing before we can save this.",
+        issues,
+        details: parsed.error.flatten(),
+      },
+      { status: 400 }
+    );
   }
   const payload = parsed.data;
 

@@ -158,7 +158,7 @@ export default async function DashboardPage() {
         </p>
       )}
 
-      <PauseControl parentName={parent.name} pausedUntil={parent.paused_until} />
+      <PauseControl parentName={parent.name} pausedUntil={parent.paused_until} timezone={parent.timezone} />
 
       <div className={`rounded-xl border p-5 mb-4 ${attention ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-white"}`}>
         {!latestCall ? (

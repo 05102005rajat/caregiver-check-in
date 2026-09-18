@@ -13,6 +13,48 @@ type NotifyFlag = "notify_on_miss" | "notify_on_concern";
  * `messages`. `contactId` is null for the caregiver themselves, who isn't a
  * `family_contacts` row.
  */
+/**
+ * Whether this exact recipient has already been told this exact thing inside the window.
+ *
+ * Per recipient, not per household. The check used to run once for everyone before any
+ * message went out, so a fingerprint that reached the family contact suppressed it for the
+ * caregiver too — and the case where that happens is precisely the case where it matters:
+ * the contact's SMS succeeded, the caregiver's failed (carrier reject, opt-out, Twilio
+ * error), and the next attempt found the contact's `sent` row and stayed quiet. The person
+ * who never heard anything was the account holder, and nothing surfaced that they hadn't.
+ */
+async function alreadyNotified(
+  db: ReturnType<typeof createAdminClient>,
+  parentId: string,
+  recipient: string,
+  fingerprint: string | undefined,
+  since: string
+): Promise<boolean> {
+  if (!fingerprint) return false;
+  // `status: 'sent'` only means Twilio accepted the request. delivery_status is the
+  // carrier's verdict, and it exists precisely because "accepted" was being shown as
+  // "family alerted" for messages that were then refused. Suppressing today's alert as a
+  // duplicate of a message that came back `undelivered` means nobody is ever told —
+  // the system has the data to know better and was not consulting it. A null
+  // delivery_status (no callback yet) still counts: we have no evidence it failed.
+  const { data: recent } = await db
+    .from("messages")
+    .select("id")
+    .eq("parent_id", parentId)
+    .eq("fingerprint", fingerprint)
+    .eq("recipient", recipient)
+    .eq("status", "sent")
+    // NULL-safe on purpose. `NOT (delivery_status IN (...))` evaluates to NULL — i.e. no
+    // match — for the 17-of-21 rows that have no callback yet, so the previous form
+    // excluded almost every message and dedupe silently stopped suppressing anything.
+    // The comment above said nulls still count; the query did the opposite.
+    .or("delivery_status.is.null,delivery_status.not.in.(undelivered,failed)")
+    .gte("sent_at", since)
+    .limit(1)
+    .maybeSingle();
+  return Boolean(recent);
+}
+
 async function sendAlert(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
@@ -21,7 +63,8 @@ async function sendAlert(
   phone: string,
   email: string | null,
   body: string,
-  fingerprint?: string
+  fingerprint: string | undefined,
+  since: string
 ) {
   // Honour opt-outs. The public form and every message promise that replying STOP or
   // asking us to remove a number takes effect — a promise with no mechanism behind it is
@@ -59,7 +102,12 @@ async function sendAlert(
     }
   };
 
-  if (suppressed) {
+  if (await alreadyNotified(db, parentId, phone, fingerprint, since)) {
+    // Deliberately records nothing: a duplicate is the absence of a new message, not a new
+    // event, and inserting a row for it would be a second `sent`-shaped fact about a text
+    // that was never sent.
+    log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, recipient: phone });
+  } else if (suppressed) {
     // Recorded rather than silently skipped, so the caregiver can see this person wasn't
     // contacted and why. Email is a separate channel and a separate consent — opting out
     // of texts shouldn't silently cut someone off from everything.
@@ -97,6 +145,10 @@ async function sendAlert(
   }
 
   if (!email) return;
+  if (await alreadyNotified(db, parentId, email, fingerprint, since)) {
+    log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, recipient: email });
+    return;
+  }
 
   try {
     const messageId = await sendEmail(email, "Caregiver Check-In update", body);
@@ -140,33 +192,10 @@ export async function notifyFamilyContacts(
   // same underlying situation still counts as a duplicate.
   const { fingerprint, severity = "routine" } = options;
   const dedupeWindowHours = options.dedupeWindowHours ?? DEDUPE_WINDOW_HOURS[severity];
-  if (fingerprint) {
-    const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
-    // `status: 'sent'` only means Twilio accepted the request. delivery_status is the
-    // carrier's verdict, and it exists precisely because "accepted" was being shown as
-    // "family alerted" for messages that were then refused. Suppressing today's alert as a
-    // duplicate of a message that came back `undelivered` means nobody is ever told —
-    // the system has the data to know better and was not consulting it. A null
-    // delivery_status (no callback yet) still counts: we have no evidence it failed.
-    const { data: recent } = await db
-      .from("messages")
-      .select("id")
-      .eq("parent_id", parentId)
-      .eq("fingerprint", fingerprint)
-      .eq("status", "sent")
-      // NULL-safe on purpose. `NOT (delivery_status IN (...))` evaluates to NULL — i.e. no
-      // match — for the 17-of-21 rows that have no callback yet, so the previous form
-      // excluded almost every message and dedupe silently stopped suppressing anything.
-      // The comment above said nulls still count; the query did the opposite.
-      .or("delivery_status.is.null,delivery_status.not.in.(undelivered,failed)")
-      .gte("sent_at", since)
-      .limit(1)
-      .maybeSingle();
-    if (recent) {
-      log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, window_hours: dedupeWindowHours });
-      return;
-    }
-  }
+  // Evaluated per recipient, down in sendAlert, rather than once for the whole household
+  // here — see alreadyNotified for why suppressing everyone on one recipient's success is
+  // how the account holder ended up never being told.
+  const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
 
   const [{ data: contacts }, { data: parentRow }] = await Promise.all([
     db.from("family_contacts").select("*").eq("parent_id", parentId).eq(flag, true),
@@ -174,7 +203,7 @@ export async function notifyFamilyContacts(
   ]);
 
   for (const contact of (contacts ?? []) as FamilyContact[]) {
-    await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint);
+    await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since);
   }
 
   if (parentRow?.caregiver_id) {
@@ -184,7 +213,7 @@ export async function notifyFamilyContacts(
       .eq("id", parentRow.caregiver_id)
       .single();
     if (caregiver?.phone) {
-      await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint);
+      await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint, since);
     }
   }
 }

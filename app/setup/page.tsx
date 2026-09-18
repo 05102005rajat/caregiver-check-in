@@ -98,6 +98,10 @@ export default function SetupPage() {
 
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState("");
+  // The per-field messages behind a rejected save. They were being thrown away: the API has
+  // always returned them, the form only ever rendered the one-line summary, so every
+  // validation failure read as "Invalid input" with nothing saying which step was wrong.
+  const [errorDetails, setErrorDetails] = useState<string[]>([]);
 
   const [testCallStatus, setTestCallStatus] = useState<"idle" | "calling" | "called" | "error">("idle");
   const [testCallError, setTestCallError] = useState("");
@@ -232,11 +236,13 @@ export default function SetupPage() {
       setError(
         `Please confirm text-alert consent for: ${unconfirmed.map((c) => c.name).join(", ")} (see the "Family" step).`
       );
+      setErrorDetails([]);
       return;
     }
 
     setStatus("saving");
     setError("");
+    setErrorDetails([]);
 
     const payload: SetupFormPayload = {
       caregiver: { name: caregiverName, phone: caregiverPhone },
@@ -259,6 +265,10 @@ export default function SetupPage() {
     } else {
       const body = await res.json().catch(() => ({}));
       setError(body.error ?? "Something went wrong saving your setup.");
+      // More than one thing can be wrong at once, and fixing them one round-trip at a time
+      // is how a caregiver abandons a seven-step form.
+      const issues: string[] = Array.isArray(body.issues) ? body.issues : [];
+      setErrorDetails(issues.length > 1 ? issues : []);
       setStatus("error");
     }
   }
@@ -676,7 +686,18 @@ export default function SetupPage() {
               label="Family to notify"
               value={contacts.filter((c) => c.name).length > 0 ? `${contacts.filter((c) => c.name).length} added` : "None"}
             />
-            {status === "error" && <p className="text-red-600 text-sm pt-2">{error}</p>}
+            {status === "error" && (
+              <div className="pt-2 space-y-1">
+                <p className="text-red-600 text-sm">{error}</p>
+                {errorDetails.length > 0 && (
+                  <ul className="text-red-600 text-sm list-disc pl-5 space-y-0.5">
+                    {errorDetails.map((detail) => (
+                      <li key={detail}>{detail}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

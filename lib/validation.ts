@@ -113,3 +113,66 @@ export const setupFormSchema = z.object({
 });
 
 export type ValidatedSetupForm = z.infer<typeof setupFormSchema>;
+
+/**
+ * Turns a schema failure into sentences a caregiver can act on.
+ *
+ * Every message in this file was written to be read by the person filling in the form —
+ * "Check-in calls only go out between 8:00 and 21:00 — pick a time in that range" exists
+ * precisely so a caregiver isn't left configuring a reminder that can never fire. None of
+ * them reached anybody: the route returned them under `details` and the form rendered only
+ * `error`, so all of this arrived on screen as the word "Invalid input", with no indication
+ * of which of seven steps was wrong. Naming the row ("Medication 2") matters as much as the
+ * message, since the offending field is usually one of several identical-looking ones.
+ */
+const FIELD_LABELS: Record<string, string> = {
+  time_of_day: "time",
+  start_date: "start date",
+  end_date: "end date",
+  starts_at: "date & time",
+  sms_opt_in_confirmed: "text alert consent",
+  assistant_name: "assistant name",
+  notify_on_miss: "missed-call alerts",
+  notify_on_concern: "concern alerts",
+  retry_after_minutes: "retry gap",
+  max_retries: "retry limit",
+  always_alert: "always alert",
+};
+
+const SECTION_LABELS: Record<string, { one: string; many?: string }> = {
+  caregiver: { one: "Your details" },
+  parent: { one: "Your parent's details" },
+  medications: { one: "Medications", many: "Medication" },
+  appointments: { one: "Appointments", many: "Appointment" },
+  family_contacts: { one: "Family contacts", many: "Contact" },
+  watch_items: { one: "Things to ask about", many: "Watch item" },
+  rules: { one: "Call settings" },
+};
+
+export function describeSetupIssues(error: z.ZodError): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const issue of error.issues) {
+    const [head, ...rest] = issue.path.map((p) => String(p));
+    const section = SECTION_LABELS[head];
+    let label: string;
+    if (!section) {
+      label = head ? head.replace(/_/g, " ") : "";
+    } else if (rest.length > 0 && /^\d+$/.test(rest[0])) {
+      // An indexed row: "Medication 2 — time". Index is 0-based in the path and 1-based on
+      // screen, because the caregiver is looking at a list that starts at one.
+      const field = rest[1];
+      label = `${section.many ?? section.one} ${Number(rest[0]) + 1}${field ? ` — ${FIELD_LABELS[field] ?? field.replace(/_/g, " ")}` : ""}`;
+    } else {
+      const field = rest[0];
+      label = `${section.one}${field ? ` — ${FIELD_LABELS[field] ?? field.replace(/_/g, " ")}` : ""}`;
+    }
+    const line = label ? `${label}: ${issue.message}` : issue.message;
+    // Two schema rules can reject the same field for the same reason; the caregiver only
+    // needs telling once.
+    if (seen.has(line)) continue;
+    seen.add(line);
+    out.push(line);
+  }
+  return out;
+}
