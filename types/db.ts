@@ -84,6 +84,9 @@ export interface Call {
   parent_id: string;
   scheduled_for: string;
   called_at: string | null;
+  /** Stamped immediately before dialing, so a failure during/after the call can't erase
+   *  the fact that we rang. The consent gate reads this; called_at means it was placed. */
+  dial_attempted_at: string | null;
   status: "scheduled" | "in_progress" | "completed" | "no_answer" | "failed" | null;
   vapi_call_id: string | null;
   retry_count: number;

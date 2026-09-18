@@ -8,6 +8,7 @@ function call(overrides: Partial<Call> = {}): Call {
     parent_id: "p1",
     scheduled_for: "2026-09-10T16:00:00Z",
     called_at: "2026-09-10T16:00:05Z",
+    dial_attempted_at: null,
     status: "completed",
     vapi_call_id: "v1",
     retry_count: 0,

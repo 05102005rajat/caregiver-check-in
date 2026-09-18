@@ -23,6 +23,20 @@ export async function dialAndRecord(
     ? undefined
     : consentGreeting(parent.name, parent.preferred_voice, caregiverName);
 
+  // Recorded before the dial, not after. Everything else we know about a call — status,
+  // called_at, vapi_call_id — is written by the single update below, which is exactly the
+  // write that fails when a row gets stranded. The consent gate therefore had no durable
+  // evidence in the one case it most needs it, and closing that gap through status,
+  // called_at and vapi_call_id in turn each failed for the same underlying reason. See
+  // migration 0027.
+  const { error: attemptError } = await db
+    .from("calls")
+    .update({ dial_attempted_at: new Date().toISOString() })
+    .eq("id", callId);
+  if (attemptError) {
+    log.error("dial.attempt_stamp_failed", { call_id: callId, parent_id: parent.id, err: attemptError });
+  }
+
   let vapiCall;
   try {
     vapiCall = await triggerVapiCall({

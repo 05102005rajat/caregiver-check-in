@@ -138,44 +138,47 @@ export async function POST(request: Request) {
     db.from("appointments").select("*").eq("parent_id", call.parent_id),
     db.from("watch_items").select("*").eq("parent_id", call.parent_id),
   ]);
-  const parent = parentRow as Parent | null;
+  // "We could not read the parent row" is not the same as "they did not consent" — the
+  // no-consent branch below cannot tell them apart and would destroy the transcript, skip
+  // Claude, alert nobody, and log it as a refusal.
+  let parent = parentRow as Parent | null;
   if (!parent) {
-    // "We could not read the parent row" is not the same as "they did not consent" — the
-    // discard branch below cannot tell them apart and would destroy the transcript, skip
-    // Claude, alert nobody, and log it as a refusal. So this has to be retryable.
+    // Retry first: a transient blip is the whole reason this branch exists, and recovering
+    // here avoids every trade-off below.
+    for (let attempt = 0; attempt < 2 && !parent; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      const { data } = await db.from("parents").select("*").eq("id", call.parent_id).maybeSingle();
+      parent = (data as Parent | null) ?? null;
+    }
+    if (parent) {
+      log.info("webhook.parent_lookup_recovered", { call_id: call.id, parent_id: call.parent_id });
+    }
+  }
+
+  if (!parent) {
+    // Do NOT release the claim back to 'scheduled'/'in_progress'. Those are *active*
+    // statuses: reapStaleScheduled would re-dial this parent about a check-in that already
+    // happened, and the in-progress reaper would flip it to no_answer and hand it to
+    // processRetries to dial again. A transient database blip must not ring an 80-year-old
+    // a second time about a call they already took — which is what the previous version of
+    // this branch did.
     //
-    // Retryable means releasing the claim first. The claim above already moved the row to
-    // 'completed', and isAlreadyProcessed() returns early for 'completed' — so returning
-    // 503 while still holding it makes Vapi's redelivery a silent no-op and strands the
-    // call as "completed" with a null transcript, which the dashboard renders as a normal,
-    // healthy check-in. Putting the status back is what actually makes the retry work.
-    const { error: releaseError } = await db
+    // 'failed' is terminal and non-dialable. The transcript is lost — but we never managed
+    // to establish whether consent exists, so discarding is the safe direction anyway — and
+    // the row does not masquerade as a healthy check-in the way a 'completed' row with a
+    // null transcript does. dial_attempted_at still records that we rang.
+    const { error: markError } = await db
       .from("calls")
-      .update({ status: call.status })
+      .update({ status: "failed" })
       .eq("id", call.id)
       .eq("status", targetStatus);
-    if (releaseError) {
-      // Releasing back to 'scheduled'/'in_progress' re-enters calls_parent_active_unique,
-      // which the claim to 'completed' had just freed — so if the scheduler inserted a new
-      // active row for this parent in between, this fails with 23505. Logging and moving on
-      // would leave the row 'completed' with a null transcript, which the dashboard renders
-      // as a normal healthy check-in: the exact outcome this whole branch exists to avoid.
-      // 'no_answer' is the honest fallback — it isn't an active status, so it can't
-      // conflict, it never reads as a successful check-in, and it routes into the retry and
-      // miss-alert pipeline so the family still hears about it.
-      log.error("webhook.claim_release_failed", { call_id: call.id, err: releaseError });
-      const { error: fallbackError } = await db
-        .from("calls")
-        .update({ status: "no_answer" })
-        .eq("id", call.id)
-        .eq("status", targetStatus);
-      if (fallbackError) {
-        log.error("webhook.claim_release_fallback_failed", { call_id: call.id, err: fallbackError });
-      }
+    if (markError) {
+      log.error("webhook.parent_lookup_mark_failed", { call_id: call.id, err: markError });
     }
-    log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id, claim_released: !releaseError });
+    log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id });
     return NextResponse.json({ ok: false, error: "Could not load parent" }, { status: 503 });
   }
+
   const parentName = parent.name;
   const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
 

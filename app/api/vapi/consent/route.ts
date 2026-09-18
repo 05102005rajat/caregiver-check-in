@@ -124,7 +124,12 @@ export async function POST(request: Request) {
       isWithdrawal
         ? `${parentName} asked us to stop the daily check-in calls, so we've stopped. They'd agreed before, so this is a change of mind rather than a first refusal — it may be worth a conversation. If they'd like to start again, use the button on your dashboard.`
         : `${parentName} declined the daily check-in calls when asked, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the button on your dashboard.`,
-      { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId, now]) }
+      // Deliberately NOT `now`: notifyFamilyContacts dedupes on an exact fingerprint match, so a
+      // millisecond-precision timestamp makes every refusal unique and disables dedupe entirely
+      // — two concurrent record_consent invocations (which the old guarded write protected
+      // against) would both notify. priorState keeps it stable per transition while still
+      // letting a genuine later withdrawal through.
+      { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId, priorState]) }
     );
   }
 
