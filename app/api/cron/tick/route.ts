@@ -2,28 +2,16 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dialAndRecord, scheduleAndDial } from "@/lib/dial";
 import { retryDecision } from "@/lib/retry";
-import {
-  appointmentRemindersDueNow,
-  appointmentsToday,
-  formatLocalTime,
-  localDayBoundsUtc,
-  medsAtLocalTime,
-  medsDueNow,
-  minutesBetween,
-  scheduledForToday,
-} from "@/lib/schedule";
+import { appointmentsToday, formatLocalTime, medsAtLocalTime } from "@/lib/schedule";
+import { SLOT_CATCHUP_MINUTES } from "@/lib/slots";
+import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
-import { alertFingerprint } from "@/lib/insights";
+import { alertFingerprint, tooLateFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
+import type { Appointment, Call, CallSlot, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
 
 export const dynamic = "force-dynamic";
-
-// How late medsDueNow's "due by now" catch-up is allowed to go before we give up calling
-// and just tell the family it was missed. Recovers from a delayed cron tick without ever
-// placing a very-late, confusing "check-in" call about a medication from hours ago.
-const MAX_CATCHUP_MINUTES = 120;
 
 // How many times a row stranded at 'scheduled' may be re-dialled before we give up. The
 // failure that strands it tends to repeat, and without a cap this is a loop that phones a
@@ -53,6 +41,19 @@ function groupByParentId<T extends { parent_id: string }>(rows: T[]): Map<string
     else map.set(row.parent_id, [row]);
   }
   return map;
+}
+
+/**
+ * How many times we actually rang, in words.
+ *
+ * `max_retries` counts *retries*, so the initial call plus two retries is three attempts
+ * reported as "after 2 tries" — and `max_retries: 0`, which the setup form allows, produced
+ * the plainly wrong "didn't answer their 9:00am check-in after 0 tries" for a call that was
+ * genuinely placed once. Whatever the family is told here, they act on it.
+ */
+function describeAttempts(maxRetries: number): string {
+  const attempts = maxRetries + 1;
+  return `${attempts} ${attempts === 1 ? "try" : "tries"}`;
 }
 
 async function processRetries(
@@ -102,9 +103,9 @@ async function processRetries(
 
     if (nextStatus === "failed") {
       const time = formatLocalTime(scheduledFor, parent.timezone);
-      // medsForSlot is empty for an appointment-only call (see appointmentRemindersDueNow
-      // below) — falling back to formatMeds([]) there produced the nonsensical "Their
-      // none was scheduled." Use the day's appointments instead when there's no
+      // medsForSlot is empty for an appointment-only call (a slot of kind 'appointment',
+      // see lib/slots.ts) — falling back to formatMeds([]) there produced the nonsensical
+      // "Their none was scheduled." Use the day's appointments instead when there's no
       // medication to report, so the alert actually names what was missed.
       const subject =
         medsForSlot.length > 0
@@ -120,7 +121,7 @@ async function processRetries(
       const body =
         decision === "too_late"
           ? `Heads up: ${parent.name}'s ${time} check-in didn't go out — our scheduler fell behind and it's now too late to call about it. Please check in with them directly. ${subject}`.trim()
-          : `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
+          : `Heads up: ${parent.name} didn't answer their ${time} check-in after ${describeAttempts(rules.max_retries)}. ${subject}`.trim();
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
         fingerprint: alertFingerprint("miss", [call.scheduled_for]),
         severity: "safety",
@@ -175,14 +176,14 @@ async function reapStaleScheduled(
     // Respect the same catch-up window as every other dial path. Without this a row
     // stranded overnight was re-dialled the next day at whatever hour the tick ran —
     // exactly the "very-late, confusing check-in call about a medication from hours ago"
-    // MAX_CATCHUP_MINUTES exists to prevent. There is also no attempt cap here, so if the
+    // SLOT_CATCHUP_MINUTES exists to prevent. There is also no attempt cap here, so if the
     // post-dial write keeps failing (the very thing that strands a row) it would re-dial
     // every tick forever; closing it out after the window bounds that.
     const scheduledFor = new Date(row.scheduled_for);
     // Directional on purpose: minutesBetween is absolute, so using it here would also
     // abandon a row scheduled in the future as though it were hours late.
     const minutesLate = (now.getTime() - scheduledFor.getTime()) / 60000;
-    if (minutesLate > MAX_CATCHUP_MINUTES) {
+    if (minutesLate > SLOT_CATCHUP_MINUTES) {
       // Nothing to preserve here any more: dial_attempted_at (migration 0027) was written
       // before the dial and survives whatever happened after, so closing the row out can no
       // longer erase the consent gate's evidence. The previous attempt to preserve it —
@@ -216,26 +217,29 @@ async function reapStaleScheduled(
         // Normalised: the slot loop's too-late branch fingerprints scheduledFor.toISOString()
         // ("…T16:00:00.000Z") while Postgres hands back "…T16:00:00+00:00". Same slot, same
         // alert kind, different string — so the two paths would not dedupe against each other.
-        { fingerprint: alertFingerprint("too-late", [new Date(row.scheduled_for).toISOString()]) }
+        { fingerprint: tooLateFingerprint(row.scheduled_for) }
       );
       continue;
     }
     // Bounded. The condition that strands a row — the post-dial write failing — is exactly
     // the condition that recurs, so with a 5-minute tick and a 2-hour catch-up window this
     // loop could place ~22 real phone calls to the same person. The comment above used to
-    // argue MAX_CATCHUP_MINUTES bounded it; it bounds the duration, not the count.
+    // argue SLOT_CATCHUP_MINUTES bounded it; it bounds the duration, not the count.
     //
-    // Claimed on called_at rather than retry_count. retry_count is processRetries' counter
-    // against rules.max_retries: spending it here meant a row re-dialled twice by the reaper
-    // arrived at no_answer already "exhausted", and the family was told the parent didn't
-    // answer after 2 tries with no retry ever actually placed. One counter, two meanings.
-    //
-    // called_at advances on each reaper attempt, so it both claims the row against an
-    // overlapping tick and bounds the attempts by age.
-    const attempts = row.called_at ? Math.floor((now.getTime() - new Date(row.created_at).getTime()) / (10 * 60 * 1000)) : 0;
+    // Claimed on stale_redial_at (migration 0032) — not retry_count, and no longer
+    // called_at. retry_count is processRetries' counter against rules.max_retries: spending
+    // it here meant a row re-dialled twice by the reaper arrived at no_answer already
+    // "exhausted", and the family was told the parent didn't answer after 2 tries with no
+    // retry ever actually placed. called_at was the second version of the same mistake:
+    // it means "the call was placed", and stamping it on a call that had never been placed
+    // made the dashboard render "Last check-in 9:03am" for a check-in that never happened,
+    // and (before the queue in 0033 replaced it) made hasCoveredCallToday suppress that
+    // day's appointment reminder. One counter, two meanings, twice over. This column means
+    // exactly one thing.
+    const attempts = row.stale_redial_at ? Math.floor((now.getTime() - new Date(row.created_at).getTime()) / (10 * 60 * 1000)) : 0;
     const { data: claimed } = await db
       .from("calls")
-      .update({ called_at: now.toISOString() })
+      .update({ stale_redial_at: now.toISOString() })
       .eq("id", row.id)
       .eq("status", "scheduled")
       .select("id")
@@ -254,26 +258,6 @@ async function reapStaleScheduled(
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
     await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
   }
-}
-
-/**
- * Whether a call already exists today (parent's local day) that either actually
- * connected (called_at set) or is still pending (scheduled/in_progress, so it will
- * connect or fail on its own). Used to decide whether an appointment reminder is still
- * needed — medsDueNow is cumulative for the whole day by design (delayed-tick catch-up),
- * so "was any medication slot ever due today" stays true even after that slot's call
- * fails outright, which would otherwise permanently block the appointment reminder for
- * the rest of the day even though nothing ever actually mentioned the appointment.
- */
-async function hasCoveredCallToday(db: ReturnType<typeof createAdminClient>, parent: Parent, now: Date): Promise<boolean> {
-  const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
-  const { data } = await db
-    .from("calls")
-    .select("called_at, status")
-    .eq("parent_id", parent.id)
-    .gte("scheduled_for", startUtc.toISOString())
-    .lte("scheduled_for", endUtc.toISOString());
-  return (data ?? []).some((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
 }
 
 interface ParentContext {
@@ -297,6 +281,10 @@ async function processParent(
   // produced "didn't answer" texts every day would be worse than useless.
   if (parent.paused_until && new Date(parent.paused_until) > now) {
     log.info("cron.parent_paused", { parent_id: parent.id, paused_until: parent.paused_until });
+    // The rest of today's queue goes with the pause. Leaving it pending means every slot
+    // the pause covers lapses and reports itself as a missed check-in the moment the pause
+    // lifts — the burst that coverageStartsAt existed to suppress, re-created one layer up.
+    await cancelPendingSlots(db, parent.id, "paused", now);
     return 0;
   }
 
@@ -305,6 +293,7 @@ async function processParent(
   // that, and being expected is worth more than any wording (see migration 0030).
   if (parent.first_call_after && new Date(parent.first_call_after) > now) {
     log.info("cron.before_first_call_window", { parent_id: parent.id, first_call_after: parent.first_call_after });
+    await cancelPendingSlots(db, parent.id, "prewarm_hold", now);
     return 0;
   }
 
@@ -317,158 +306,22 @@ async function processParent(
   const consentBlocksNewCalls =
     Boolean(parent.consent_refused_at && !parent.consent_given_at) || (ctx.hasPriorCalls && !parent.consent_given_at);
 
-  // The earliest slot we're willing to report as "missed" today.
-  //
-  // medsDueNow is cumulative across the local day (that's what makes catch-up work after a
-  // delayed tick), so the first tick after a pause ends — or after a caregiver finishes
-  // setup in the evening — sees every slot from that whole day as due. Each one is past
-  // MAX_CATCHUP_MINUTES, so each took the "too late" branch and sent its own text: the
-  // family got a burst of "their 9:00am check-in was missed" for a day nobody was ever
-  // going to be called on. Ending a pause is precisely when they should hear nothing, and
-  // a brand-new account has no missed history to report.
-  // resumed_at matters because the Resume button sets paused_until to null rather than
-  // moving it, so after an explicit resume this would otherwise collapse to created_at and
-  // fire the whole day's backlog of "missed check-in" texts — the exact burst it prevents.
-  const coverageStartsAt = new Date(
-    Math.max(
-      parent.paused_until ? new Date(parent.paused_until).getTime() : 0,
-      parent.resumed_at ? new Date(parent.resumed_at).getTime() : 0,
-      // A deliberate pre-warm hold is not a period we failed to cover. Omitting it meant
-      // that when a caregiver held the first call until 2pm, the first tick afterwards saw
-      // every earlier slot that day as due-and-too-late and texted "their 8:00am check-in
-      // was missed" for a day the system had chosen not to call — the same burst the
-      // paused_until/resumed_at terms exist to prevent, re-opened one path over.
-      parent.first_call_after ? new Date(parent.first_call_after).getTime() : 0,
-      parent.created_at ? new Date(parent.created_at).getTime() : 0
-    )
-  );
-
-  const due = medsDueNow(ctx.medications, parent.timezone, now);
-  const distinctSlotTimes = [...new Set(due.map((m) => m.time_of_day))];
-
   let callsTriggered = 0;
   if (!consentBlocksNewCalls) {
-    for (const slotTime of distinctSlotTimes) {
-      const medsForSlot = due.filter((m) => m.time_of_day === slotTime);
-      const scheduledFor = scheduledForToday(slotTime, parent.timezone, now);
-
-      if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
-        // A slot that elapsed before we were responsible for this parent (during a pause,
-        // or before the account existed) was never ours to miss. Skip silently rather than
-        // texting the family about it.
-        if (scheduledFor < coverageStartsAt) {
-          log.info("cron.slot_before_coverage", {
-            parent_id: parent.id,
-            scheduled_for: scheduledFor.toISOString(),
-            coverage_starts_at: coverageStartsAt.toISOString(),
-          });
-          continue;
-        }
-        // Only one active (scheduled/in_progress) call per parent is ever allowed at a
-        // time (calls_parent_active_unique). Checked fresh on every slot (not once
-        // before the loop) since an earlier slot in this very loop may have just been
-        // dialed. If one's active, this slot is merely queued behind it, not lost — skip
-        // for this tick rather than wrongly reporting it to family as "too late."
-        const { data: activeNow } = await db
-          .from("calls")
-          .select("id")
-          .eq("parent_id", parent.id)
-          .in("status", ["scheduled", "in_progress"])
-          .limit(1)
-          .maybeSingle();
-        if (activeNow) continue;
-        // Too late to place a sensible "check-in" call about this — tell the family it
-        // was missed instead. The insert is still idempotency-guarded (parent_id,
-        // scheduled_for) so a slow scheduler doesn't send this alert more than once.
-        const { data: row, error } = await db
-          .from("calls")
-          .insert({
-            parent_id: parent.id,
-            scheduled_for: scheduledFor.toISOString(),
-            status: "failed",
-            scheduled_meds: medsForSlot.map((m) => m.name),
-          })
-          .select()
-          .single();
-        if (error) {
-          if (error.code !== "23505") console.error("Failed to record skipped-too-late call", error);
-          continue;
-        }
-        const time = formatLocalTime(scheduledFor, parent.timezone);
-        const body = `Heads up: ${parent.name}'s ${time} check-in was missed and is now too late to call about. Their ${formatMeds(medsForSlot)} was scheduled.`;
-        await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body, {
-          fingerprint: alertFingerprint("too-late", [scheduledFor.toISOString()]),
-        });
-        continue;
-      }
-
-      const outcome = await scheduleAndDial(
-        db,
-        parent,
-        ctx.caregiverName,
-        medsForSlot,
-        appointmentsToday(ctx.appointments, parent.timezone, now),
-        scheduledFor,
-        ctx.watchItems
-      );
-      if (outcome.dialed) callsTriggered += 1;
-    }
-
-    // Appointment-only fallback: the loop above only ever fires for a due medication, so
-    // a parent with an appointment today but no medication due (including parents with
-    // no medications configured at all) would otherwise never get called. Gated on
-    // whether a call today already connected or is still pending — NOT on whether a
-    // medication slot was merely due at some point today, since medsDueNow's due-by-now
-    // semantics stay true for the rest of the day even after that slot's call fails
-    // outright, which would otherwise permanently block the appointment reminder despite
-    // nothing having actually mentioned the appointment. A normal day where the med call
-    // does connect still places exactly one call, since that's already "covered".
-    const dueApptReminders = appointmentRemindersDueNow(ctx.appointments, parent.timezone, now);
-    if (dueApptReminders.length > 0 && !(await hasCoveredCallToday(db, parent, now))) {
-      for (const { appointment, scheduledFor } of dueApptReminders) {
-        if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
-          // Same catch-up-cutoff treatment as a missed medication (record it and tell
-          // family) instead of silently dropping it — otherwise a badly-delayed
-          // appointment reminder leaves no trace anywhere: no calls row, no dashboard
-          // entry, no alert.
-          const { data: activeNow } = await db
-            .from("calls")
-            .select("id")
-            .eq("parent_id", parent.id)
-            .in("status", ["scheduled", "in_progress"])
-            .limit(1)
-            .maybeSingle();
-          if (activeNow) continue;
-          const { data: row, error } = await db
-            .from("calls")
-            .insert({ parent_id: parent.id, scheduled_for: scheduledFor.toISOString(), status: "failed", scheduled_meds: [] })
-            .select()
-            .single();
-          if (error) {
-            if (error.code !== "23505") console.error("Failed to record skipped-too-late appointment call", error);
-            continue;
-          }
-          const time = formatLocalTime(scheduledFor, parent.timezone);
-          const body = `Heads up: ${parent.name}'s ${formatAppointments([appointment])} appointment reminder (around ${time}) was missed and is now too late to call about.`;
-          await notifyFamilyContacts(db, parent.id, "notify_on_miss", row.id, body, {
-            fingerprint: alertFingerprint("appt-too-late", [scheduledFor.toISOString()]),
-          });
-          continue;
-        }
-        const outcome = await scheduleAndDial(
-          db,
-          parent,
-          ctx.caregiverName,
-          [],
-          appointmentsToday(ctx.appointments, parent.timezone, now),
-          scheduledFor,
-          ctx.watchItems
-        );
-        if (outcome.dialed) callsTriggered += 1;
-      }
-    }
+    // Three passes over a table, in place of the derivation the old scheduler rebuilt every
+    // tick: write down what today should look like, ring what is due, and account for what
+    // lapsed. Each one is a query against explicit columns.
+    await materializeSlots(db, parent, ctx, now);
+    callsTriggered = await dispatchDueSlots(db, parent, ctx, now);
+    await expireLapsedSlots(db, parent, now);
 
     await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
+  } else {
+    // A parent who declined, or who hasn't consented after a first call, must not have
+    // yesterday's queue quietly expire into "missed check-in" texts about calls the
+    // scheduler was never going to place. Cancelling is the honest state: not missed, not
+    // pending — withdrawn.
+    await cancelPendingSlots(db, parent.id, "consent_gate", now);
   }
 
   // Retries sat outside the consent gate, which meant a parent who missed the morning call,
@@ -533,12 +386,25 @@ export async function GET(request: Request) {
   const db = createAdminClient();
   const now = new Date();
 
-  const { data: parents, error: parentsError } = await db.from("parents").select("*");
-  if (parentsError) {
-    return NextResponse.json({ error: parentsError.message }, { status: 500 });
+  // Paged. PostgREST caps an unbounded select at its configured maximum and says nothing
+  // about it, so past that cap some households simply stop being processed: no call, no
+  // alert, no error — the same silent-truncation class migration 0024 was written to fix
+  // for `calls`. Ordered by a stable unique key so paging can't skip or repeat a row.
+  const parentList: Parent[] = [];
+  const PARENT_PAGE_SIZE = 500;
+  for (let from = 0; ; from += PARENT_PAGE_SIZE) {
+    const { data: page, error: parentsError } = await db
+      .from("parents")
+      .select("*")
+      .order("id", { ascending: true })
+      .range(from, from + PARENT_PAGE_SIZE - 1);
+    if (parentsError) {
+      return NextResponse.json({ error: parentsError.message }, { status: 500 });
+    }
+    const rows = (page ?? []) as Parent[];
+    parentList.push(...rows);
+    if (rows.length < PARENT_PAGE_SIZE) break;
   }
-
-  const parentList = (parents ?? []) as Parent[];
   if (parentList.length === 0) {
     const { error } = await db.from("cron_heartbeat").update({ last_tick_at: now.toISOString() }).eq("id", true);
     if (error) console.error("Failed to update cron heartbeat", error);
@@ -681,7 +547,7 @@ export async function GET(request: Request) {
   // Every tick leaves a trace, including the quiet ones — "the scheduler ran and decided
   // there was nothing to do" and "the scheduler never ran" look identical otherwise, and
   // that distinction is the whole question when a call doesn't happen.
-  log.info("cron.tick", { parents: parents.length, calls_triggered: callsTriggered });
+  log.info("cron.tick", { parents: parentList.length, calls_triggered: callsTriggered });
 
   return NextResponse.json({ ok: true, callsTriggered });
 }

@@ -4,11 +4,31 @@ import { describeLocalTime, isWithinCallingHours } from "@/lib/callwindow";
 import { triggerVapiCall } from "@/lib/vapi";
 import { consentGreeting, returningGreeting } from "@/lib/greeting";
 import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
+import { notifyFamilyContacts } from "@/lib/notify";
+import { tooLateFingerprint } from "@/lib/insights";
+import { formatLocalTime } from "@/lib/schedule";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires the actual Vapi call and records the outcome on an already-created `calls` row. */
 /** Why a dial didn't happen, when it didn't. Callers must not report success blindly. */
-export type DialOutcome = { dialed: true } | { dialed: false; reason: "outside_calling_hours" | "provider_error" };
+export type DialOutcome =
+  | { dialed: true; callId: string }
+  | { dialed: false; reason: "outside_calling_hours" | "provider_error" | "already_scheduled" };
+
+/**
+ * What this dial *is*, which decides who hears about it when it doesn't happen.
+ *
+ * "scheduled" is an obligation the product took on: the caregiver was promised a daily
+ * call, so a dial that doesn't happen is a missed check-in and the family has to be told.
+ * "manual" is the caregiver standing at the dashboard pressing the button — they are
+ * watching the response, so the answer goes to them on screen and texting the family
+ * "their check-in was missed" would be a fabricated alarm about a call that was never on
+ * the schedule.
+ *
+ * Defaulted to "scheduled" deliberately: a future caller that forgets to say gets the
+ * noisy-but-safe behaviour, not the silent one.
+ */
+export type DialPurpose = "scheduled" | "manual";
 
 export async function dialAndRecord(
   db: ReturnType<typeof createAdminClient>,
@@ -17,7 +37,8 @@ export async function dialAndRecord(
   caregiverName: string,
   medsDue: Medication[],
   todaysAppointments: Appointment[],
-  watchItems: WatchItem[]
+  watchItems: WatchItem[],
+  purpose: DialPurpose = "scheduled"
 ): Promise<DialOutcome> {
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
@@ -52,11 +73,41 @@ export async function dialAndRecord(
     // nothing on that path: the row stayed in_progress, the reaper flipped it to no_answer
     // ten minutes later, the next tick retried, the dial was refused again — looping until
     // the family was texted "didn't answer after 2 tries" about calls never placed.
-    await db
+    // `.select()` on the guarded update, because the guard matching zero rows and the
+    // guard matching a row are otherwise indistinguishable — the defect class that let a
+    // consent withdrawal be ignored three times. Here it decides whether *we* are the ones
+    // who closed this slot out, and therefore whether we owe anyone a message: without it,
+    // an overlapping tick that already handled this row would send a second identical text.
+    const { data: closed } = await db
       .from("calls")
       .update({ status: "failed" })
       .eq("id", callId)
-      .in("status", ["scheduled", "in_progress"]);
+      .in("status", ["scheduled", "in_progress"])
+      .select("scheduled_for")
+      .maybeSingle();
+
+    // Tell the family. This is the whole point of the fix: refusing the window is correct,
+    // but the refusal used to be terminal *and* silent — the row is left occupying
+    // (parent_id, scheduled_for), so every later tick's "too late" branch hits a 23505 and
+    // continues without a word. A check-in that never happened produced no call, no text
+    // and nothing on the dashboard, which this product renders to a caregiver as "no news,
+    // so everything is fine". Exactly the reasoning already written down for the stale
+    // reaper a few lines away in the scheduler; this path simply never got it.
+    if (closed && purpose === "scheduled") {
+      const scheduledFor = new Date(closed.scheduled_for);
+      const time = formatLocalTime(scheduledFor, parent.timezone);
+      const subject = medsDue.length > 0 ? ` Their ${formatMeds(medsDue)} was scheduled.` : "";
+      await notifyFamilyContacts(
+        db,
+        parent.id,
+        "notify_on_miss",
+        callId,
+        `Heads up: ${parent.name}'s ${time} check-in didn't go out — it's now outside the hours we're willing to ring them, so we won't call about it. Please check in with them directly.${subject}`,
+        // Shared with every other "this slot is too late" path so one missed slot produces
+        // one text, not one per path that notices.
+        { fingerprint: tooLateFingerprint(closed.scheduled_for), severity: "safety" }
+      );
+    }
     return { dialed: false, reason: "outside_calling_hours" };
   }
 
@@ -109,8 +160,21 @@ export async function dialAndRecord(
     // real signal, or — on the very first dial — skipped the entire retry budget outright.
     // Routing this into the same no_answer/retry_count pipeline as a real no-answer means
     // it gets the same number of chances before genuinely giving up and alerting family.
-    log.error("dial.trigger_failed", { call_id: callId, parent_id: parent.id, err });
-    await db.from("calls").update({ status: "no_answer", called_at: new Date().toISOString() }).eq("id", callId);
+    // ...for a *scheduled* call. A manual test call has no schedule behind it, so routing
+    // its provider error into the no_answer pipeline meant a caregiver pressing "Call now
+    // to test" during a Vapi blip got re-dialled and eventually a "X didn't answer their
+    // 3:42pm check-in after 2 tries" text about a check-in that never existed. Closed out
+    // as 'failed' instead: processRetries only ever reads no_answer, so this stays out of
+    // it, and the caregiver already learns it failed from the response to their click.
+    log.error("dial.trigger_failed", { call_id: callId, parent_id: parent.id, purpose, err });
+    await db
+      .from("calls")
+      .update(
+        purpose === "manual"
+          ? { status: "failed" }
+          : { status: "no_answer", called_at: new Date().toISOString() }
+      )
+      .eq("id", callId);
     return { dialed: false, reason: "provider_error" };
   }
 
@@ -127,7 +191,7 @@ export async function dialAndRecord(
     log.error("dial.persist_vapi_id_failed", { call_id: callId, parent_id: parent.id, vapi_call_id: vapiCall.id, err: error });
   }
 
-  return { dialed: true };
+  return { dialed: true, callId };
 }
 
 /** Creates a calls row for `scheduledFor` and dials, skipping if that exact slot already exists. */
@@ -138,7 +202,8 @@ export async function scheduleAndDial(
   medsForSlot: Medication[],
   todaysAppointments: Appointment[],
   scheduledFor: Date,
-  watchItems: WatchItem[]
+  watchItems: WatchItem[],
+  purpose: DialPurpose = "scheduled"
 ): Promise<DialOutcome> {
   // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
@@ -156,13 +221,20 @@ export async function scheduleAndDial(
     .single();
 
   if (insertError) {
-    if (insertError.code !== "23505") console.error("Failed to create calls row", insertError);
-    return { dialed: false, reason: "provider_error" }; // already scheduled, or a real error
+    // These are two different things and collapsing them told the caregiver the wrong one.
+    // 23505 is the idempotency guard doing its job — a call for this slot already exists.
+    // Anything else is the database failing. The test-call route reported both as "there's
+    // already an active call, wait for it to finish", so during a real outage a caregiver
+    // was told to wait for a call that did not exist — on the one button documented as the
+    // way back out of the consent gate.
+    if (insertError.code === "23505") return { dialed: false, reason: "already_scheduled" };
+    console.error("Failed to create calls row", insertError);
+    return { dialed: false, reason: "provider_error" };
   }
   if (!callRow) return { dialed: false, reason: "provider_error" };
 
   // Returns what actually happened to the *call*, not whether the row was inserted. The
   // test-call route reports success from this value, and a refused dial reported as true
   // told a caregiver "calling now" while nothing was placed.
-  return dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems);
+  return dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems, purpose);
 }

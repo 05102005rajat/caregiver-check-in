@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  appointmentRemindersDueNow,
+  reminderSlotFor,
   appointmentsToday,
   formatLocalTime,
   localDayBoundsUtc,
@@ -8,6 +8,8 @@ import {
   medsDueNow,
   scheduledForToday,
 } from "./schedule";
+import { fromZonedTime } from "date-fns-tz";
+import { isWithinCallingHours } from "./callwindow";
 import type { Appointment, Medication } from "@/types/db";
 
 function med(overrides: Partial<Medication> = {}): Medication {
@@ -198,37 +200,49 @@ describe("appointmentsToday", () => {
   });
 });
 
-describe("appointmentRemindersDueNow", () => {
-  it("is not due more than an hour before the appointment", () => {
-    // Appointment at 3pm PDT, now is 1:30pm PDT (90 min before) — not due yet.
-    const apptAt = new Date("2026-09-10T22:00:00Z");
-    const now = new Date("2026-09-10T20:30:00Z");
+describe("reminderSlotFor", () => {
+  it("is an hour before the appointment when that hour is callable", () => {
+    const apptAt = new Date("2026-09-10T22:00:00Z"); // 15:00 PDT
     const a = appt({ starts_at: apptAt.toISOString() });
-    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toEqual([]);
+    expect(reminderSlotFor(a, "America/Los_Angeles")?.toISOString()).toBe("2026-09-10T21:00:00.000Z");
   });
 
-  it("is due exactly an hour before the appointment", () => {
-    const apptAt = new Date("2026-09-10T22:00:00Z");
-    const now = new Date("2026-09-10T21:00:00Z"); // exactly 60 min before
+  // starts_at — unlike medications.time_of_day — is not constrained by lib/validation.ts,
+  // because a 7am hospital appointment is a real thing to enter. A flat "minus 60 minutes"
+  // produced reminders at hours every dial path refuses: the slot was created, the dial was
+  // refused, and nothing retried or reported it. These are the cases that used to be
+  // guaranteed dead ends.
+  it("moves a pre-dawn reminder to when the calling window opens", () => {
+    const apptAt = new Date("2026-09-10T15:30:00Z"); // 08:30 PDT => 07:30 reminder
     const a = appt({ starts_at: apptAt.toISOString() });
-    const result = appointmentRemindersDueNow([a], "America/Los_Angeles", now);
-    expect(result).toHaveLength(1);
-    expect(result[0].appointment).toEqual(a);
-    expect(result[0].scheduledFor.getTime()).toBe(now.getTime());
+    const slot = reminderSlotFor(a, "America/Los_Angeles");
+    // 08:00 PDT, not 07:30 — still 30 minutes of notice, and actually dialable.
+    expect(slot?.toISOString()).toBe("2026-09-10T15:00:00.000Z");
+    expect(isWithinCallingHours(slot!, "America/Los_Angeles")).toBe(true);
   });
 
-  it("stays due if the tick is delayed past the reminder time (same recovery as medsDueNow)", () => {
-    const apptAt = new Date("2026-09-10T22:00:00Z");
-    const now = new Date("2026-09-10T21:45:00Z"); // 15 min after the reminder was due
-    const a = appt({ starts_at: apptAt.toISOString() });
-    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toHaveLength(1);
+  it("drops a reminder that could only land after the appointment has already started", () => {
+    // 07:00 PDT appointment: the reminder would be 6am, the earliest we may ring is 8am,
+    // and by then the appointment has begun. Nothing useful left to say.
+    const a = appt({ starts_at: new Date("2026-09-10T14:00:00Z").toISOString() });
+    expect(reminderSlotFor(a, "America/Los_Angeles")).toBeNull();
   });
 
-  it("excludes an appointment on a different day even if the time-of-day math would otherwise match", () => {
-    const apptAt = new Date("2026-09-11T22:00:00Z"); // tomorrow
-    const now = new Date("2026-09-10T21:00:00Z");
-    const a = appt({ starts_at: apptAt.toISOString() });
-    expect(appointmentRemindersDueNow([a], "America/Los_Angeles", now)).toEqual([]);
+  it("drops a late-evening reminder rather than ringing outside the window", () => {
+    // 22:30 PDT appointment => 21:30 reminder, past the 21:00 cutoff.
+    const a = appt({ starts_at: new Date("2026-09-11T05:30:00Z").toISOString() });
+    expect(reminderSlotFor(a, "America/Los_Angeles")).toBeNull();
+  });
+
+  it("never returns a reminder outside calling hours, for any appointment hour of the day", () => {
+    // The property the cases above are examples of. Without it, a future change to the
+    // clamp could reintroduce a dead-end slot at some hour nobody wrote a case for.
+    const timezone = "America/Los_Angeles";
+    for (let hour = 0; hour < 24; hour += 1) {
+      const startsAt = fromZonedTime(`2026-09-10T${String(hour).padStart(2, "0")}:30:00`, timezone);
+      const slot = reminderSlotFor(appt({ starts_at: startsAt.toISOString() }), timezone);
+      if (slot) expect(isWithinCallingHours(slot, timezone)).toBe(true);
+    }
   });
 });
 

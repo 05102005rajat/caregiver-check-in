@@ -1,0 +1,205 @@
+/**
+ * Runtime harness for the call queue (migration 0033).
+ *
+ *   npm run security:queue
+ *
+ * Run deliberately: it creates a real (throwaway) household against the configured Supabase
+ * project, drives lib/queue.ts against it, and cleans up in a finally.
+ *
+ * The scheduler this replaces could only be exercised by running a real cron tick, which on
+ * this product means placing real phone calls to a real elderly person — so in practice it
+ * was never exercised, and it regressed in four of five review rounds. The queue's
+ * operations take `now` as an argument precisely so this file can drive a whole day in a
+ * few seconds without touching the clock or the live households.
+ *
+ * Numbers are non-routable +1202555 (HANDOVER): Twilio accepts and never delivers, so the
+ * notify path runs for real without reaching a handset.
+ */
+import { createClient } from "@supabase/supabase-js";
+import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
+import { SLOT_CATCHUP_MINUTES } from "@/lib/slots";
+import { isWithinCallingHours } from "@/lib/callwindow";
+import { tooLateFingerprint } from "@/lib/insights";
+import type { CallSlot, Medication, Parent } from "@/types/db";
+
+const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+if (!URL || !SERVICE) {
+  console.error("Missing Supabase env vars — source .env.local first.");
+  process.exit(1);
+}
+const admin = createClient(URL, SERVICE, { auth: { persistSession: false } });
+
+const n = () => `+1202555${Math.floor(1000 + Math.random() * 9000)}`;
+const CG_PHONE = n(), PARENT_PHONE = n(), CONTACT_PHONE = n();
+const ZONES = ["Pacific/Auckland", "Asia/Tokyo", "Asia/Kolkata", "Europe/London", "America/Sao_Paulo", "America/Los_Angeles"];
+
+let pass = 0, fail = 0;
+function check(name: string, ok: boolean, detail = "") {
+  console.log(`${ok ? "✓" : "✗"} ${name}${ok || !detail ? "" : `\n    ${detail}`}`);
+  ok ? pass++ : fail++;
+}
+
+const hhmm = (d: Date, tz: string) =>
+  new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+
+async function slotsOf(parentId: string): Promise<CallSlot[]> {
+  const { data } = await admin.from("call_slots").select("*").eq("parent_id", parentId).order("due_at");
+  return (data ?? []) as CallSlot[];
+}
+
+async function main() {
+  const realNow = new Date();
+  // A zone where it is currently late morning locally, so both an elapsed slot and a future
+  // slot fit inside today's calling window and a dial is actually permitted.
+  const tz = ZONES.find((z) => {
+    const h = Number(hhmm(realNow, z).slice(0, 2));
+    return h >= 10 && h <= 16;
+  });
+  if (!tz) throw new Error("no zone currently mid-morning — rerun later");
+  const localHour = Number(hhmm(realNow, tz).slice(0, 2));
+  // 45 minutes ago, not two hours: a slot seeded exactly SLOT_CATCHUP_MINUTES in the past
+  // has already reached its own expiry, so the "expiry leaves unexpired slots alone"
+  // control below would be asserting against a slot that had legitimately expired — the
+  // control would fail for a reason that has nothing to do with the code under test.
+  const elapsedTime = hhmm(new Date(realNow.getTime() - 45 * 60000), tz);
+  const futureTime = hhmm(new Date(realNow.getTime() + 90 * 60000), tz);
+  console.log(`timezone=${tz} local=${hhmm(realNow, tz)} elapsed_slot=${elapsedTime} future_slot=${futureTime}\n`);
+
+  const email = `queue-probe-${Date.now()}@example.invalid`;
+  const { data: u, error: uErr } = await admin.auth.admin.createUser({ email, password: `pw-${Date.now()}`, email_confirm: true });
+  if (uErr || !u.user) throw new Error(`createUser: ${uErr?.message}`);
+  const cg = u.user.id;
+  let pid = "";
+
+  try {
+    const { data: p, error } = await admin.rpc("save_parent_setup", {
+      p_caregiver_id: cg, p_caregiver_email: email, p_caregiver_name: "Queue Probe",
+      p_caregiver_phone: CG_PHONE, p_parent_name: "Queue Parent", p_parent_phone: PARENT_PHONE,
+      p_parent_timezone: tz, p_assistant_name: "Rosie",
+      p_medications: [
+        { name: "EarlyMed", dose: "", time_of_day: elapsedTime, notes: "", description: "", start_date: "", end_date: "" },
+        { name: "LaterMed", dose: "", time_of_day: futureTime, notes: "", description: "", start_date: "", end_date: "" },
+      ],
+      p_appointments: [],
+      p_family_contacts: [{ name: "Queue Contact", phone: CONTACT_PHONE, email: "", role: "son", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true }],
+      p_watch_items: [], p_retry_after_minutes: 30, p_max_retries: 2,
+    });
+    if (error || !p) throw new Error(`setup: ${error?.message}`);
+    pid = p as string;
+
+    // Backdate creation to just after local midnight, so coverage includes the elapsed
+    // slot. Otherwise coverageStartsAt is "now" and that slot was never ours to miss —
+    // correct behaviour, but it is not the case under test here.
+    const midnightish = new Date(realNow.getTime() - (localHour + 0.5) * 3600 * 1000);
+    await admin.from("parents").update({ created_at: midnightish.toISOString() }).eq("id", pid);
+    // Consent, so the gate doesn't shut before any of this runs.
+    await admin.from("parents").update({ consent_given_at: new Date().toISOString() }).eq("id", pid);
+
+    const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
+    const parent = parentRow as Parent;
+    const { data: medRows } = await admin.from("medications").select("*").eq("parent_id", pid);
+    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [] };
+
+    // ---- materialise ----
+    await materializeSlots(admin as never, parent, ctx, realNow);
+    let slots = await slotsOf(pid);
+    check("materialises one slot per medication time", slots.length === 2, `${slots.length} slots: ${JSON.stringify(slots.map((s) => s.due_at))}`);
+    check("every slot starts pending", slots.every((s) => s.state === "pending"), JSON.stringify(slots.map((s) => s.state)));
+    check(
+      "a slot that elapsed while we were responsible IS queued (the outage case)",
+      slots.some((s) => new Date(s.due_at) < realNow),
+      "no elapsed slot — a missed check-in would go unreported"
+    );
+    const elapsed = slots.find((s) => new Date(s.due_at) < realNow)!;
+    const future = slots.find((s) => new Date(s.due_at) > realNow)!;
+    check(
+      "expiry is the catch-up window, bounded by the calling window",
+      new Date(elapsed.expires_at).getTime() - new Date(elapsed.due_at).getTime() <= SLOT_CATCHUP_MINUTES * 60000,
+      `${(new Date(elapsed.expires_at).getTime() - new Date(elapsed.due_at).getTime()) / 60000} min`
+    );
+    check("queued slots are all inside calling hours", slots.every((s) => isWithinCallingHours(new Date(s.due_at), tz)));
+
+    // ---- idempotent ----
+    await materializeSlots(admin as never, parent, ctx, realNow);
+    slots = await slotsOf(pid);
+    check("re-materialising the same day adds nothing", slots.length === 2, `${slots.length} slots after second pass`);
+
+    // ---- dispatch: CONTROL, nothing that isn't due ----
+    // A blocking active call means scheduleAndDial returns already_scheduled, so nothing is
+    // dialled here and the release path is what gets exercised.
+    const { data: blocker } = await admin
+      .from("calls")
+      .insert({ parent_id: pid, scheduled_for: new Date(realNow.getTime() - 60 * 60 * 1000).toISOString(), status: "scheduled" })
+      .select("id")
+      .single();
+    const triggered = await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    slots = await slotsOf(pid);
+    const elapsedAfter = slots.find((s) => s.id === elapsed.id)!;
+    const futureAfter = slots.find((s) => s.id === future.id)!;
+    check("a blocked dispatch places no call", triggered === 0, `${triggered} calls`);
+    check(
+      "a slot blocked by an in-flight call is RELEASED, not consumed",
+      elapsedAfter.state === "pending",
+      `state=${elapsedAfter.state} — a consumed slot is a check-in that silently never happens`
+    );
+    check("dispatch leaves a slot that isn't due yet alone (control)", futureAfter.state === "pending" && futureAfter.call_id === null);
+
+    await admin.from("calls").delete().eq("id", blocker!.id);
+
+    // ---- expire ----
+    // Control first: nothing has expired yet, so this must be a no-op.
+    await expireLapsedSlots(admin as never, parent, realNow);
+    slots = await slotsOf(pid);
+    check("expiry leaves unexpired slots alone (control)", slots.every((s) => s.state === "pending"), JSON.stringify(slots.map((s) => s.state)));
+
+    // Push the elapsed slot past its deadline and account for it.
+    await admin.from("call_slots").update({ expires_at: new Date(realNow.getTime() - 60000).toISOString() }).eq("id", elapsed.id);
+    await expireLapsedSlots(admin as never, parent, realNow);
+    slots = await slotsOf(pid);
+    const expiredSlot = slots.find((s) => s.id === elapsed.id)!;
+    const fp = tooLateFingerprint(elapsed.due_at);
+    const { data: msgs } = await admin.from("messages").select("recipient,body").eq("parent_id", pid).eq("fingerprint", fp);
+    check("a lapsed slot is marked expired", expiredSlot.state === "expired", `state=${expiredSlot.state}`);
+    check("a lapsed slot gets a calls row so the miss is visible", expiredSlot.call_id !== null);
+    check("a lapsed slot TELLS THE FAMILY", (msgs ?? []).length > 0, `${(msgs ?? []).length} messages`);
+    if (msgs?.[0]) console.log(`    body: ${msgs[0].body}`);
+    check(
+      "the miss names the medication that was scheduled",
+      Boolean(msgs?.[0]?.body?.includes("EarlyMed")),
+      msgs?.[0]?.body ?? "(no message)"
+    );
+
+    // ---- expiring twice must not text twice ----
+    const before = (msgs ?? []).length;
+    await expireLapsedSlots(admin as never, parent, realNow);
+    const { data: msgsAgain } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", fp);
+    check("a second expiry pass does not re-alert", (msgsAgain ?? []).length === before, `${before} -> ${(msgsAgain ?? []).length}`);
+
+    // ---- cancel ----
+    await cancelPendingSlots(admin as never, pid, "harness", realNow);
+    slots = await slotsOf(pid);
+    check("cancelling clears pending slots", slots.filter((s) => s.state === "pending").length === 0, JSON.stringify(slots.map((s) => s.state)));
+    check(
+      "cancelling does not rewrite slots already accounted for (control)",
+      slots.find((s) => s.id === elapsed.id)!.state === "expired",
+      "an expired slot was overwritten as cancelled"
+    );
+  } finally {
+    if (pid) {
+      await admin.from("call_slots").delete().eq("parent_id", pid);
+      for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
+        await admin.from(t).delete().eq("parent_id", pid);
+      }
+      await admin.from("parents").delete().eq("id", pid);
+    }
+    await admin.from("sms_opt_ins").delete().in("phone", [CG_PHONE, PARENT_PHONE, CONTACT_PHONE]);
+    await admin.from("caregivers").delete().eq("id", cg);
+    await admin.auth.admin.deleteUser(cg);
+    console.log("\ncleaned up probe household.");
+  }
+
+  console.log(`\n${pass}/${pass + fail} queue checks passed`);
+  if (fail) process.exit(1);
+}
+main().catch((e) => { console.error(e); process.exit(1); });

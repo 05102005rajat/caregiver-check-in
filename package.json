@@ -10,7 +10,9 @@
     "test": "TZ=UTC vitest run",
     "eval": "tsx evals/run.ts",
     "eval:conversation": "tsx evals/conversation.ts",
-    "security": "tsx security/isolation.ts"
+    "security": "tsx security/isolation.ts",
+    "security:refusal": "tsx security/refusal.ts",
+    "security:queue": "tsx security/queue.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",

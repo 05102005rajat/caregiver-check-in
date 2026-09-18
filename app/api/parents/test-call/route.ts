@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { CALLING_HOURS_END, CALLING_HOURS_START, describeLocalTime } from "@/lib/callwindow";
-import { appointmentsToday, medsAtLocalTime } from "@/lib/schedule";
+import { appointmentsToday, medsDueNow } from "@/lib/schedule";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
 /** Fires an immediate real call to the caregiver's own parent, bypassing the schedule. */
@@ -46,16 +46,23 @@ export async function POST() {
     db,
     parent,
     caregiver?.name ?? "your family",
-    // Only the medications actually due around now, exactly as a scheduled call computes
-    // them. Passing every active medication meant Rosie asked someone at 10am about their
-    // 8pm pills; anything they hadn't taken yet came back as meds_missed, survived the
-    // isKnownMed check (it was in this call's own scheduled_meds snapshot), and texted the
-    // family "Not taken: ..." for medication that wasn't late at all — a false alarm
-    // produced by the button whose whole job is to prove the system works.
-    medsAtLocalTime((medications ?? []) as Medication[], testCallAt, parent.timezone),
+    // The medications due by now, via the same medsDueNow the scheduler uses. This said
+    // "exactly as a scheduled call computes them" while calling medsAtLocalTime, which
+    // matches time_of_day against the current HH:mm *exactly* — so unless the caregiver
+    // happened to press the button on the very minute of a dose, it returned nothing and
+    // Rosie never mentioned medication at all. The one button whose job is to let someone
+    // verify their setup works was the one that didn't exercise it.
+    //
+    // Still not "every active medication", which is what the original defect was: at 10am
+    // this excludes an 8pm pill, so Rosie can't ask about a dose that isn't due, report it
+    // unconfirmed, and text the family "Not taken: ..." about medication that isn't late.
+    medsDueNow((medications ?? []) as Medication[], parent.timezone, testCallAt),
     appointmentsToday((appointments ?? []) as Appointment[], parent.timezone),
     testCallAt,
-    (watchItems ?? []) as WatchItem[]
+    (watchItems ?? []) as WatchItem[],
+    // Not a scheduled obligation: a refusal here is reported to the caregiver watching the
+    // response, not texted to the family as a missed check-in.
+    "manual"
   );
 
   if (!outcome.dialed) {
@@ -72,9 +79,19 @@ export async function POST() {
         { status: 409 }
       );
     }
+    if (outcome.reason === "already_scheduled") {
+      return NextResponse.json(
+        { error: "There's already an active call for this parent — wait for it to finish first" },
+        { status: 409 }
+      );
+    }
+    // A provider or database failure is not a conflict. Reporting it as one told the
+    // caregiver to wait for a call that was never placed — during a Vapi outage, on the
+    // button the dashboard banner and the consent-refusal SMS both point at as the way
+    // back out of the consent gate.
     return NextResponse.json(
-      { error: "There's already an active call for this parent — wait for it to finish first" },
-      { status: 409 }
+      { error: `We couldn't place the call just now — something went wrong on our side. Please try again in a few minutes.` },
+      { status: 502 }
     );
   }
 

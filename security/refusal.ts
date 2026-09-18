@@ -1,0 +1,126 @@
+/**
+ * Runtime check for the dial path that was terminal and silent.
+ *
+ *   npm run security:refusal
+ *
+ * Run deliberately, not in `npm test`: it creates a real (throwaway) household against the
+ * configured Supabase project, drives the real dialAndRecord, and cleans up afterwards.
+ *
+ * Why this exists as a *runtime* check rather than a unit test: the defect was never in a
+ * pure function. dialAndRecord correctly refused to ring outside calling hours, marked the
+ * row `failed`, and returned — and nothing told anybody. The row then occupied
+ * (parent_id, scheduled_for), so every later tick's "too late" branch hit a 23505 and
+ * continued without a word. No call, no text, no dashboard row. On a product whose promise
+ * is "you only hear from us when something needs attention", that renders to a caregiver as
+ * "everything is fine". Only exercising the real dial + notify + messages path can show it.
+ *
+ * Non-routable +1202555 numbers per HANDOVER, so notifyFamilyContacts runs for real —
+ * Twilio refuses the send, a `messages` row is still written, and no handset rings.
+ * Nothing here ever reaches dialing: both cases are refused before triggerVapiCall.
+ */
+import { createClient } from "@supabase/supabase-js";
+import { dialAndRecord } from "@/lib/dial";
+import { tooLateFingerprint } from "@/lib/insights";
+import { isWithinCallingHours } from "@/lib/callwindow";
+import type { Parent } from "@/types/db";
+
+const admin = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
+  auth: { persistSession: false },
+});
+
+const n = () => `+1202555${Math.floor(1000 + Math.random() * 9000)}`;
+const CG_PHONE = n(), PARENT_PHONE = n(), CONTACT_PHONE = n();
+
+const ZONES = ["Pacific/Auckland", "Asia/Tokyo", "Europe/London", "America/Los_Angeles", "Asia/Kolkata", "America/Sao_Paulo"];
+
+let pass = 0, fail = 0;
+function check(name: string, ok: boolean, detail = "") {
+  console.log(`${ok ? "✓" : "✗"} ${name}${ok || !detail ? "" : `\n    ${detail}`}`);
+  ok ? pass++ : fail++;
+}
+
+async function main() {
+  const now = new Date();
+  const outside = ZONES.find((z) => !isWithinCallingHours(now, z));
+  const inside = ZONES.find((z) => isWithinCallingHours(now, z));
+  console.log(`now=${now.toISOString()}  outside-hours zone=${outside}  inside-hours zone=${inside}\n`);
+  if (!outside) throw new Error("no zone currently outside calling hours — rerun later");
+
+  const email = `refusal-probe-${Date.now()}@example.invalid`;
+  const { data: u, error: uErr } = await admin.auth.admin.createUser({ email, password: `pw-${Date.now()}`, email_confirm: true });
+  if (uErr || !u.user) throw new Error(`createUser: ${uErr?.message}`);
+  const cg = u.user.id;
+  let pid = "";
+
+  try {
+    const { data: p, error } = await admin.rpc("save_parent_setup", {
+      p_caregiver_id: cg, p_caregiver_email: email, p_caregiver_name: "Refusal Probe",
+      p_caregiver_phone: CG_PHONE, p_parent_name: "Refusal Parent", p_parent_phone: PARENT_PHONE,
+      p_parent_timezone: outside, p_assistant_name: "Rosie",
+      p_medications: [], p_appointments: [],
+      p_family_contacts: [{ name: "Probe Contact", phone: CONTACT_PHONE, email: "", role: "son", notify_on_miss: true, notify_on_concern: true, sms_opt_in_confirmed: true }],
+      p_watch_items: [], p_retry_after_minutes: 30, p_max_retries: 2,
+    });
+    if (error || !p) throw new Error(`setup: ${error?.message}`);
+    pid = p as string;
+    const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
+    const parent = parentRow as Parent;
+
+    const makeCall = async (offsetMin: number) => {
+      const scheduledFor = new Date(Date.now() - offsetMin * 60000).toISOString();
+      const { data, error: e } = await admin.from("calls").insert({ parent_id: pid, scheduled_for: scheduledFor, status: "scheduled", scheduled_meds: [] }).select().single();
+      if (e || !data) throw new Error(`insert call: ${e?.message}`);
+      return data as { id: string; scheduled_for: string };
+    };
+    const msgsFor = async (fp: string) => {
+      const { data } = await admin.from("messages").select("recipient,body,status,error").eq("parent_id", pid).eq("fingerprint", fp);
+      return data ?? [];
+    };
+
+    // ---- CASE 1: a scheduled check-in refused for the window. Family must be told. ----
+    const c1 = await makeCall(5);
+    const fp1 = tooLateFingerprint(c1.scheduled_for);
+    const out1 = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
+    const { data: row1 } = await admin.from("calls").select("status,called_at").eq("id", c1.id).single();
+    const m1 = await msgsFor(fp1);
+    check("refused dial reports outside_calling_hours", !out1.dialed && out1.reason === "outside_calling_hours", JSON.stringify(out1));
+    check("refused dial marks the row failed", row1?.status === "failed", JSON.stringify(row1));
+    check("refused dial does NOT claim the call was placed", row1?.called_at === null, `called_at=${row1?.called_at}`);
+    check("refused scheduled check-in TELLS THE FAMILY (the fix)", m1.length > 0, `${m1.length} messages for fingerprint ${fp1}`);
+    const recipients = new Set(m1.map((m) => m.recipient));
+    check(
+      "both the family contact and the caregiver are told",
+      recipients.has(CONTACT_PHONE) && recipients.has(CG_PHONE),
+      JSON.stringify([...recipients])
+    );
+    if (m1[0]) console.log(`    body: ${m1[0].body}`);
+
+    // ---- CASE 1b: a second pass over the same slot must not text again. ----
+    const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
+    const m1b = await msgsFor(fp1);
+    check("re-running the same refused slot does not re-alert", !out1b.dialed && m1b.length === m1.length, `${m1.length} -> ${m1b.length}`);
+
+    // ---- CASE 2 (CONTROL): a manual test call, refused identically, must NOT alert. ----
+    // Without this, "it sent a text" proves only that notify works, not that it fires for
+    // the right reason — a version that texted on every refusal would pass case 1 too.
+    const c2 = await makeCall(7);
+    const fp2 = tooLateFingerprint(c2.scheduled_for);
+    const out2 = await dialAndRecord(admin as never, c2.id, parent, "Probe Caregiver", [], [], [], "manual");
+    const { data: row2 } = await admin.from("calls").select("status").eq("id", c2.id).single();
+    const m2 = await msgsFor(fp2);
+    check("manual test call is refused the same way", !out2.dialed && out2.reason === "outside_calling_hours" && row2?.status === "failed");
+    check("manual test call does NOT text the family (control)", m2.length === 0, `${m2.length} messages — a test call fabricated a missed check-in`);
+  } finally {
+    if (pid) {
+      for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) await admin.from(t).delete().eq("parent_id", pid);
+      await admin.from("parents").delete().eq("id", pid);
+    }
+    await admin.from("sms_opt_ins").delete().in("phone", [CG_PHONE, PARENT_PHONE, CONTACT_PHONE]);
+    await admin.from("caregivers").delete().eq("id", cg);
+    await admin.auth.admin.deleteUser(cg);
+    console.log("\ncleaned up probe household.");
+  }
+  console.log(`\n${pass}/${pass + fail} checks passed`);
+  if (fail) process.exit(1);
+}
+main().catch((e) => { console.error(e); process.exit(1); });

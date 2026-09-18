@@ -93,6 +93,10 @@ export interface Call {
   /** Stamped immediately before dialing, so a failure during/after the call can't erase
    *  the fact that we rang. The consent gate reads this; called_at means it was placed. */
   dial_attempted_at: string | null;
+  /** Reaper bookkeeping only (0032): when a row stranded at 'scheduled' was last
+   *  re-attempted. Never means the call connected — the reaper used to overload called_at
+   *  for this, which showed the caregiver a check-in that never happened. */
+  stale_redial_at: string | null;
   status: "scheduled" | "in_progress" | "completed" | "no_answer" | "failed" | null;
   vapi_call_id: string | null;
   retry_count: number;
@@ -177,4 +181,26 @@ export interface SetupFormPayload {
     retry_after_minutes: number;
     max_retries: number;
   };
+}
+
+/**
+ * One materialised call in the day's queue (migration 0033).
+ *
+ * The scheduler used to re-derive this on every tick from medsDueNow plus a catch-up
+ * constant plus a coverage window. Written down, "this call is due at X and stops making
+ * sense at Y" is two columns and the derivations go away.
+ */
+export interface CallSlot {
+  id: string;
+  parent_id: string;
+  due_at: string;
+  expires_at: string;
+  kind: "medication" | "appointment";
+  med_names: string[];
+  appointment_id: string | null;
+  /** pending -> dispatched | expired | cancelled. One column, mutually exclusive. */
+  state: "pending" | "dispatched" | "expired" | "cancelled";
+  call_id: string | null;
+  created_at: string;
+  updated_at: string;
 }

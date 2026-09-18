@@ -75,6 +75,21 @@ export function alertFingerprint(kind: string, facts: string[]): string {
   return `${kind}:${normalized.join("|")}`;
 }
 
+/**
+ * The fingerprint for "this slot's check-in never happened and is now too late".
+ *
+ * Four paths can reach that conclusion for the same slot — the scheduler's catch-up
+ * cutoff, the stale-scheduled reaper, the appointment-reminder cutoff, and lib/dial.ts
+ * refusing the calling window — and they must dedupe against each other or a single
+ * missed slot texts the family several times. They previously could not: one built the
+ * fingerprint from `scheduledFor.toISOString()` ("…T16:00:00.000Z") and another from the
+ * raw Postgres string ("…T16:00:00+00:00"), which is the same instant and a different
+ * fingerprint. Normalising in one place is the only way that stays true.
+ */
+export function tooLateFingerprint(scheduledFor: string | Date): string {
+  return alertFingerprint("too-late", [new Date(scheduledFor).toISOString()]);
+}
+
 /** Whether the caregiver needs to do anything about this call at all. */
 export function needsAttention(call: Call): boolean {
   // Delegates to the shared rule so the dashboard can't disagree with what was texted.

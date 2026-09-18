@@ -1,4 +1,5 @@
 import { fromZonedTime, toZonedTime } from "date-fns-tz";
+import { CALLING_HOURS_START, isWithinCallingHours } from "@/lib/callwindow";
 import type { Appointment, Medication } from "@/types/db";
 
 function minutesSinceMidnight(date: Date): number {
@@ -108,21 +109,41 @@ export function formatLocalTime(date: Date, timezone: string): string {
 const APPOINTMENT_REMINDER_MINUTES_BEFORE = 60;
 
 /**
- * Today's appointments whose reminder time (a fixed window before they start) has
- * arrived, paired with the UTC instant of that reminder — same "due by now, not a
- * narrow window" semantics as medsDueNow, for the same delayed-cron-tick recovery reason.
+ * When to actually ring about an appointment, or null if we shouldn't.
+ *
+ * Unlike `medications.time_of_day`, which lib/validation.ts refuses outside calling hours,
+ * `starts_at` is a real-world time we don't control — a 7am cardiology appointment is a
+ * perfectly ordinary thing for a caregiver to enter. Subtracting a flat hour from it
+ * produced a 6am reminder, and every dial path refuses to ring at 6am. The row got
+ * created, the dial was refused, and (before the fix in lib/dial.ts) nobody was told:
+ * a deterministic dead end that repeated for every early appointment.
+ *
+ * So the reminder is moved to the moment the window opens when that still leaves time to
+ * be useful, and otherwise dropped. Dropping is safe in a way that silence normally is not
+ * here: today's appointments are passed to *every* call as `appointments_today`, so the
+ * appointment is still spoken about on the regular check-in. What's given up is only the
+ * extra dedicated reminder call, not the caregiver's visibility of the appointment.
  */
-export function appointmentRemindersDueNow(
-  appointments: Appointment[],
-  timezone: string,
-  now: Date = new Date()
-): Array<{ appointment: Appointment; scheduledFor: Date }> {
-  return appointmentsToday(appointments, timezone, now)
-    .map((appointment) => ({
-      appointment,
-      scheduledFor: new Date(new Date(appointment.starts_at).getTime() - APPOINTMENT_REMINDER_MINUTES_BEFORE * 60000),
-    }))
-    .filter(({ scheduledFor }) => scheduledFor.getTime() <= now.getTime());
+export function reminderSlotFor(appointment: Appointment, timezone: string): Date | null {
+  const startsAt = new Date(appointment.starts_at);
+  const raw = new Date(startsAt.getTime() - APPOINTMENT_REMINDER_MINUTES_BEFORE * 60000);
+  if (isWithinCallingHours(raw, timezone)) return raw;
+
+  // Too early: pull it forward to when we're first willing to ring. Only worth doing if
+  // the appointment hasn't already started by then — a "reminder" after the fact is worse
+  // than none, and it would occupy the slot a real missed-call alert needs.
+  const local = toZonedTime(raw, timezone);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const windowOpens = fromZonedTime(
+    `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}T${pad(CALLING_HOURS_START)}:00:00`,
+    timezone
+  );
+  if (raw.getTime() < windowOpens.getTime() && windowOpens.getTime() < startsAt.getTime()) return windowOpens;
+
+  // Too late in the evening (or the clamp would land past the appointment). The regular
+  // check-in still mentions it; we are not ringing an elderly person late at night to
+  // remind them about an appointment.
+  return null;
 }
 
 /**

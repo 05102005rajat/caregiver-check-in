@@ -12,8 +12,8 @@ export type RetryDecision = "wait" | "retry" | "exhausted" | "too_late";
 /**
  * How stale a slot may be before retrying it stops making sense.
  *
- * The slot loop has MAX_CATCHUP_MINUTES and an elaborate "too late to call" branch; this
- * path had nothing, and asked only "has retry_after_minutes elapsed". After a scheduler
+ * The queue gives every slot an explicit expires_at (lib/slots.ts, migration 0033); this
+ * path has no slot behind it and asked only "has retry_after_minutes elapsed". After a scheduler
  * outage from 9am to 8pm, the 8pm tick would happily dial about a 9am medication. Four
  * hours is generous enough to ride out a normal outage and short enough that the call still
  * makes sense to the person answering it.
