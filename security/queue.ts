@@ -99,7 +99,7 @@ async function main() {
     const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
     const parent = parentRow as Parent;
     const { data: medRows } = await admin.from("medications").select("*").eq("parent_id", pid);
-    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [] };
+    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [], sourcesComplete: true };
 
     // ---- materialise ----
     await materializeSlots(admin as never, parent, ctx, realNow);
@@ -176,6 +176,32 @@ async function main() {
     const { data: msgsAgain } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", fp);
     check("a second expiry pass does not re-alert", (msgsAgain ?? []).length === before, `${before} -> ${(msgsAgain ?? []).length}`);
 
+    // ---- a failed source read must never delete the day ----
+    // Materialisation reconciles, so a plan built from an empty medications list deletes
+    // every pending slot for today. A failed query defaults to [] and is indistinguishable
+    // from "no medications" — so without this guard a transient database error destroys
+    // slots that then never expire, never produce a calls row and never text anyone.
+    const beforeWipe = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
+    await materializeSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: false }, realNow);
+    const afterWipe = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
+    check(
+      "an incomplete source read leaves the queue alone",
+      afterWipe === beforeWipe && beforeWipe > 0,
+      `${beforeWipe} pending before, ${afterWipe} after — a transient query error deleted the day`
+    );
+
+    // Control: with sourcesComplete true, an empty plan really does clear them, so the
+    // check above is testing the guard and not an inert code path.
+    await materializeSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: true }, realNow);
+    check(
+      "a genuinely empty plan does clear pending slots (control)",
+      (await slotsOf(pid)).filter((s) => s.state === "pending").length === 0,
+      "reconciliation did nothing — the guard above proves nothing"
+    );
+    // Put the day back for the checks that follow.
+    await materializeSlots(admin as never, parent, ctx, realNow);
+    slots = await slotsOf(pid);
+
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);
     slots = await slotsOf(pid);
@@ -192,11 +218,14 @@ async function main() {
     // row, this evening's check-in is never dialled, never expires and never alerts.
     await materializeSlots(admin as never, parent, ctx, realNow);
     slots = await slotsOf(pid);
-    const revived = slots.find((s) => s.id === future.id)!;
+    // By due_at, not by id: the empty-plan control above deletes pending rows, so the slot
+    // for this time may legitimately be a new row. The identity that matters is the slot
+    // time, which is what the unique index is on.
+    const revived = slots.find((s) => s.due_at === future.due_at);
     check(
       "re-materialising after a cancel gives the day back (pause then resume)",
-      revived.state === "pending",
-      `state=${revived.state} — the rest of the day stays cancelled and is never called or reported`
+      revived?.state === "pending",
+      `state=${revived?.state ?? "ROW MISSING"} — the rest of the day stays cancelled and is never called or reported`
     );
 
     // ---- a slot whose call actually happened must not be reported as missed ----

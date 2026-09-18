@@ -2,8 +2,9 @@ import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dialAndRecord, scheduleAndDial } from "@/lib/dial";
 import { retryDecision } from "@/lib/retry";
+import { isWithinCallingHours } from "@/lib/callwindow";
 import { appointmentsToday, formatLocalTime, medsAtLocalTime } from "@/lib/schedule";
-import { SLOT_CATCHUP_MINUTES } from "@/lib/slots";
+import { SLOT_CATCHUP_MINUTES, medsByName } from "@/lib/slots";
 import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
@@ -71,7 +72,15 @@ async function processRetries(
     const decision = retryDecision(call, rules);
     if (decision === "wait") continue;
 
-    const nextStatus = decision === "exhausted" || decision === "too_late" ? "failed" : "in_progress";
+    // A retry that lands after the calling window is not "we never rang" — we rang, they
+    // didn't answer, and we have run out of day. Deciding it here rather than letting
+    // lib/dial.ts refuse it means the family gets the true sentence: dial.ts would mark the
+    // row failed and text "their 8:30pm check-in didn't go out", about a call that did go
+    // out, and the accurate "didn't answer" message would then never be sent because the
+    // row is no longer no_answer. The chokepoint still refuses; it just isn't the thing
+    // that describes a retry to a caregiver.
+    const windowClosed = decision === "retry" && !isWithinCallingHours(now, parent.timezone);
+    const nextStatus = decision === "exhausted" || decision === "too_late" || windowClosed ? "failed" : "in_progress";
 
     // Optimistic-concurrency claim: only proceeds if the row is still exactly as we
     // read it. If an overlapping cron tick already claimed it, this affects 0 rows and
@@ -98,7 +107,7 @@ async function processRetries(
 
     const scheduledFor = new Date(call.scheduled_for);
     const medsForSlot = call.scheduled_meds
-      ? medications.filter((m) => call.scheduled_meds!.includes(m.name))
+      ? medsByName(medications, call.scheduled_meds)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
 
     if (nextStatus === "failed") {
@@ -118,8 +127,9 @@ async function processRetries(
       // statement about the parent; when we gave up because the slot went stale it is a
       // statement about us, and saying the first would be untrue and alarming in a way that
       // points the family at the wrong thing.
-      const body =
-        decision === "too_late"
+      const body = windowClosed
+        ? `Heads up: ${parent.name} didn't answer their ${time} check-in, and it's now too late in the evening for us to try again. Please check in with them directly. ${subject}`.trim()
+        : decision === "too_late"
           ? `Heads up: ${parent.name}'s ${time} check-in didn't go out — our scheduler fell behind and it's now too late to call about it. Please check in with them directly. ${subject}`.trim()
           : `Heads up: ${parent.name} didn't answer their ${time} check-in after ${describeAttempts(rules.max_retries)}. ${subject}`.trim();
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
@@ -138,7 +148,9 @@ async function processRetries(
       appointmentsToday(appointments, parent.timezone, now),
       // Without this a retry stops asking after the knee the first dial asked about —
       // Rosie's "remembering" would be inconsistent within the same morning.
-      watchItems
+      watchItems,
+      // This branch owns what a refused retry says to the family (see windowClosed above).
+      "retry"
     );
   }
 }
@@ -240,24 +252,47 @@ async function reapStaleScheduled(
     // day's appointment reminder. One counter, two meanings, twice over. This column means
     // exactly one thing.
     const attempts = row.stale_redial_at ? Math.floor((now.getTime() - new Date(row.created_at).getTime()) / (10 * 60 * 1000)) : 0;
+    // The predicate on stale_redial_at is what makes this a claim. Guarding only on
+    // status='scheduled' meant two overlapping invocations both matched the same row, both
+    // "claimed" it and both dialled — two real phone calls to the same person. The column
+    // was named for the claim without the guard that implements it.
     const { data: claimed } = await db
       .from("calls")
       .update({ stale_redial_at: now.toISOString() })
       .eq("id", row.id)
       .eq("status", "scheduled")
+      .or(`stale_redial_at.is.null,stale_redial_at.lt.${staleThreshold}`)
       .select("id")
       .maybeSingle();
     if (!claimed) continue;
 
     if (attempts >= MAX_STALE_REDIALS) {
-      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
-      if (error) log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: error });
+      const { data: closed } = await db
+        .from("calls")
+        .update({ status: "failed" })
+        .eq("id", row.id)
+        .eq("status", "scheduled")
+        .select("id")
+        .maybeSingle();
       log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, attempts });
+      // Giving up here was silent. The slot for this time is already 'dispatched' and linked
+      // to this row, so it will never expire either — the check-in simply stops existing.
+      if (closed) {
+        const time = formatLocalTime(scheduledFor, parent.timezone);
+        await notifyFamilyContacts(
+          db,
+          parent.id,
+          "notify_on_miss",
+          row.id,
+          `Heads up: we couldn't complete ${parent.name}'s check-in around ${time} after several attempts. Please check in with them directly.`,
+          { fingerprint: tooLateFingerprint(row.scheduled_for), severity: "safety" }
+        );
+      }
       continue;
     }
 
     const medsForSlot = row.scheduled_meds
-      ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
+      ? medsByName(medications, row.scheduled_meds)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
     await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
   }
@@ -265,6 +300,8 @@ async function reapStaleScheduled(
 
 interface ParentContext {
   caregiverName: string;
+  /** See QueueContext.sourcesComplete — false when the medications/appointments read failed. */
+  sourcesComplete: boolean;
   medications: Medication[];
   appointments: Appointment[];
   watchItems: WatchItem[];
@@ -483,6 +520,9 @@ export async function GET(request: Request) {
   const caregiverNameById = new Map<string, string>(
     (caregiversRes.data ?? []).map((c) => [c.id as string, c.name as string])
   );
+  if (medsRes.error) log.error("cron.medications_query_failed", { err: medsRes.error });
+  if (apptsRes.error) log.error("cron.appointments_query_failed", { err: apptsRes.error });
+  const sourceReadsOk = !medsRes.error && !apptsRes.error;
   const medsByParent = groupByParentId((medsRes.data ?? []) as Medication[]);
   const watchByParent = groupByParentId((watchRes.data ?? []) as WatchItem[]);
   const apptsByParent = groupByParentId((apptsRes.data ?? []) as Appointment[]);
@@ -504,6 +544,10 @@ export async function GET(request: Request) {
     parentList.map((parent) =>
       processParent(db, parent, now, {
         caregiverName: caregiverNameById.get(parent.caregiver_id) ?? "your family",
+        // A failed read defaults to [], which is indistinguishable from "no medications" —
+        // and materialisation reconciles, so that empty plan would DELETE today's queue and
+        // leave slots that never expire and never alert. Say so instead of guessing.
+        sourcesComplete: sourceReadsOk,
         medications: medsByParent.get(parent.id) ?? [],
         appointments: apptsByParent.get(parent.id) ?? [],
         watchItems: watchByParent.get(parent.id) ?? [],

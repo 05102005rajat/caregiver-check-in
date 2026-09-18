@@ -110,6 +110,31 @@ async function main() {
     const m2 = await msgsFor(fp2);
     check("manual test call is refused the same way", !out2.dialed && out2.reason === "outside_calling_hours" && row2?.status === "failed");
     check("manual test call does NOT text the family (control)", m2.length === 0, `${m2.length} messages — a test call fabricated a missed check-in`);
+
+    // ---- CONTROL: the same code must NOT refuse inside calling hours ----
+    // Without this, every assertion above is satisfied by a dialAndRecord that refuses
+    // unconditionally. dial_attempted_at is stamped immediately AFTER the window check and
+    // immediately BEFORE triggerVapiCall, so it is exactly the evidence that the gate let
+    // this one through — and it holds whether or not Vapi then accepts a non-routable
+    // number, so no handset is involved either way.
+    if (!inside) {
+      console.log("~ skipped in-hours control: no zone currently inside calling hours");
+    } else {
+      await admin.from("parents").update({ timezone: inside }).eq("id", pid);
+      const { data: inHoursRow } = await admin.from("parents").select("*").eq("id", pid).single();
+      const c3 = await makeCall(3);
+      const out3 = await dialAndRecord(admin as never, c3.id, inHoursRow as Parent, "Probe Caregiver", [], [], [], "scheduled");
+      const { data: row3 } = await admin.from("calls").select("status,dial_attempted_at").eq("id", c3.id).single();
+      check(
+        "inside calling hours the dial is NOT refused (control)",
+        row3?.dial_attempted_at !== null && !(out3.dialed === false && out3.reason === "outside_calling_hours"),
+        `dial_attempted_at=${row3?.dial_attempted_at} outcome=${JSON.stringify(out3)}`
+      );
+      const m3 = await msgsFor(tooLateFingerprint(c3.scheduled_for));
+      check("a dial that was attempted sends no too-late alert (control)", m3.length === 0, `${m3.length} messages`);
+      await admin.from("parents").update({ timezone: outside }).eq("id", pid);
+    }
+
   } finally {
     if (pid) {
       for (const t of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) await admin.from(t).delete().eq("parent_id", pid);

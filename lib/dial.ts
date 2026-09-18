@@ -25,10 +25,14 @@ export type DialOutcome =
  * "their check-in was missed" would be a fabricated alarm about a call that was never on
  * the schedule.
  *
+ * "retry" is a re-dial of a call that already went out once. The caller owns the wording
+ * there, because "didn't go out" would be false — it went out and nobody answered, and
+ * saying the wrong one points the family at the wrong thing.
+ *
  * Defaulted to "scheduled" deliberately: a future caller that forgets to say gets the
  * noisy-but-safe behaviour, not the silent one.
  */
-export type DialPurpose = "scheduled" | "manual";
+export type DialPurpose = "scheduled" | "manual" | "retry";
 
 export async function dialAndRecord(
   db: ReturnType<typeof createAdminClient>,

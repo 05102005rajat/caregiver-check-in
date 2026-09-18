@@ -1,7 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { appointmentsToday, formatLocalTime, localDayBoundsUtc } from "@/lib/schedule";
-import { coverageStartsAt, planSlotsForDay } from "@/lib/slots";
+import { coverageStartsAt, medsByName, planSlotsForDay } from "@/lib/slots";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { tooLateFingerprint } from "@/lib/insights";
@@ -30,6 +30,15 @@ export interface QueueContext {
   medications: Medication[];
   appointments: Appointment[];
   watchItems: WatchItem[];
+  /**
+   * Whether `medications` and `appointments` were actually loaded, as opposed to defaulted
+   * to [] by a failed query. Materialisation reconciles — it deletes slots the plan no
+   * longer contains — so an empty list it cannot distinguish from "no medications" wipes
+   * the day's queue. Under the old derived scheduler a failed query cost one tick; here it
+   * would destroy slots that then never expire, never produce a calls row and never text
+   * anyone.
+   */
+  sourcesComplete: boolean;
 }
 
 /**
@@ -43,6 +52,14 @@ export async function materializeSlots(
   ctx: QueueContext,
   now: Date
 ) {
+  if (!ctx.sourcesComplete) {
+    // Reconciling against a plan built from data we failed to load would delete today's
+    // real slots. Leaving the queue exactly as it is costs nothing: it was materialised
+    // from a good read, and the next tick reconciles properly.
+    log.warn("cron.materialize_skipped_incomplete_sources", { parent_id: parent.id });
+    return;
+  }
+
   const { slots, uncallable } = planSlotsForDay(ctx.medications, ctx.appointments, parent.timezone, now, coverageStartsAt(parent));
 
   for (const skipped of uncallable) {
@@ -193,7 +210,7 @@ export async function dispatchDueSlots(
       .maybeSingle();
     if (!claimed) continue;
 
-    const medsForSlot = ctx.medications.filter((m) => slot.med_names.includes(m.name));
+    const medsForSlot = medsByName(ctx.medications, slot.med_names);
     const outcome = await scheduleAndDial(
       db,
       parent,

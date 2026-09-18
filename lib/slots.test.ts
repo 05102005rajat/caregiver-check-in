@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsForNearestSlot, planSlotsForDay } from "./slots";
+import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsByName, medsForNearestSlot, planSlotsForDay } from "./slots";
 import { isWithinCallingHours } from "./callwindow";
 import type { Appointment, Medication } from "@/types/db";
 
@@ -121,6 +121,25 @@ describe("planSlotsForDay", () => {
     expect(withoutMeds.slots[0].appointmentId).toBe("a1");
   });
 
+  it("plans at most ONE appointment reminder a day, the earliest", () => {
+    // Looping every appointment into its own slot rang an appointment-only parent three
+    // times in a day. Every dial already carries appointments_today, so the first call
+    // names all of them — which is what hasCoveredCallToday used to guarantee.
+    const { slots } = planSlotsForDay(
+      [],
+      [
+        appt({ id: "a-late", starts_at: new Date("2026-09-11T00:00:00Z").toISOString() }), // 17:00 PDT
+        appt({ id: "a-early", starts_at: new Date("2026-09-10T18:00:00Z").toISOString() }), // 11:00 PDT
+        appt({ id: "a-mid", starts_at: new Date("2026-09-10T21:00:00Z").toISOString() }), // 14:00 PDT
+      ],
+      TZ,
+      NOW,
+      COVERED_SINCE
+    );
+    expect(slots).toHaveLength(1);
+    expect(slots[0].appointmentId).toBe("a-early");
+  });
+
   it("collapses two appointments that would land on the same reminder time", () => {
     // The unique (parent_id, due_at) index would reject the second one anyway; planning it
     // twice would just make materialisation noisy.
@@ -204,5 +223,22 @@ describe("medsForNearestSlot", () => {
   it("returns nothing before the first dose of the day", () => {
     const at = new Date("2026-09-10T14:00:00Z"); // 07:00 PDT
     expect(medsForNearestSlot(meds, TZ, at)).toEqual([]);
+  });
+});
+
+describe("medsByName", () => {
+  it("returns one row per name even when a medication is taken twice a day", () => {
+    // Nothing rejects the same medication at two times — validation only rejects the same
+    // name at the same time. A plain filter matched both rows against the 08:00 slot's
+    // ["Insulin"] snapshot, and Rosie was told to ask about "Insulin and Insulin".
+    const meds = [
+      med({ id: "m1", name: "Insulin", time_of_day: "08:00:00" }),
+      med({ id: "m2", name: "Insulin", time_of_day: "18:00:00" }),
+    ];
+    expect(medsByName(meds, ["Insulin"])).toHaveLength(1);
+  });
+
+  it("drops a name whose medication no longer exists", () => {
+    expect(medsByName([med({ name: "Kept" })], ["Kept", "Deleted"]).map((m) => m.name)).toEqual(["Kept"]);
   });
 });

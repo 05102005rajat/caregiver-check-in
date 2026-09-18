@@ -126,17 +126,24 @@ export function planSlotsForDay(
   // passed to every dial), so a second call would be the double-call that
   // hasCoveredCallToday used to prevent with an extra query per parent per tick.
   if (slots.length === 0) {
-    for (const appointment of appointmentsToday(appointments, timezone, now)) {
+    // At most ONE reminder call, the earliest. Looping every appointment into its own slot
+    // meant a parent with no medications and appointments at 10:00, 14:00 and 16:00 was rung
+    // three times in a day — the double-calling hasCoveredCallToday used to prevent. Every
+    // dial already carries appointments_today, so the first call names all of them.
+    const candidates = appointmentsToday(appointments, timezone, now)
       // Window-aware: returns null when no reminder could be placed at a reasonable hour.
-      const dueAt = reminderSlotFor(appointment, timezone);
-      if (!dueAt) continue;
-      if (dueAt < coverageStartsAt) continue;
+      .map((appointment) => ({ appointment, dueAt: reminderSlotFor(appointment, timezone) }))
+      .filter((c): c is { appointment: Appointment; dueAt: Date } => c.dueAt !== null)
+      .filter((c) => c.dueAt >= coverageStartsAt)
+      .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+    const earliest = candidates[0];
+    if (earliest) {
       slots.push({
-        dueAt,
-        expiresAt: expiryFor(dueAt, timezone),
+        dueAt: earliest.dueAt,
+        expiresAt: expiryFor(earliest.dueAt, timezone),
         kind: "appointment",
         medNames: [],
-        appointmentId: appointment.id,
+        appointmentId: earliest.appointment.id,
       });
     }
   }
@@ -193,4 +200,19 @@ export function medsForNearestSlot(medications: Medication[], timezone: string, 
   if (due.length === 0) return [];
   const latest = due.reduce((acc, m) => (m.time_of_day > acc ? m.time_of_day : acc), due[0].time_of_day);
   return due.filter((m) => m.time_of_day === latest);
+}
+
+/**
+ * Resolves a slot's snapshot of medication names back to rows — one row per name.
+ *
+ * `medications.filter(m => names.includes(m.name))` looks equivalent and is not: a parent
+ * taking Insulin at 08:00 and 18:00 has two rows with that name, so the 08:00 slot's
+ * ["Insulin"] snapshot matched both and Rosie was told to ask about "Insulin and Insulin".
+ * Nothing rejects the same medication at two times — validation only rejects the same
+ * name at the same time.
+ */
+export function medsByName(medications: Medication[], names: string[]): Medication[] {
+  return names
+    .map((name) => medications.find((m) => m.name === name))
+    .filter((m): m is Medication => Boolean(m));
 }
