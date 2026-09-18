@@ -3,16 +3,16 @@ import { MarketingFooter, MarketingHeader } from "@/components/MarketingShell";
 
 const STEPS = [
   {
-    title: "Tell us the details",
-    body: "Your parent's name and number, their medications and when they're due, any upcoming appointments, and which family members should be notified.",
+    title: "Tell us about your loved one",
+    body: "Their name and number, what medications are due and when, and who in the family should hear about it.",
   },
   {
-    title: "We call, every day",
-    body: "At the times you set, our AI assistant calls your parent, checks in on how they're feeling, confirms medications, and reminds them of appointments.",
+    title: "We call them every day",
+    body: "A short, friendly conversation at the times you choose — on their ordinary phone, no app and nothing to set up at their end.",
   },
   {
-    title: "You stay in the loop",
-    body: "Review the full transcript and summary on your dashboard any time. If something needs attention, family contacts are notified. A healthy check-in sends nothing at all.",
+    title: "You get the important updates",
+    body: "A summary on your dashboard after every call, and a text only when something needs you. A good day sends nothing at all.",
   },
 ];
 
@@ -22,31 +22,69 @@ export default function Home() {
       <MarketingHeader />
 
       <main className="flex-1">
-        <section className="max-w-2xl mx-auto px-4 pt-14 pb-10 text-center space-y-6">
+        <section className="max-w-2xl mx-auto px-4 pt-14 pb-8 text-center space-y-6">
           <div className="mx-auto w-12 h-12 rounded-full bg-slate-900 text-white flex items-center justify-center text-xl">
             📞
           </div>
           <div className="space-y-3">
             <h1 className="text-3xl sm:text-4xl font-semibold text-slate-900 tracking-tight">
-              Daily check-in calls for the people you love
+              Know how Mom or Dad is doing — without calling every day
             </h1>
             <p className="text-slate-500 text-lg max-w-lg mx-auto">
-              An AI assistant calls your parent every day, confirms their medications and
-              appointments, and only texts you when something actually needs your
-              attention.
+              A check-in call to your loved one, a short conversation, and a simple summary
+              for you when something needs your attention.
             </p>
           </div>
-          <div>
+          <div className="space-y-2">
             <Link
               href="/setup"
-              className="inline-block bg-slate-900 text-white rounded-lg px-5 py-2.5 font-medium hover:bg-slate-800 transition"
+              className="inline-block bg-slate-900 text-white rounded-lg px-6 py-3 font-medium hover:bg-slate-800 transition"
             >
-              Set up check-ins
+              Start a free check-in
             </Link>
+            <p className="text-sm text-slate-500">
+              No app required for your parent. Works with a regular phone.
+            </p>
           </div>
-          <p className="text-sm text-slate-500 max-w-md mx-auto">
-            Alerts reach family by text message and email — only when something needs
-            attention.
+        </section>
+
+        {/* The point of this section is that the product is legible in five seconds. It
+            mirrors the real dashboard — same wording, same "What changed" panel — rather
+            than a tidier invention, so what someone sees here is what they actually get.
+            Labelled as an example throughout: it describes nobody. */}
+        <section className="max-w-2xl mx-auto px-4 py-6">
+          <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-2 text-center">
+            Example — what you see after a call
+          </p>
+          <div className="bg-white border border-slate-200 rounded-xl p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-lg font-semibold text-slate-900">Mom is doing okay</p>
+                <p className="text-sm text-slate-500 mt-0.5">Last check-in Tue 10:02 AM</p>
+              </div>
+              <span className="text-2xl leading-none" aria-hidden>
+                ✅
+              </span>
+            </div>
+
+            <p className="text-sm text-slate-600 mt-3">
+              Slept well and was up early. Confirmed she took her morning Lisinopril.
+              Mentioned she&apos;s having lunch with Susan and planning to pick up groceries
+              after.
+            </p>
+
+            <div className="mt-4 pt-3 border-t border-slate-200/70">
+              <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-2">
+                What changed
+              </p>
+              <p className="text-sm text-slate-500">
+                Nothing new since the last few check-ins — no action needed.
+              </p>
+            </div>
+          </div>
+          <p className="text-center text-slate-600 mt-4">
+            You don&apos;t need to wonder — and on a day like this, we don&apos;t text you at
+            all.
           </p>
         </section>
 
@@ -65,16 +103,23 @@ export default function Home() {
               </div>
             ))}
           </div>
+          {/* Said here rather than discovered at the end of setup. The first call asks
+              permission and waits until you say they're expecting it — that is a reason to
+              trust this, not fine print. */}
+          <p className="text-sm text-slate-500 mt-4">
+            We never cold-call. You tell us when your parent is expecting the first call,
+            and on that call we ask their permission before anything else — if they&apos;d
+            rather we didn&apos;t, we stop and don&apos;t ring again.
+          </p>
         </section>
 
         <section className="max-w-2xl mx-auto px-4 py-10">
           <div className="bg-white border border-slate-200 rounded-xl p-6">
             <h2 className="text-xl font-semibold text-slate-900 mb-2">Who this is for</h2>
             <p className="text-slate-600">
-              Caregiver Check-In is built for adult children and family caregivers who
-              live far from an aging parent, or who simply can&apos;t call every single
-              day, but still want a reliable daily touchpoint and peace of mind that
-              medications are being taken and nothing has gone wrong.
+              Adult children and family caregivers who live far from an aging parent, or
+              who can&apos;t call every single day, but still want a reliable daily
+              touchpoint and to know that medications are being taken.
             </p>
           </div>
         </section>
