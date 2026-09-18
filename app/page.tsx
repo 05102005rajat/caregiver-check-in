@@ -32,7 +32,7 @@ export default function Home() {
             </h1>
             <p className="text-slate-500 text-lg max-w-lg mx-auto">
               An AI assistant calls your parent every day, confirms their medications and
-              appointments, and only tells you when something actually needs your
+              appointments, and only texts you when something actually needs your
               attention.
             </p>
           </div>
@@ -45,9 +45,8 @@ export default function Home() {
             </Link>
           </div>
           <p className="text-sm text-slate-500 max-w-md mx-auto">
-            Alerts currently reach family by email, so add an email address for anyone who
-            should be notified. Text messaging is being added once carrier verification
-            completes.
+            Alerts reach family by text message and email — only when something needs
+            attention.
           </p>
         </section>
 

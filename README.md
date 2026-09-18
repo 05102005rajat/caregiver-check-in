@@ -258,8 +258,6 @@ they're exposed to the browser by design.
 
 Current and accurate:
 
-- **SMS delivery is blocked** pending Twilio toll-free verification. Alerts are attempted,
-  recorded, and shown as failed on the dashboard rather than silently dropped.
 - **Email to Gmail recipients is unreliable.** The SendGrid sender is a personal Gmail
   address via Single Sender Verification, and Gmail's DMARC policy means mail claiming to
   be `@gmail.com` but not sent through Google is silently dropped. Verified working to
