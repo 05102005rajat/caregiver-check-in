@@ -23,12 +23,13 @@ export default function TermsOfService() {
         — do not rely on this service for emergency situations.
       </p>
 
-      <h2>Consent and recording</h2>
+      <h2>Consent</h2>
       <p>
-        You are responsible for ensuring the person being called consents to being
-        recorded, consistent with the laws of your state. The assistant asks for verbal
-        consent on the first call and will not proceed with check-in questions if
-        consent is declined.
+        You are responsible for ensuring the person being called consents to a written
+        record of the call being kept, consistent with the laws of your state. The
+        assistant asks for verbal consent on the first call, will not proceed with
+        check-in questions if consent is declined, and will not call again. Consent can
+        be withdrawn on any later call.
       </p>
 
       <h2>Accuracy</h2>

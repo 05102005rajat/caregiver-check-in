@@ -14,11 +14,17 @@
  *   boilerplate, delivered to precisely the demographic trained to hang up on unfamiliar
  *   voices asking for something, with an evasive-sounding "may be" on top.
  *
- * - "I record our chats" is active and plain. This is *more* explicit than the language it
- *   replaced, not less: it cannot be misheard as the recitation people have learned to
- *   ignore. California (where this runs) is a two-party consent state — Penal Code §632 —
- *   so the consent has to be genuinely understood to exist at all, and a consent flow
- *   designed to slip past someone is not a grey area, it's the violation.
+ * - "I keep a written record of our chats" is active, plain, and — since audio recording
+ *   was switched off in Vapi (artifactPlan.recordingEnabled: false) — accurate. Audio is
+ *   no longer retained; the transcript is, and a transcript is still a record of the
+ *   conversation, so it is still disclosed. Saying "I record" would now overstate what
+ *   happens, and "I take notes" would understate a verbatim transcript.
+ *
+ *   It is also *more* explicit than the language it replaced, not less: it cannot be
+ *   misheard as the recitation people have learned to ignore. California (where this runs)
+ *   is a two-party consent state — Penal Code §632 — so the consent has to be genuinely
+ *   understood to exist at all, and a consent flow designed to slip past someone is not a
+ *   grey area, it's the violation.
  *
  * - "Just say no if you'd rather not" stays. It reads like it would cost conversions and
  *   doesn't: someone who felt cornered into yes is guarded and agreeable on every call
@@ -29,7 +35,7 @@
 export function consentGreeting(parentName: string, assistantName: string, caregiverName: string): string {
   return (
     `Hi ${parentName}, I'm ${assistantName} — ${caregiverName} asked me to check in with you each day. ` +
-    `I record our chats so I can write them a short summary afterwards. ` +
+    `I keep a written record of our chats so I can send them a short summary afterwards. ` +
     `Is that alright with you? Just say no if you'd rather not.`
   );
 }

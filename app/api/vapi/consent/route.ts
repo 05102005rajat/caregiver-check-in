@@ -127,7 +127,7 @@ export async function POST(request: Request) {
       activeCall.id,
       isWithdrawal
         ? `${parentName} asked us to stop the daily check-in calls, so we've stopped. They'd agreed before, so this is a change of mind rather than a first refusal — it may be worth a conversation. If they'd like to start again, use the button on your dashboard.`
-        : `${parentName} declined the daily check-in calls when asked for permission to record, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the button on your dashboard.`,
+        : `${parentName} declined the daily check-in calls when asked, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the button on your dashboard.`,
       // Withdrawal and first refusal are genuinely different events for a family, so they
       // don't dedupe against each other.
       { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId]) }

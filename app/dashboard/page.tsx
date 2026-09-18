@@ -132,7 +132,7 @@ export default async function DashboardPage() {
           <p className="mt-1">
             On{" "}
             {new Date(parent.consent_refused_at).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}{" "}
-            {parent.name} said they&apos;d rather not be recorded, so we stopped calling and haven&apos;t
+            {parent.name} said they&apos;d rather we didn&apos;t, so we stopped calling and haven&apos;t
             rung since. If they change their mind, talk to them first and then use the button below.
           </p>
           <TestCallButton parentName={parent.name} />

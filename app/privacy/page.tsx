@@ -18,17 +18,19 @@ export default function PrivacyPolicy() {
           and any family contacts you choose to add for notifications.
         </li>
         <li>
-          Call recordings and transcripts from the automated check-in calls, and a
-          summary generated from each call.
+          Written transcripts of the automated check-in calls, and a summary generated
+          from each call. We do not retain audio recordings of the calls.
         </li>
       </ul>
 
-      <h2>Consent to recording</h2>
+      <h2>Consent</h2>
       <p>
         Before any information is gathered on a parent&apos;s first check-in call, our
-        AI assistant explicitly asks for their verbal consent to the call being
-        recorded. If consent is declined, the call ends immediately and no further
-        check-in questions are asked.
+        AI assistant explicitly identifies itself, says who asked for the calls, and
+        asks for their verbal consent to a written record being kept. If consent is
+        declined, the call ends immediately, no further check-in questions are asked,
+        nothing from that call is stored, and we do not call again. Consent can be
+        withdrawn on any later call by telling the assistant to stop.
       </p>
 
       <h2>How we use it</h2>

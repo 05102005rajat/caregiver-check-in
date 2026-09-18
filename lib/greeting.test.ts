@@ -20,12 +20,15 @@ describe("consentGreeting", () => {
     expect(line.indexOf("Anne")).toBeLessThan(line.indexOf("?"));
   });
 
-  it("discloses recording in plain, active words", () => {
+  it("discloses retention in plain, active words", () => {
     // "This call may be recorded" is the boilerplate people have learned to tune out, and
     // "may be" reads as evasive. Consent has to actually register to exist (Penal Code
     // §632), so the disclosure must be a plain statement, not a recital.
+    //
+    // It also has to match reality: audio recording is off in Vapi, so claiming to record
+    // would overstate it, while "I take notes" would understate a verbatim transcript.
     const line = consentGreeting("Margaret", "Rosie", "Anne");
-    expect(line).toContain("I record our chats");
+    expect(line).toContain("written record of our chats");
     expect(line).not.toMatch(/may be recorded/i);
   });
 
