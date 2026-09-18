@@ -1,3 +1,4 @@
+import { warrantsAttention } from "@/lib/alerting";
 import type { Call } from "@/types/db";
 
 /**
@@ -76,6 +77,13 @@ export function alertFingerprint(kind: string, facts: string[]): string {
 
 /** Whether the caregiver needs to do anything about this call at all. */
 export function needsAttention(call: Call): boolean {
-  const missed = medsOf(call, "missed");
-  return (call.concerns ?? []).length > 0 || missed.length > 0 || call.status === "failed" || call.status === "no_answer";
+  // Delegates to the shared rule so the dashboard can't disagree with what was texted.
+  // It previously ignored mood entirely, so a call that alerted the family because the
+  // model returned an unreadable mood rendered here as "doing okay".
+  return warrantsAttention({
+    concerns: call.concerns ?? [],
+    medsMissed: medsOf(call, "missed"),
+    mood: call.mood,
+    status: call.status,
+  });
 }

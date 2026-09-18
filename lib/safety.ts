@@ -31,6 +31,25 @@ export function scanForConcernKeywords(transcript: string, keywords: string[]): 
  * the backstop and texting the family daily — the exact alert fatigue watch items exist
  * to remove, and it would have bypassed the LLM suppression entirely.
  */
+/**
+ * Whether the transcript uses speaker labels we recognise.
+ *
+ * Everything below depends on this and nothing checked it. The two failure modes point in
+ * opposite directions and would arrive together: parentTurnsOnly falls back to scanning
+ * the whole transcript (daily false alerts), while hasParentResponse returns false for
+ * every call ("Parent didn't respond" on every check-in). Neither raises an error, so the
+ * first signal would be a caregiver asking why the texts stopped making sense.
+ *
+ * Callers should log loudly when this is false for a non-empty transcript — it means the
+ * provider changed something and both backstops are now degraded.
+ */
+export function hasRecognisableSpeakerLabels(transcript: string): boolean {
+  return SPEAKER_LINE.test(transcript);
+}
+
+/** Matches a parent/customer turn. Real Vapi transcripts use "User:" (and "AI:" for Rosie). */
+const SPEAKER_LINE = /^\s*(user|customer|human)\s*:/im;
+
 function parentTurnsOnly(transcript: string): string {
   const lines = transcript.split("\n");
   const parentLines = lines.filter((line) => /^\s*(user|customer|human)\s*:/i.test(line));
@@ -53,5 +72,5 @@ function parentTurnsOnly(transcript: string): string {
  * this product exists to prevent. Determined structurally instead.
  */
 export function hasParentResponse(transcript: string): boolean {
-  return /^\s*(user|customer|human)\s*:/im.test(transcript);
+  return SPEAKER_LINE.test(transcript);
 }

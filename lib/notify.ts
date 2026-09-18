@@ -3,6 +3,7 @@ import { sendSms, TwilioSendError, TWILIO_UNSUBSCRIBED } from "@/lib/twilio";
 import { sendEmail } from "@/lib/email";
 import { recordCarrierOptOut } from "@/lib/optout";
 import { log } from "@/lib/log";
+import { DEDUPE_WINDOW_HOURS, type AlertSeverity } from "@/lib/alerting";
 import type { FamilyContact } from "@/types/db";
 
 type NotifyFlag = "notify_on_miss" | "notify_on_concern";
@@ -112,9 +113,7 @@ async function sendAlert(
   }
 }
 
-// Long enough to cover a full day of retries and repeated slots without suppressing a
-// genuinely new day's alert about the same underlying issue.
-const DEFAULT_DEDUPE_WINDOW_HOURS = 20;
+// Windows live in lib/alerting.ts alongside the attention rule they belong with.
 
 /**
  * Notifies every family contact for this parent with `flag` enabled, plus always notifies
@@ -131,7 +130,7 @@ export async function notifyFamilyContacts(
   flag: NotifyFlag,
   callId: string,
   body: string,
-  options: { fingerprint?: string; dedupeWindowHours?: number } = {}
+  options: { fingerprint?: string; dedupeWindowHours?: number; severity?: AlertSeverity } = {}
 ) {
   // Don't tell the same family the same thing twice in a day. A retried call, two
   // medication slots close together, or a concern resurfacing on a later call all
@@ -139,20 +138,28 @@ export async function notifyFamilyContacts(
   // one that actually matters gets ignored too. Fingerprint is built from the
   // structured facts by the caller, not the prose, so a reworded Claude summary of the
   // same underlying situation still counts as a duplicate.
-  const { fingerprint, dedupeWindowHours = DEFAULT_DEDUPE_WINDOW_HOURS } = options;
+  const { fingerprint, severity = "routine" } = options;
+  const dedupeWindowHours = options.dedupeWindowHours ?? DEDUPE_WINDOW_HOURS[severity];
   if (fingerprint) {
     const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
+    // `status: 'sent'` only means Twilio accepted the request. delivery_status is the
+    // carrier's verdict, and it exists precisely because "accepted" was being shown as
+    // "family alerted" for messages that were then refused. Suppressing today's alert as a
+    // duplicate of a message that came back `undelivered` means nobody is ever told —
+    // the system has the data to know better and was not consulting it. A null
+    // delivery_status (no callback yet) still counts: we have no evidence it failed.
     const { data: recent } = await db
       .from("messages")
       .select("id")
       .eq("parent_id", parentId)
       .eq("fingerprint", fingerprint)
       .eq("status", "sent")
+      .not("delivery_status", "in", "(undelivered,failed)")
       .gte("sent_at", since)
       .limit(1)
       .maybeSingle();
     if (recent) {
-      log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint });
+      log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, window_hours: dedupeWindowHours });
       return;
     }
   }

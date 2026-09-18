@@ -110,6 +110,7 @@ async function processRetries(
       const body = `Heads up: ${parent.name} didn't answer their ${time} check-in after ${rules.max_retries} tries. ${subject}`.trim();
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
         fingerprint: alertFingerprint("miss", [call.scheduled_for]),
+        severity: "safety",
       });
       continue;
     }

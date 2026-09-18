@@ -4,8 +4,9 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
+import { warrantsAttention } from "@/lib/alerting";
 import { log } from "@/lib/log";
-import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, scanForConcernKeywords } from "@/lib/safety";
+import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, hasRecognisableSpeakerLabels, scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
 import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
@@ -211,7 +212,7 @@ export async function POST(request: Request) {
         "notify_on_concern",
         call.id,
         `Please check on ${parentName} directly. Something they said during today's call may need attention. They didn't agree to us keeping a record of the call, so we haven't kept any details.`,
-        { fingerprint: alertFingerprint("no-consent-urgent", [call.id]) }
+        { fingerprint: alertFingerprint("no-consent-urgent", [call.id]), severity: "safety" }
       );
       log.error("webhook.urgent_without_consent", { call_id: call.id, parent_id: call.parent_id, matches: urgent.length });
     }
@@ -245,6 +246,19 @@ export async function POST(request: Request) {
   const isKnownMed = (name: string) => fuzzyIncludes(knownMedNames, name);
   const isKnownAppt = (title: string) => fuzzyIncludes(knownApptTitles, title);
 
+  // Both deterministic backstops below key off speaker labels. If the provider changes
+  // that format they degrade silently and in opposite directions at once — the keyword
+  // scan starts reading Rosie's own words (daily false alerts) while hasParentResponse
+  // reports every call as unanswered. Neither throws, so without this line the first
+  // symptom would be a caregiver asking why the alerts stopped making sense.
+  if (transcript.trim() && !hasRecognisableSpeakerLabels(transcript)) {
+    log.error("webhook.unrecognised_transcript_format", {
+      call_id: call.id,
+      parent_id: call.parent_id,
+      sample: transcript.slice(0, 120),
+    });
+  }
+
   // Deterministic backstop, run independent of whether Claude succeeds: catches an
   // emergency mention even if the LLM call fails or under-classifies the transcript.
   const keywordMatches = scanForConcernKeywords(transcript, concernKeywords);
@@ -273,6 +287,7 @@ export async function POST(request: Request) {
       const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
       await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
         fingerprint: alertFingerprint("keyword", keywordMatches),
+        severity: "safety" as const,
       });
     }
     return NextResponse.json({ ok: true });
@@ -325,8 +340,9 @@ export async function POST(request: Request) {
   // "unknown" means Claude gave no real signal on mood (see lib/claude.ts normalize) —
   // treated as worth a look, same as an explicit "concerning," rather than silently
   // passing as fine.
-  const hasConcern =
-    concerns.length > 0 || extracted.mood === "concerning" || extracted.mood === "unknown" || medsMissed.length > 0;
+  // Shared with the dashboard and the eval scorer — see lib/alerting.ts. Three hand-kept
+  // copies of this rule had already drifted apart.
+  const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood });
 
   if (hasConcern) {
     // Bulleted and scannable rather than one long paragraph: this arrives as a text on a
@@ -349,6 +365,8 @@ export async function POST(request: Request) {
     // differently every call, so body text would never match and nothing would dedupe.
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
       fingerprint: alertFingerprint("concern", [...concerns, ...medsMissed.map((m) => `missed:${m}`)]),
+      // A second fall the same day is not a duplicate to collapse; a repeat pizza request is.
+      severity: "safety" as const,
     });
   } else if (extracted.requests.length > 0) {
     // Nothing is wrong, but they asked for something and Rosie said she'd pass it on.
@@ -357,6 +375,7 @@ export async function POST(request: Request) {
     const lines = [`${parentName} is doing fine, and asked for:`, "", ...extracted.requests.map((r) => `• ${r}`)];
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
       fingerprint: alertFingerprint("request", extracted.requests),
+      severity: "routine" as const,
     });
   }
   // Healthy call, nothing asked for: log silently, no text. No news is good news.

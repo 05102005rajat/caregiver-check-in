@@ -1,3 +1,4 @@
+import { warrantsAttention } from "@/lib/alerting";
 import type { CallSummary } from "@/lib/claude";
 import type { EvalCase } from "./cases";
 
@@ -55,7 +56,9 @@ function rate(numerator: number, denominator: number): number {
  * that is correct end to end.
  */
 function wouldAlert(output: CallSummary): boolean {
-  return output.concerns.length > 0 || output.meds_missed.length > 0 || output.mood === "concerning" || output.mood === "unknown";
+  // Delegates to production's own rule rather than restating it — a hand-kept copy here
+  // would let the suite pass while the thing it claims to measure had changed.
+  return warrantsAttention({ concerns: output.concerns, medsMissed: output.meds_missed, mood: output.mood });
 }
 
 /** Scores one model output against what the case says must be true. */
