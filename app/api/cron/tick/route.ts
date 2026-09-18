@@ -25,6 +25,11 @@ export const dynamic = "force-dynamic";
 // placing a very-late, confusing "check-in" call about a medication from hours ago.
 const MAX_CATCHUP_MINUTES = 120;
 
+// How many times a row stranded at 'scheduled' may be re-dialled before we give up. The
+// failure that strands it tends to repeat, and without a cap this is a loop that phones a
+// real person every tick.
+const MAX_STALE_REDIALS = 2;
+
 /** Promise.all keyed by name, so inserting a query can't silently shift the results. */
 async function allNamed<T extends Record<string, PromiseLike<unknown>>>(
   queries: T
@@ -201,6 +206,29 @@ async function reapStaleScheduled(
       );
       continue;
     }
+    // Bounded. The condition that strands a row — the post-dial write failing — is exactly
+    // the condition that recurs, so with a 5-minute tick and a 2-hour catch-up window this
+    // loop could place ~22 real phone calls to the same person. The comment above used to
+    // argue MAX_CATCHUP_MINUTES bounded it; it bounds the duration, not the count.
+    //
+    // Claimed optimistically on retry_count so two overlapping ticks can't both re-dial.
+    const { data: claimed } = await db
+      .from("calls")
+      .update({ retry_count: row.retry_count + 1 })
+      .eq("id", row.id)
+      .eq("status", "scheduled")
+      .eq("retry_count", row.retry_count)
+      .select("id")
+      .maybeSingle();
+    if (!claimed) continue;
+
+    if (row.retry_count >= MAX_STALE_REDIALS) {
+      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      if (error) log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: error });
+      log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, attempts: row.retry_count });
+      continue;
+    }
+
     const medsForSlot = row.scheduled_meds
       ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);

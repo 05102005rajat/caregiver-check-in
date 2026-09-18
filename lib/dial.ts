@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { log } from "@/lib/log";
+import { describeLocalTime, isWithinCallingHours } from "@/lib/callwindow";
 import { triggerVapiCall } from "@/lib/vapi";
 import { consentGreeting } from "@/lib/greeting";
 import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
@@ -22,6 +23,23 @@ export async function dialAndRecord(
   const firstMessage = parent.consent_given_at
     ? undefined
     : consentGreeting(parent.name, parent.preferred_voice, caregiverName);
+
+  // Hard backstop on calling hours. Placed here, at the single point every dial path goes
+  // through (slot loop, retries, stale reaper, manual test call), rather than in each of
+  // them — three callers previously answered "is it too late to ring" three different ways
+  // and the retry path had no answer at all. A caller that believes it should dial at
+  // 11:40pm is wrong, and this is where that is decided.
+  if (!isWithinCallingHours(new Date(), parent.timezone)) {
+    log.warn("dial.outside_calling_hours", {
+      call_id: callId,
+      parent_id: parent.id,
+      local_time: describeLocalTime(new Date(), parent.timezone),
+    });
+    // Terminal, not retried: by the time the window reopens this slot is many hours stale,
+    // and a "did you take your 9am pill?" call at 8am tomorrow is its own kind of confusing.
+    await db.from("calls").update({ status: "failed" }).eq("id", callId).eq("status", "scheduled");
+    return;
+  }
 
   // Recorded before the dial, not after. Everything else we know about a call — status,
   // called_at, vapi_call_id — is written by the single update below, which is exactly the

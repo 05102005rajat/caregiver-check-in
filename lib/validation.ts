@@ -1,7 +1,22 @@
 import { z } from "zod";
+import { CALLING_HOURS_END, CALLING_HOURS_START } from "@/lib/callwindow";
 
 const phoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, "Must be E.164 format, e.g. +15551234567");
-const timeOfDaySchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Must be HH:mm, 24-hour");
+// Medication times are also *call* times, so they have to sit inside the hours we are
+// willing to ring an elderly person (lib/callwindow.ts). Without this the form silently
+// accepted 22:48 and the dialer — which now refuses outside the window — would never call
+// about it: the caregiver configures a reminder that can never fire and is told nothing.
+// Rejecting it here, where the message reaches them, is the only honest option.
+const timeOfDaySchema = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Must be HH:mm, 24-hour")
+  .refine(
+    (value) => {
+      const hour = Number(value.slice(0, 2));
+      return hour >= CALLING_HOURS_START && hour < CALLING_HOURS_END;
+    },
+    `Check-in calls only go out between ${CALLING_HOURS_START}:00 and ${CALLING_HOURS_END}:00 — pick a time in that range`
+  );
 const dateSchema = z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD")]);
 
 // These all end up as input to an LLM prompt (system prompt variables, transcript
@@ -88,8 +103,12 @@ export const setupFormSchema = z.object({
     // a 400 with no field on screen to explain it, losing the whole form.
     .default([]),
   rules: z.object({
-    retry_after_minutes: z.number().int().min(1).max(1440),
-    max_retries: z.number().int().min(0).max(10),
+    // Bounded so the form cannot configure harassment. min(1)/max(10) permitted eleven
+    // calls inside ten minutes to a confused elderly person, which nothing downstream
+    // re-checked. 15 minutes is the shortest gap that is plausibly "they were in the
+    // bathroom" rather than badgering.
+    retry_after_minutes: z.number().int().min(15).max(240),
+    max_retries: z.number().int().min(0).max(3),
   }),
 });
 

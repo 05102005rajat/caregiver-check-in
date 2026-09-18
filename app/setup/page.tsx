@@ -65,7 +65,7 @@ const emptyWatchItem = (): WatchItemInput => ({ description: "", always_alert: f
 const STEPS = [
   { key: "you", title: "Who's setting this up?", subtitle: "Just your name and number." },
   { key: "parent", title: "Who are we calling?", subtitle: "Your parent's info, and what to call the assistant." },
-  { key: "medications", title: "What should we check on?", subtitle: "Medications and when they're due." },
+  { key: "medications", title: "What should we check on?", subtitle: "Medications and when they're due. Check-in calls go out between 8am and 9pm." },
   { key: "appointments", title: "Any appointments?", subtitle: "Optional — skip if there's nothing coming up." },
   {
     key: "watch",

@@ -60,6 +60,48 @@ describe("retryDecision", () => {
     expect(decision).toBe("exhausted");
   });
 
+  it("gives up on a slot that is hours stale instead of calling about a long-gone dose", () => {
+    // The 9am-slot-dialled-at-8pm case. This path had no lateness check at all: it asked
+    // only whether retry_after_minutes had elapsed, so a scheduler outage turned into a
+    // late-evening call about a morning medication.
+    const scheduledFor = new Date("2026-09-10T16:00:00Z");
+    const calledAt = new Date("2026-09-10T16:00:00Z");
+    const elevenHoursLater = new Date(scheduledFor.getTime() + 11 * 60 * 60 * 1000);
+    expect(
+      retryDecision(
+        call({ scheduled_for: scheduledFor.toISOString(), called_at: calledAt.toISOString(), retry_count: 0 }),
+        rules(),
+        elevenHoursLater
+      )
+    ).toBe("exhausted");
+  });
+
+  it("still retries a slot that is late but not absurdly so", () => {
+    const scheduledFor = new Date("2026-09-10T16:00:00Z");
+    const withinWindow = new Date(scheduledFor.getTime() + 60 * 60 * 1000); // 1h late
+    expect(
+      retryDecision(
+        call({ scheduled_for: scheduledFor.toISOString(), called_at: scheduledFor.toISOString(), retry_count: 0 }),
+        rules(),
+        withinWindow
+      )
+    ).toBe("retry");
+  });
+
+  it("measures lateness from the slot, not the last attempt, so retries can't walk away from it", () => {
+    // Otherwise each retry resets the clock and the chain drifts arbitrarily far from the
+    // time the call was actually about.
+    const scheduledFor = new Date("2026-09-10T16:00:00Z");
+    const lateAttempt = new Date(scheduledFor.getTime() + 5 * 60 * 60 * 1000);
+    expect(
+      retryDecision(
+        call({ scheduled_for: scheduledFor.toISOString(), called_at: lateAttempt.toISOString(), retry_count: 0 }),
+        rules(),
+        new Date(lateAttempt.getTime() + 31 * 60 * 1000)
+      )
+    ).toBe("exhausted");
+  });
+
   it("respects a custom max_retries", () => {
     const calledAt = new Date("2026-09-10T16:00:00Z");
     const now = new Date(calledAt.getTime() + 31 * 60 * 1000);
