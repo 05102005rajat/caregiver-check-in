@@ -48,62 +48,26 @@ export async function POST(request: Request) {
   const db = createAdminClient();
   const parentId = parent.id as string;
 
-  // Explicit and ordered rather than relying on cascade rules, so this keeps working if a
-  // future table is added without ON DELETE CASCADE — silently leaving transcripts behind
-  // after telling someone their data was deleted would be the worst possible outcome here.
-  // messages.parent_id was added later (0015) and backfilled only where call_id matched,
-  // and messages.call_id has no ON DELETE rule — so a row with a null parent_id would
-  // survive the sweep below and then break the calls delete with an FK violation. Clear
-  // them by call id first.
-  const { data: callIds } = await db.from("calls").select("id").eq("parent_id", parentId);
-  if (callIds?.length) {
-    const { error: orphanError } = await db.from("messages").delete().in(
-      "call_id",
-      callIds.map((c) => c.id as string)
+  // One transaction (migration 0028). This used to be eight sequential statements plus a
+  // hand-rolled orphan sweep: any of them could fail halfway and leave the household partly
+  // deleted after the UI had already said it was gone, and the residue check ran afterwards
+  // so it could only report a problem that was already too late to undo. The far less
+  // dangerous save path got a transaction in 0013; this one is the promise that matters.
+  //
+  // The function re-checks ownership itself rather than trusting parentId from here — it is
+  // SECURITY DEFINER, so a caller reaching it with another household's id would otherwise
+  // delete that household outright.
+  const { error } = await db.rpc("delete_parent_household", {
+    p_caregiver_id: user.id,
+    p_parent_id: parentId,
+  });
+
+  if (error) {
+    log.error("delete.failed", { parent_id: parentId, caregiver_id: user.id, err: error });
+    return NextResponse.json(
+      { error: "Deletion failed — nothing was removed. Please try again or contact support." },
+      { status: 500 }
     );
-    if (orphanError) {
-      log.error("delete.orphan_messages_failed", { parent_id: parentId, err: orphanError });
-      return NextResponse.json({ error: "Deletion failed partway through — nothing further was removed" }, { status: 500 });
-    }
-  }
-
-  const deletions = [
-    db.from("messages").delete().eq("parent_id", parentId),
-    db.from("calls").delete().eq("parent_id", parentId),
-    db.from("medications").delete().eq("parent_id", parentId),
-    db.from("appointments").delete().eq("parent_id", parentId),
-    db.from("family_contacts").delete().eq("parent_id", parentId),
-    db.from("watch_items").delete().eq("parent_id", parentId),
-    db.from("escalation_rules").delete().eq("parent_id", parentId),
-  ];
-  for (const deletion of deletions) {
-    const { error } = await deletion;
-    if (error) {
-      log.error("delete.child_failed", { parent_id: parentId, err: error });
-      return NextResponse.json({ error: "Deletion failed partway through — nothing further was removed" }, { status: 500 });
-    }
-  }
-
-  const { error: parentError } = await db.from("parents").delete().eq("id", parentId);
-  if (parentError) {
-    log.error("delete.parent_failed", { parent_id: parentId, err: parentError });
-    return NextResponse.json({ error: "Deletion failed" }, { status: 500 });
-  }
-
-  // Verify rather than assume: this endpoint's whole promise is that nothing is left.
-  // Counting only `calls` would have reported success while medications, contacts or —
-  // worst of all — the alert bodies in `messages` survived. Selected by parent_id rather
-  // than id because escalation_rules is keyed by parent_id and has no id column.
-  let residual = 0;
-  for (const table of ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
-    const { count, error: countError } = await db.from(table).select("parent_id", { count: "exact", head: true }).eq("parent_id", parentId);
-    if (countError || count) {
-      log.error("delete.residual_rows", { parent_id: parentId, table, remaining: count, err: countError });
-      residual += 1;
-    }
-  }
-  if (residual > 0) {
-    return NextResponse.json({ error: "Deletion incomplete — some data may remain. Please contact support." }, { status: 500 });
   }
 
   log.info("delete.completed", { parent_id: parentId, caregiver_id: user.id });

@@ -30,6 +30,12 @@ const MAX_CATCHUP_MINUTES = 120;
 // real person every tick.
 const MAX_STALE_REDIALS = 2;
 
+// How long a raw transcript is kept. The product runs on summary/mood/concerns; the
+// transcript is the most sensitive thing this system holds and the least needed after the
+// fact. 30 days so a caregiver reading a worrying alert a fortnight later can still see
+// what was actually said.
+const TRANSCRIPT_RETENTION_DAYS = 30;
+
 /** Promise.all keyed by name, so inserting a query can't silently shift the results. */
 async function allNamed<T extends Record<string, PromiseLike<unknown>>>(
   queries: T
@@ -612,6 +618,28 @@ export async function GET(request: Request) {
     )
   );
   const callsTriggered = counts.reduce((sum, n) => sum + n, 0);
+
+  // Drop transcripts past the retention window. Nothing else in the codebase ever deleted
+  // one: across 29 migrations there was no TTL and no age-based sweep, so every word an
+  // elderly person had said about their own health was kept indefinitely, while the privacy
+  // policy told them consent could be withdrawn — which only ever meant prospectively.
+  //
+  // summary/mood/concerns stay, which is all describeChanges and the dashboard need; only
+  // the raw conversation goes. Run here rather than as a separate job so it cannot be
+  // forgotten, and bounded so one slow sweep can't stall a tick that has calls to place.
+  const retentionCutoff = new Date(now.getTime() - TRANSCRIPT_RETENTION_DAYS * 86400000).toISOString();
+  const { data: expired, error: retentionError } = await db
+    .from("calls")
+    .update({ transcript: null })
+    .lt("called_at", retentionCutoff)
+    .not("transcript", "is", null)
+    .select("id")
+    .limit(500);
+  if (retentionError) {
+    log.error("cron.transcript_retention_failed", { err: retentionError });
+  } else if (expired && expired.length > 0) {
+    log.info("cron.transcripts_expired", { count: expired.length, older_than_days: TRANSCRIPT_RETENTION_DAYS });
+  }
 
   // /api/health reads this to tell whether the external scheduler is still running.
   const { error: heartbeatError } = await db

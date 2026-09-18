@@ -19,7 +19,9 @@ export default function PrivacyPolicy() {
         </li>
         <li>
           Written transcripts of the automated check-in calls, and a summary generated
-          from each call. We do not retain audio recordings of the calls.
+          from each call. We do not retain audio recordings of the calls, and transcripts
+          are automatically deleted after 30 days — the summary of what mattered is kept,
+          the conversation itself is not.
         </li>
       </ul>
 

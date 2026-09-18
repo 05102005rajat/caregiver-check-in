@@ -50,7 +50,7 @@ export default function DangerZone({ parentName }: { parentName: string }) {
         <p className="text-sm font-medium text-red-900">Delete {parentName}&apos;s data</p>
         <p className="text-sm text-red-800 mt-1">
           This permanently removes their profile, medications, appointments, contacts, and every call
-          recording summary and transcript. It cannot be undone, and check-in calls will stop.
+          check-in history, transcripts, alerts and contacts, along with your own caregiver details. It cannot be undone, and check-in calls will stop. If any of these numbers previously replied STOP to a text, we keep a record of that opt-out so nobody can text them again.
         </p>
         <p className="text-sm text-red-800 mt-2">
           Type <strong>{parentName}</strong> to confirm:
