@@ -48,24 +48,48 @@ export async function POST(request: Request) {
   const now = new Date().toISOString();
   const db = createAdminClient();
 
-  // One row per number, so "is this person currently opted in?" has a single answer.
-  // Re-submitting updates rather than stacking rows, and re-consenting clears a previous
-  // revocation.
-  const { error } = await db.from("sms_opt_ins").upsert(
-    {
-      phone,
-      name: name || null,
-      email: email || null,
-      consented_at: consented ? now : null,
-      // The wording is the server's, never the caller's — this endpoint is unauthenticated,
-      // so trusting request text would let anyone fabricate a consent record.
-      consent_text: consented ? CONSENT_TEXT : null,
-      consent_version: consented ? CONSENT_VERSION : null,
-      terms_accepted_at: terms_accepted ? now : null,
-      revoked_at: consented ? null : now,
-    },
-    { onConflict: "phone" }
-  );
+  // This endpoint must never be able to *stop* someone's alerts.
+  //
+  // It's unauthenticated and keyed on an attacker-supplied phone number, so any path here
+  // that sets `revoked_at` would let anyone who knows a caregiver's number silently
+  // suppress every alert for that household — the single worst failure this product has.
+  // Opting out is therefore carrier-driven only (Twilio 21610 after a STOP reply), in
+  // lib/optout.ts. Submitting this form without ticking the box means "no consent
+  // recorded", which is not the same thing as "unsubscribe me", and is handled as such.
+  let error;
+  if (consented) {
+    // An affirmative submission is allowed to refresh the record, including clearing a
+    // prior revocation — that's a real re-opt-in by someone holding the phone. If the
+    // number is still blocked carrier-side, Twilio returns 21610 on the next send and
+    // lib/optout.ts re-records the opt-out, so a forged re-subscribe self-heals after at
+    // most one blocked message rather than actually reaching anyone.
+    ({ error } = await db.from("sms_opt_ins").upsert(
+      {
+        phone,
+        name: name || null,
+        email: email || null,
+        consented_at: now,
+        // The wording is the server's, never the caller's — this endpoint is
+        // unauthenticated, so trusting request text would let anyone fabricate a consent
+        // record.
+        consent_text: CONSENT_TEXT,
+        consent_version: CONSENT_VERSION,
+        terms_accepted_at: terms_accepted ? now : null,
+        revoked_at: null,
+      },
+      { onConflict: "phone" }
+    ));
+  } else {
+    // Declining records the submission only if we have nothing for this number yet.
+    // Upserting here would let an anonymous POST wipe an existing consent record's
+    // evidence (consent text, version, timestamp) — which is both a compliance record and
+    // the thing that proves we were allowed to text them. 23505 means a row already
+    // exists, which is exactly the case we want to leave untouched.
+    const { error: insertError } = await db
+      .from("sms_opt_ins")
+      .insert({ phone, name: name || null, email: email || null, terms_accepted_at: terms_accepted ? now : null });
+    error = insertError?.code === "23505" ? null : insertError;
+  }
 
   if (error) {
     log.error("sms_opt_in.insert_failed", { err: error });

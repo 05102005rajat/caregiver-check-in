@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { instantToLocalInput } from "@/lib/localdatetime";
 import { createClient } from "@/lib/supabase/client";
 import type { FamilyRole, SetupFormPayload } from "@/types/db";
 import type {
@@ -154,10 +155,13 @@ export default function SetupPage() {
           );
         }
         if (data.appointments?.length) {
+          const tz = data.parent?.timezone ?? "America/Los_Angeles";
           setAppointments(
             data.appointments.map((a: DbAppointment) => ({
               title: a.title ?? "",
-              starts_at: a.starts_at ? new Date(a.starts_at).toISOString().slice(0, 16) : "",
+              // Must mirror the server's parse exactly, or the form rewrites the
+              // appointment to a wrong time on every save. See lib/localdatetime.ts.
+              starts_at: a.starts_at ? instantToLocalInput(a.starts_at, tz) : "",
               location: a.location ?? "",
               notes: a.notes ?? "",
             }))

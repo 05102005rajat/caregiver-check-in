@@ -8,6 +8,7 @@ describe("normalize", () => {
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
       concerns: [],
+      requests: [],
       mood: "good",
       appointments_acknowledged: ["Dentist"],
     });
@@ -16,6 +17,7 @@ describe("normalize", () => {
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
       concerns: [],
+      requests: [],
       mood: "good",
       appointments_acknowledged: ["Dentist"],
     });
@@ -28,6 +30,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
+      requests: [],
       mood: "unknown",
       appointments_acknowledged: [],
     });
@@ -39,6 +42,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
+      requests: [],
       mood: "unknown",
       appointments_acknowledged: [],
     });
@@ -47,6 +51,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       concerns: [],
+      requests: [],
       mood: "unknown",
       appointments_acknowledged: [],
     });

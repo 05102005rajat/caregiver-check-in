@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { localInputToInstant } from "@/lib/localdatetime";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { setupFormSchema } from "@/lib/validation";
@@ -81,9 +82,11 @@ export async function POST(request: Request) {
     p_parent_timezone: payload.parent.timezone,
     p_assistant_name: payload.parent.assistant_name,
     p_medications: payload.medications,
+    // The form sends a bare wall-clock string; it has to be resolved in the parent's zone,
+    // never the server's. See lib/localdatetime.ts.
     p_appointments: payload.appointments.map((a) => ({
       ...a,
-      starts_at: new Date(a.starts_at).toISOString(),
+      starts_at: localInputToInstant(a.starts_at, payload.parent.timezone).toISOString(),
     })),
     p_family_contacts: payload.family_contacts,
     p_watch_items: payload.watch_items,

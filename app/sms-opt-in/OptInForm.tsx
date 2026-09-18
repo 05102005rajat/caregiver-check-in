@@ -46,7 +46,11 @@ export default function OptInForm() {
               // lists for a specific person. Saying "you're now receiving alerts" would be a
               // promise this form can't keep on its own.
               "We've recorded your consent to receive text alerts. You'll start getting them once the family member setting up check-ins adds you as a contact. You can reply STOP to any message to unsubscribe at any time."
-            : "We've recorded your details, and that you did not agree to text messages — so we won't send you any."}
+            : // Careful not to promise silence this form can't deliver: if this number is
+              // already listed as a contact by a caregiver who confirmed consent, alerts
+              // still go there. Not consenting here means no consent was recorded, which
+              // isn't the same as unsubscribing — STOP is what actually stops messages.
+              "We've recorded your details. We haven't recorded consent to text this number. If you do receive a message and don't want any more, reply STOP and we'll stop immediately."}
         </p>
       </div>
     );

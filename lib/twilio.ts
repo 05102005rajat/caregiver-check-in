@@ -13,6 +13,27 @@ function deliveryCallbackUrl(): string | null {
   return `${base.replace(/\/$/, "")}/api/twilio/status?secret=${encodeURIComponent(secret)}`;
 }
 
+/**
+ * A failed Twilio send, carrying Twilio's numeric error code so callers can act on the
+ * specific failure rather than string-matching a message. 21610 in particular means the
+ * recipient has texted STOP and the carrier is blocking us — that has to feed back into
+ * our own suppression list, not just get logged.
+ */
+export class TwilioSendError extends Error {
+  readonly httpStatus: number;
+  readonly code: number | null;
+
+  constructor(httpStatus: number, code: number | null, message: string) {
+    super(message);
+    this.name = "TwilioSendError";
+    this.httpStatus = httpStatus;
+    this.code = code;
+  }
+}
+
+/** Twilio: "Attempt to send to unsubscribed recipient" — i.e. this number replied STOP. */
+export const TWILIO_UNSUBSCRIBED = 21610;
+
 /** Sends an SMS via Twilio's REST API, authenticated with an API Key (not the classic Auth Token). */
 export async function sendSms(to: string, body: string): Promise<string> {
   const accountSid = requireEnv("TWILIO_ACCOUNT_SID");
@@ -40,7 +61,16 @@ export async function sendSms(to: string, body: string): Promise<string> {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Twilio SMS failed (${res.status}): ${errText}`);
+    // Twilio reports failures as JSON with a numeric `code`; fall back to the raw body if
+    // it ever isn't, rather than losing the error entirely to a parse throw.
+    let code: number | null = null;
+    try {
+      const parsed = JSON.parse(errText);
+      if (typeof parsed?.code === "number") code = parsed.code;
+    } catch {
+      // non-JSON body; code stays null
+    }
+    throw new TwilioSendError(res.status, code, `Twilio SMS failed (${res.status}): ${errText}`);
   }
 
   const data = await res.json();

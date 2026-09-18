@@ -69,7 +69,12 @@ async function processRetries(
       .update(
         nextStatus === "failed"
           ? { status: "failed" }
-          : { status: "in_progress", retry_count: call.retry_count + 1 }
+          : // called_at moves to now as part of the claim. Leaving the previous attempt's
+            // timestamp meant the row went 'in_progress' already older than the stale
+            // reaper's 10-minute threshold, so a reaper run in the window before dial()
+            // writes its own called_at could flip a genuinely connecting call to
+            // 'no_answer' and place a second call while the first was live.
+            { status: "in_progress", retry_count: call.retry_count + 1, called_at: new Date().toISOString() }
       )
       .eq("id", call.id)
       .eq("status", "no_answer")
@@ -330,8 +335,16 @@ async function processParent(
 }
 
 export async function GET(request: Request) {
+  // Fail closed when the secret is missing. Comparing against `Bearer ${undefined}` meant
+  // an unset CRON_SECRET didn't disable auth, it published a known password — anyone
+  // sending "Bearer undefined" could drive the scheduler and place real phone calls.
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) {
+    log.error("cron.secret_missing");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

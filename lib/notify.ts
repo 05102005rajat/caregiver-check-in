@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
-import { sendSms } from "@/lib/twilio";
+import { sendSms, TwilioSendError, TWILIO_UNSUBSCRIBED } from "@/lib/twilio";
 import { sendEmail } from "@/lib/email";
+import { recordCarrierOptOut } from "@/lib/optout";
 import { log } from "@/lib/log";
 import type { FamilyContact } from "@/types/db";
 
@@ -58,6 +59,12 @@ async function sendAlert(
       await db.from("messages").insert({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" });
       log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
     } catch (err) {
+      // A 21610 is the carrier telling us this person sent STOP. Record it so we stop
+      // attempting (and stop burning a failed send on) every future alert — this is the
+      // only path that may mark a number opted out; see lib/optout.ts.
+      if (err instanceof TwilioSendError && err.code === TWILIO_UNSUBSCRIBED) {
+        await recordCarrierOptOut(db, phone);
+      }
       // Don't let a Twilio failure be silently equivalent to "the family was told" —
       // record it so it's visible (e.g. via Supabase) rather than only in server logs.
       log.error("notify.sms_failed", { parent_id: parentId, call_id: callId, contact_id: contactId, recipient: phone, err });
