@@ -42,25 +42,33 @@ export interface QueueContext {
 }
 
 /**
- * Whether a call already exists today (the parent's local day) that either actually
- * connected (called_at set) or is still pending. Deleted when the queue replaced the old
- * scheduler, and restored here because the question it answers is real and cannot be
- * answered at planning time: "has this parent already been rung today, so that the
- * appointment was mentioned?" is a fact about what happened, not about what was planned.
+ * The call that already covered this parent's local day, if any — one that connected
+ * (called_at set) or is still in flight. Restored from the old scheduler because the
+ * question is real and cannot be answered at planning time: "has this parent already been
+ * rung today, so the appointment was mentioned?" is a fact about what happened.
  */
-async function hasCoveredCallToday(
+async function coveringCallToday(
   db: ReturnType<typeof createAdminClient>,
   parent: Parent,
   now: Date
-): Promise<boolean> {
+): Promise<{ covered: boolean; callId: string | null }> {
   const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
-  const { data } = await db
+  const { data, error } = await db
     .from("calls")
-    .select("called_at, status")
+    .select("id, called_at, status")
     .eq("parent_id", parent.id)
     .gte("scheduled_for", startUtc.toISOString())
     .lte("scheduled_for", endUtc.toISOString());
-  return (data ?? []).some((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
+  if (error) {
+    // Fails CLOSED, like sourcesComplete and priorCallLookupFailed. Returning "not covered"
+    // on a transient error places a second real phone call to an elderly person who has
+    // already been rung today; skipping a reminder costs them a prompt about an appointment
+    // that the earlier call already named.
+    log.error("cron.covering_call_lookup_failed", { parent_id: parent.id, err: error });
+    return { covered: true, callId: null };
+  }
+  const covering = (data ?? []).find((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
+  return { covered: Boolean(covering), callId: (covering?.id as string) ?? null };
 }
 
 /**
@@ -202,6 +210,10 @@ export async function dispatchDueSlots(
   // failed, because expires_at still bounds it and expiry is the one place that declares a
   // miss. call_id is the discriminator: a slot that really dialled has one.
   const strandedBefore = new Date(now.getTime() - STRANDED_DISPATCH_MINUTES * 60000).toISOString();
+  // Bounded to today. Yesterday's stranded slot released into today's queue expires
+  // immediately and texts "their 9:00am check-in was missed" — about yesterday, with only a
+  // time of day in the message, so it reads as this morning.
+  const { startUtc: todayStart, endUtc: todayEnd } = localDayBoundsUtc(parent.timezone, now);
   const { data: stranded, error: strandedError } = await db
     .from("call_slots")
     .update({ state: "pending", updated_at: now.toISOString() })
@@ -209,6 +221,8 @@ export async function dispatchDueSlots(
     .eq("state", "dispatched")
     .is("call_id", null)
     .lt("updated_at", strandedBefore)
+    .gte("due_at", todayStart.toISOString())
+    .lte("due_at", todayEnd.toISOString())
     .select("id");
   if (strandedError) log.error("cron.stranded_slots_release_failed", { parent_id: parent.id, err: strandedError });
   else if ((stranded ?? []).length > 0) {
@@ -247,14 +261,26 @@ export async function dispatchDueSlots(
     // the job hasCoveredCallToday used to do, now asked at the only moment the answer is
     // real. A medication slot that lapsed unrung leaves the day uncovered, and then the
     // appointment reminder is the only call that parent gets.
-    if (slot.kind === "appointment" && (await hasCoveredCallToday(db, parent, now))) {
-      await db
-        .from("call_slots")
-        .update({ state: "cancelled", updated_at: now.toISOString() })
-        .eq("id", slot.id)
-        .eq("state", "dispatched");
-      log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id });
-      continue;
+    if (slot.kind === "appointment") {
+      const covering = await coveringCallToday(db, parent, now);
+      if (covering.covered) {
+        // Recorded as DISPATCHED against the call that covered it, not cancelled.
+        //
+        // 'cancelled' means "we stopped being responsible" and materializeSlots revives it
+        // when responsibility resumes — so cancelling here set up a loop: revive, claim,
+        // cancel, every tick, and then at expires_at the revive landed before expiry and
+        // the family was texted "the appointment reminder didn't go out" for a day the
+        // parent WAS called and the appointment WAS named on that call. This slot is not
+        // abandoned, it is served by another call, which is exactly what 'dispatched' with
+        // a call_id says.
+        await db
+          .from("call_slots")
+          .update({ state: "dispatched", call_id: covering.callId, updated_at: now.toISOString() })
+          .eq("id", slot.id)
+          .eq("state", "dispatched");
+        log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id, call_id: covering.callId });
+        continue;
+      }
     }
 
     const medsForSlot = resolveMedsForSlot(ctx.medications, slot.med_names, new Date(slot.due_at), parent.timezone);
@@ -401,11 +427,19 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       .eq("state", "expired");
     if (linkError) log.error("cron.expired_slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
 
-    const time = formatLocalTime(new Date(slot.due_at), parent.timezone);
+    const dueAt = new Date(slot.due_at);
+    const time = formatLocalTime(dueAt, parent.timezone);
+    // A slot from an earlier day has to say so. Expiry is deliberately not bounded to today
+    // — a slot left behind by an outage must still be accounted for rather than silently
+    // dropped — but "their 9:00am check-in was missed" with no date reads as this morning.
+    const onDay =
+      dueAt >= localDayBoundsUtc(parent.timezone, now).startUtc
+        ? time
+        : `${time} on ${new Intl.DateTimeFormat("en-GB", { timeZone: parent.timezone, weekday: "long", day: "numeric", month: "long" }).format(dueAt)}`;
     const body =
       slot.kind === "appointment"
-        ? `Heads up: ${parent.name}'s appointment reminder call (around ${time}) didn't go out and it's now too late to place it. Please check in with them directly.`
-        : `Heads up: ${parent.name}'s ${time} check-in was missed and is now too late to call about.${
+        ? `Heads up: ${parent.name}'s appointment reminder call (around ${onDay}) didn't go out and it's now too late to place it. Please check in with them directly.`
+        : `Heads up: ${parent.name}'s ${onDay} check-in was missed and is now too late to call about.${
             slot.med_names.length > 0 ? ` Their ${formatMeds(slot.med_names.map((name) => ({ name }) as Medication))} was scheduled.` : ""
           }`;
     await notifyFamilyContacts(db, parent.id, "notify_on_miss", callId, body, {

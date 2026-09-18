@@ -179,12 +179,29 @@ describe("planSlotsForDay", () => {
 });
 
 describe("coverageStartsAt", () => {
+  it("starts at consent, so slots from before a mid-day consent are never reported missed", () => {
+    // A parent who consents at 15:00 — via the test-call button the dashboard points at —
+    // had that afternoon's tick re-plan the elapsed 08:00 and 12:00 slots, revive them from
+    // the consent hold's cancellation, and expire each into its own "check-in was missed"
+    // text. Different slots, different fingerprints, so nothing merged them.
+    expect(
+      coverageStartsAt({
+        paused_until: null,
+        resumed_at: null,
+        first_call_after: null,
+        consent_given_at: "2026-09-10T22:00:00Z",
+        created_at: "2026-09-01T00:00:00Z",
+      }).toISOString()
+    ).toBe("2026-09-10T22:00:00.000Z");
+  });
+
   it("takes the latest of the four, so the most recent hold wins", () => {
     expect(
       coverageStartsAt({
         paused_until: "2026-09-05T00:00:00Z",
         resumed_at: "2026-09-08T00:00:00Z",
         first_call_after: "2026-09-06T00:00:00Z",
+        consent_given_at: "2026-09-02T00:00:00Z",
         created_at: "2026-09-01T00:00:00Z",
       }).toISOString()
     ).toBe("2026-09-08T00:00:00.000Z");
@@ -198,6 +215,7 @@ describe("coverageStartsAt", () => {
         paused_until: null,
         resumed_at: "2026-09-10T18:00:00Z",
         first_call_after: null,
+        consent_given_at: null,
         created_at: "2026-09-01T00:00:00Z",
       }).toISOString()
     ).toBe("2026-09-10T18:00:00.000Z");
@@ -268,5 +286,22 @@ describe("medsForSlot", () => {
 
   it("drops a name whose medication no longer exists", () => {
     expect(medsForSlot([med({ name: "Kept" })], ["Kept", "Deleted"], morning, TZ).map((m: Medication) => m.name)).toEqual(["Kept"]);
+  });
+});
+
+describe("medsForNearestSlot staleness", () => {
+  it("returns nothing when the only dose is long past", () => {
+    // A test call at 20:00 for a parent whose only dose is 08:00 asked about a twelve-hour-
+    // old dose, and anything unconfirmed was reported to the family as "Not taken". A
+    // scheduled call for that slot would have expired hours earlier.
+    const meds = [med({ name: "Morning", time_of_day: "08:00:00" })];
+    const at = new Date("2026-09-11T03:00:00Z"); // 20:00 PDT
+    expect(medsForNearestSlot(meds, TZ, at)).toEqual([]);
+  });
+
+  it("still returns a dose inside the catch-up window (control)", () => {
+    const meds = [med({ name: "Morning", time_of_day: "08:00:00" })];
+    const at = new Date("2026-09-10T16:00:00Z"); // 09:00 PDT, one hour after the dose
+    expect(medsForNearestSlot(meds, TZ, at).map((m) => m.name)).toEqual(["Morning"]);
   });
 });

@@ -181,6 +181,7 @@ export function coverageStartsAt(parent: {
   paused_until: string | null;
   resumed_at: string | null;
   first_call_after: string | null;
+  consent_given_at: string | null;
   created_at: string | null;
 }): Date {
   return new Date(
@@ -188,6 +189,14 @@ export function coverageStartsAt(parent: {
       parent.paused_until ? new Date(parent.paused_until).getTime() : 0,
       parent.resumed_at ? new Date(parent.resumed_at).getTime() : 0,
       parent.first_call_after ? new Date(parent.first_call_after).getTime() : 0,
+      // Consent belongs here for the same reason a pause does: a slot that elapsed before
+      // this parent agreed to be called was never ours to miss. Without it, a parent who
+      // consents at 15:00 — via the test-call button the dashboard points at — had that
+      // afternoon's tick re-plan the already-elapsed 08:00 and 12:00 slots, revive them
+      // from the consent hold's cancellation, and expire each into its own "check-in was
+      // missed" text. Different slots, different fingerprints, so nothing merged them: a
+      // burst of alarms about calls the system had deliberately declined to place.
+      parent.consent_given_at ? new Date(parent.consent_given_at).getTime() : 0,
       parent.created_at ? new Date(parent.created_at).getTime() : 0
     )
   );
@@ -205,6 +214,15 @@ export function medsForNearestSlot(medications: Medication[], timezone: string, 
   const due = medsDueNow(medications, timezone, now);
   if (due.length === 0) return [];
   const latest = due.reduce((acc, m) => (m.time_of_day > acc ? m.time_of_day : acc), due[0].time_of_day);
+
+  // Bounded by the same catch-up window a scheduled call gets. Without it, a parent whose
+  // only dose is at 08:00 gets a test call at 20:00 asking about a twelve-hour-old dose,
+  // and anything they don't confirm is reported to the family as "Not taken" — the false
+  // alarm this function was written to remove, just moved from "every dose today" to "one
+  // stale dose". A scheduled call for that slot would have expired hours earlier.
+  const slotAt = scheduledForToday(latest, timezone, now);
+  if (now.getTime() - slotAt.getTime() > SLOT_CATCHUP_MINUTES * 60000) return [];
+
   return due.filter((m) => m.time_of_day === latest);
 }
 

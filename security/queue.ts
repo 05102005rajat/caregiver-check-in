@@ -93,8 +93,11 @@ async function main() {
     // correct behaviour, but it is not the case under test here.
     const midnightish = new Date(realNow.getTime() - (localHour + 0.5) * 3600 * 1000);
     await admin.from("parents").update({ created_at: midnightish.toISOString() }).eq("id", pid);
-    // Consent, so the gate doesn't shut before any of this runs.
-    await admin.from("parents").update({ consent_given_at: new Date().toISOString() }).eq("id", pid);
+    // Consent, so the gate doesn't shut before any of this runs — backdated with creation.
+    // consent_given_at feeds coverageStartsAt (a slot from before this parent agreed to be
+    // called was never ours to miss), so stamping it "now" would correctly exclude every
+    // elapsed slot and quietly empty the fixture these checks depend on.
+    await admin.from("parents").update({ consent_given_at: midnightish.toISOString() }).eq("id", pid);
 
     const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
     const parent = parentRow as Parent;
@@ -233,11 +236,25 @@ async function main() {
       .select("id")
       .single();
     await dispatchDueSlots(admin as never, parent, ctx, realNow);
-    const { data: apptAfter } = await admin.from("call_slots").select("state").eq("id", apptSlot!.id).single();
+    const { data: apptAfter } = await admin.from("call_slots").select("state, call_id").eq("id", apptSlot!.id).single();
     check(
-      "an appointment reminder is cancelled when a call already covered the day",
-      apptAfter!.state === "cancelled",
-      `state=${apptAfter!.state} — the parent gets a second call the old scheduler suppressed`
+      "an appointment reminder yields to the call that already covered the day",
+      // 'dispatched' against the covering call, NOT 'cancelled'. Cancelled means "we stopped
+      // being responsible" and materialisation revives it, which looped revive -> claim ->
+      // cancel every tick and eventually expired into "the appointment reminder didn't go
+      // out" for a day the parent was called and the appointment was named on that call.
+      apptAfter!.state === "dispatched" && apptAfter!.call_id === covering!.id,
+      `state=${apptAfter!.state} call_id=${apptAfter!.call_id} (expected dispatched, linked to ${covering!.id})`
+    );
+
+    // It must also survive the next materialisation rather than being revived into a
+    // pending slot that later reports itself missed.
+    await materializeSlots(admin as never, parent, ctx, realNow);
+    const { data: apptStill } = await admin.from("call_slots").select("state").eq("id", apptSlot!.id).single();
+    check(
+      "a covered appointment slot is not revived by the next tick",
+      apptStill!.state === "dispatched",
+      `state=${apptStill!.state} — revived, and it will expire into a false "reminder didn't go out" alert`
     );
 
     // Control: with nothing covering the day it must NOT be cancelled, or the check above is
@@ -246,11 +263,13 @@ async function main() {
     await admin.from("call_slots").update({ state: "pending" }).eq("id", apptSlot!.id);
     await admin.from("calls").delete().eq("parent_id", pid).in("status", ["scheduled", "in_progress"]);
     await dispatchDueSlots(admin as never, parent, ctx, realNow);
-    const { data: apptUncovered } = await admin.from("call_slots").select("state").eq("id", apptSlot!.id).single();
+    const { data: apptUncovered } = await admin.from("call_slots").select("state, call_id").eq("id", apptSlot!.id).single();
     check(
-      "an appointment reminder is NOT cancelled when nothing covered the day (control)",
-      apptUncovered!.state !== "cancelled",
-      `state=${apptUncovered!.state} — a parent whose medication slot lapsed gets no call at all`
+      "an appointment reminder IS acted on when nothing covered the day (control)",
+      // The positive, not "not cancelled": a dispatch that bailed early for an unrelated
+      // reason leaves the slot pending, and "not cancelled" passes on that too.
+      apptUncovered!.state === "dispatched",
+      `state=${apptUncovered!.state} call_id=${apptUncovered!.call_id} — dispatch did not act, so the check above proves nothing`
     );
 
     // ---- cancel ----

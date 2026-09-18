@@ -14,10 +14,14 @@ import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem 
 
 export const dynamic = "force-dynamic";
 
-// How many times a row stranded at 'scheduled' may be re-dialled before we give up. The
-// failure that strands it tends to repeat, and without a cap this is a loop that phones a
-// real person every tick.
-const MAX_STALE_REDIALS = 2;
+// How long a row stranded at 'scheduled' may keep being re-dialled before we give up.
+//
+// An age, not a count, because that is what the code can actually measure: there is no
+// redial counter, and the previous `floor(age / 10min) >= 2` was an age bound wearing a
+// count's name — it allowed exactly one redial, and abandoned a row first seen after an
+// overnight outage on its second pass. The failure that strands a row tends to repeat, so
+// the bound exists to stop a loop that phones a real person every tick.
+const STALE_REDIAL_GIVEUP_MINUTES = 30;
 
 // How long a raw transcript is kept. The product runs on summary/mood/concerns; the
 // transcript is the most sensitive thing this system holds and the least needed after the
@@ -251,7 +255,11 @@ async function reapStaleScheduled(
     // and (before the queue in 0033 replaced it) made hasCoveredCallToday suppress that
     // day's appointment reminder. One counter, two meanings, twice over. This column means
     // exactly one thing.
-    const attempts = row.stale_redial_at ? Math.floor((now.getTime() - new Date(row.created_at).getTime()) / (10 * 60 * 1000)) : 0;
+    // Only after at least one redial has actually been claimed — otherwise a row first
+    // seen long after it was created is abandoned without ever being retried, which is the
+    // opposite of what this reaper is for.
+    const strandedForMinutes = (now.getTime() - new Date(row.created_at).getTime()) / 60000;
+    const giveUp = Boolean(row.stale_redial_at) && strandedForMinutes > STALE_REDIAL_GIVEUP_MINUTES;
     // The predicate on stale_redial_at is what makes this a claim. Guarding only on
     // status='scheduled' meant two overlapping invocations both matched the same row, both
     // "claimed" it and both dialled — two real phone calls to the same person. The column
@@ -266,7 +274,7 @@ async function reapStaleScheduled(
       .maybeSingle();
     if (!claimed) continue;
 
-    if (attempts >= MAX_STALE_REDIALS) {
+    if (giveUp) {
       const { data: closed } = await db
         .from("calls")
         .update({ status: "failed" })
@@ -274,7 +282,7 @@ async function reapStaleScheduled(
         .eq("status", "scheduled")
         .select("id")
         .maybeSingle();
-      log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, attempts });
+      log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, stranded_for_minutes: Math.round(strandedForMinutes) });
       // Giving up here was silent. The slot for this time is already 'dispatched' and linked
       // to this row, so it will never expire either — the check-in simply stops existing.
       if (closed) {
