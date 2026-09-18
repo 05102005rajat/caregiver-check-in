@@ -54,10 +54,11 @@ export interface SlotPlan {
  * in between asks lib/dial.ts for a call it refuses. Bounding it here means the queue never
  * requests a dial that cannot be placed.
  */
-function expiryFor(dueAt: Date, timezone: string): Date {
+function expiryFor(dueAt: Date, timezone: string, notAfter?: Date): Date {
   const catchupDeadline = new Date(dueAt.getTime() + SLOT_CATCHUP_MINUTES * 60000);
   const windowCloses = callingWindowEnd(dueAt, timezone);
-  return catchupDeadline < windowCloses ? catchupDeadline : windowCloses;
+  const candidates = [catchupDeadline, windowCloses, ...(notAfter ? [notAfter] : [])];
+  return candidates.reduce((earliest, d) => (d < earliest ? d : earliest));
 }
 
 /**
@@ -146,7 +147,12 @@ export function planSlotsForDay(
     if (earliest) {
       slots.push({
         dueAt: earliest.dueAt,
-        expiresAt: expiryFor(earliest.dueAt, timezone),
+        // Capped at the appointment itself. reminderSlotFor refuses to plan a reminder that
+        // could only land after the appointment starts, but the flat two-hour catch-up then
+        // handed it back: a 10:00 appointment reminds at 09:00 and stayed callable until
+        // 11:00, so a delayed tick rang to "remind" someone about an appointment that began
+        // twenty minutes earlier. A reminder after the fact is worse than none.
+        expiresAt: expiryFor(earliest.dueAt, timezone, new Date(earliest.appointment.starts_at)),
         kind: "appointment",
         medNames: [],
         appointmentId: earliest.appointment.id,

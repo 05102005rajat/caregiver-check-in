@@ -310,13 +310,18 @@ async function reapStaleScheduled(
     if (!claimed) continue;
 
     if (giveUp) {
-      const { data: closed } = await db
+      const { data: closed, error: closeError } = await db
         .from("calls")
         .update({ status: "failed" })
         .eq("id", row.id)
         .eq("status", "scheduled")
         .select("id")
         .maybeSingle();
+      // Adding .select() here (to decide whether to notify) silently dropped the error
+      // check that was in this line before — in the commit whose subject was discarded
+      // errors turning guards back into silence. Logging "exhausted" while the close-out
+      // failed asserts in the logs that a row was closed when it is still scheduled.
+      if (closeError) log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: closeError });
       log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, stranded_for_minutes: Math.round(strandedForMinutes) });
       // Giving up here was silent. The slot for this time is already 'dispatched' and linked
       // to this row, so it will never expire either — the check-in simply stops existing.
@@ -389,7 +394,7 @@ async function processParent(
   parent: Parent,
   now: Date,
   ctx: ParentContext
-): Promise<number> {
+): Promise<{ callsTriggered: number; degraded: boolean }> {
   // Paused by the caregiver (hospital stay, travel, family visiting). Returns before any
   // dialing, retrying or miss-alerting: the whole point is silence, so a pause that still
   // produced "didn't answer" texts every day would be worse than useless.
@@ -402,9 +407,9 @@ async function processParent(
     // that had already passed its deadline but not yet been expired — a check-in that
     // really was missed, which then never got a calls row and never told anyone, because
     // the caregiver happened to hit Pause a couple of minutes later.
-    await expireLapsedSlots(db, parent, now);
+    const expired = await expireLapsedSlots(db, parent, now);
     await cancelPendingSlots(db, parent.id, "paused", now);
-    return 0;
+    return { callsTriggered: 0, degraded: !expired };
   }
 
   // Don't ring before the caregiver said their parent would be ready. The first contact is
@@ -416,9 +421,9 @@ async function processParent(
     // that had already passed its deadline but not yet been expired — a check-in that
     // really was missed, which then never got a calls row and never told anyone, because
     // the caregiver happened to hit Pause a couple of minutes later.
-    await expireLapsedSlots(db, parent, now);
+    const expired = await expireLapsedSlots(db, parent, now);
     await cancelPendingSlots(db, parent.id, "prewarm_hold", now);
-    return 0;
+    return { callsTriggered: 0, degraded: !expired };
   }
 
   // Consent gate (spec section 8): the very first call always goes out so Rosie can ask
@@ -431,13 +436,17 @@ async function processParent(
     Boolean(parent.consent_refused_at && !parent.consent_given_at) || (ctx.hasPriorCalls && !parent.consent_given_at);
 
   let callsTriggered = 0;
+  let degraded = false;
   if (!consentBlocksNewCalls) {
     // Three passes over a table, in place of the derivation the old scheduler rebuilt every
     // tick: write down what today should look like, ring what is due, and account for what
     // lapsed. Each one is a query against explicit columns.
-    await materializeSlots(db, parent, ctx, now);
-    callsTriggered = await dispatchDueSlots(db, parent, ctx, now);
-    await expireLapsedSlots(db, parent, now);
+    const materialized = await materializeSlots(db, parent, ctx, now);
+    const dispatched = await dispatchDueSlots(db, parent, ctx, now);
+    const expired = await expireLapsedSlots(db, parent, now);
+    callsTriggered = dispatched.triggered;
+    // "Could not do the work" and "there was no work" must not look the same to the caller.
+    degraded = !materialized || !dispatched.ok || !expired;
 
     // Skipped on an incomplete read for the same reason as dispatch: this path re-dials,
     // and an empty medication list would place a call that asks about nothing.
@@ -451,7 +460,7 @@ async function processParent(
     // pending — withdrawn.
     // Same as the pause and pre-warm holds: a slot that genuinely lapsed before the gate
     // shut is a missed check-in and is reported, then the rest of the queue is dropped.
-    await expireLapsedSlots(db, parent, now);
+    if (!(await expireLapsedSlots(db, parent, now))) degraded = true;
     await cancelPendingSlots(db, parent.id, "consent_gate", now);
   }
 
@@ -503,7 +512,7 @@ async function processParent(
     log.warn("cron.retries_skipped_incomplete_sources", { parent_id: parent.id });
   }
 
-  return callsTriggered;
+  return { callsTriggered, degraded };
 }
 
 export async function GET(request: Request) {
@@ -619,7 +628,15 @@ export async function GET(request: Request) {
   );
   if (medsRes.error) log.error("cron.medications_query_failed", { err: medsRes.error });
   if (apptsRes.error) log.error("cron.appointments_query_failed", { err: apptsRes.error });
-  const sourceReadsOk = !medsRes.error && !apptsRes.error;
+  // watch_items is in here because an `always_alert` item is a safety instruction: a call
+  // placed without it can hear the thing the family said to always escalate and treat it as
+  // conversation. It defaulted to [] on a failed read exactly like medications did.
+  if (watchRes.error) log.error("cron.watch_items_query_failed", { err: watchRes.error });
+  // caregivers is deliberately NOT in here. A failed read degrades the spoken name to "your
+  // family", which is a worse call but still a real check-in; blocking every household's
+  // calls over it would trade a cosmetic fault for silence.
+  if (caregiversRes.error) log.error("cron.caregivers_query_failed", { err: caregiversRes.error });
+  const sourceReadsOk = !medsRes.error && !apptsRes.error && !watchRes.error;
   const medsByParent = groupByParentId((medsRes.data ?? []) as Medication[]);
   const watchByParent = groupByParentId((watchRes.data ?? []) as WatchItem[]);
   const apptsByParent = groupByParentId((apptsRes.data ?? []) as Appointment[]);
@@ -656,7 +673,8 @@ export async function GET(request: Request) {
       })
     )
   );
-  const callsTriggered = counts.reduce((sum, n) => sum + n, 0);
+  const callsTriggered = counts.reduce((sum, r) => sum + r.callsTriggered, 0);
+  const degradedParents = counts.filter((r) => r.degraded).length;
 
   // Drop transcripts past the retention window. Nothing else in the codebase ever deleted
   // one: across 29 migrations there was no TTL and no age-based sweep, so every word an
@@ -688,6 +706,22 @@ export async function GET(request: Request) {
   }
 
   // /api/health reads this to tell whether the external scheduler is still running.
+  //
+  // NOT stamped when any parent's queue work failed. Every queue operation fails closed to
+  // a log line, which is right on its own, but the tick was then returning ok:true and
+  // marking itself healthy regardless — so a missing table or a revoked grant produced a
+  // scheduler that placed zero calls, raised zero alerts, and reported success to
+  // cron-job.org and to /api/health. On a product whose promise is that silence means
+  // everything is fine, that is the worst-shaped failure available. Withholding the
+  // heartbeat turns it into the one alarm this system already has.
+  if (degradedParents > 0) {
+    log.error("cron.tick_degraded", { parents: parentList.length, degraded_parents: degradedParents, calls_triggered: callsTriggered });
+    return NextResponse.json(
+      { ok: false, error: "queue operations failed; heartbeat withheld", degradedParents, callsTriggered },
+      { status: 500 }
+    );
+  }
+
   const { error: heartbeatError } = await db
     .from("cron_heartbeat")
     .update({ last_tick_at: now.toISOString() })

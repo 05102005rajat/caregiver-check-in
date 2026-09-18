@@ -75,10 +75,18 @@ async function coveringCallToday(
   // for and whose own comment names this function as a victim. Fixed at the reader,
   // because the writer is load-bearing for retries.
   //
-  // 'completed' and 'in_progress' are a real conversation; 'scheduled' is one about to
-  // happen. 'no_answer' and 'failed' mean nobody was spoken to, so the appointment was
-  // never mentioned and the reminder is still worth placing.
-  const COVERING_STATUSES = new Set(["completed", "in_progress", "scheduled"]);
+  // Only a real conversation counts. 'scheduled' was included as "about to happen" and
+  // reintroduced the same defect one column over: a row stranded at 'scheduled' by a failed
+  // post-dial write — the exact condition reapStaleScheduled exists for — marked the
+  // afternoon's appointment slot dispatched against a call that never happened, so the
+  // reminder was never placed and never expired. Minutes later the reaper abandoned that
+  // row as a miss, proving nothing had covered the day.
+  //
+  // Dropping 'scheduled' does not risk double-calling: calls_parent_active_unique rejects a
+  // second active call, so an appointment slot dispatched while a medication call is
+  // genuinely in flight gets `already_scheduled` and is released to try again later, by
+  // which time the medication call has completed and does count as covering.
+  const COVERING_STATUSES = new Set(["completed", "in_progress"]);
   const covering = (data ?? []).find((c) => COVERING_STATUSES.has(c.status ?? ""));
   return { covered: Boolean(covering), callId: (covering?.id as string) ?? null };
 }
@@ -93,13 +101,13 @@ export async function materializeSlots(
   parent: Parent,
   ctx: QueueContext,
   now: Date
-) {
+): Promise<boolean> {
   if (!ctx.sourcesComplete) {
     // Reconciling against a plan built from data we failed to load would delete today's
     // real slots. Leaving the queue exactly as it is costs nothing: it was materialised
     // from a good read, and the next tick reconciles properly.
     log.warn("cron.materialize_skipped_incomplete_sources", { parent_id: parent.id });
-    return;
+    return false;
   }
 
   const { slots, uncallable } = planSlotsForDay(ctx.medications, ctx.appointments, parent.timezone, now, coverageStartsAt(parent));
@@ -140,7 +148,7 @@ export async function materializeSlots(
     .lte("due_at", endUtc.toISOString());
   if (existingError) {
     log.error("cron.existing_slots_query_failed", { parent_id: parent.id, err: existingError });
-    return;
+    return false;
   }
 
   const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "med_names" | "state">>;
@@ -189,7 +197,7 @@ export async function materializeSlots(
     if (error) log.error("cron.slot_meds_update_failed", { parent_id: parent.id, slot_id: row.id, err: error });
   }
 
-  if (slots.length === 0) return;
+  if (slots.length === 0) return true;
 
   const { error } = await db.from("call_slots").upsert(
     slots.map((slot) => ({
@@ -202,7 +210,11 @@ export async function materializeSlots(
     })),
     { onConflict: "parent_id,due_at", ignoreDuplicates: true }
   );
-  if (error) log.error("cron.materialize_slots_failed", { parent_id: parent.id, err: error });
+  if (error) {
+    log.error("cron.materialize_slots_failed", { parent_id: parent.id, err: error });
+    return false;
+  }
+  return true;
 }
 
 /** Rings everything that is due and hasn't lapsed. Returns how many calls were placed. */
@@ -211,7 +223,7 @@ export async function dispatchDueSlots(
   parent: Parent,
   ctx: QueueContext,
   now: Date
-): Promise<number> {
+): Promise<{ triggered: number; ok: boolean }> {
   if (!ctx.sourcesComplete) {
     // materializeSlots already refuses to reconcile without a good read; dialling is worse.
     // ctx.medications defaulted to [] resolves every slot's snapshot to no medications, so
@@ -219,7 +231,7 @@ export async function dispatchDueSlots(
     // unique on (parent_id, scheduled_for) so it cannot be re-dialled, and the webhook
     // records no missed doses. The call reads as a clean check-in that asked nothing.
     log.warn("cron.dispatch_skipped_incomplete_sources", { parent_id: parent.id });
-    return 0;
+    return { triggered: 0, ok: false };
   }
 
   // A claim writes 'dispatched' before the dial. If the invocation dies in between — a
@@ -258,7 +270,7 @@ export async function dispatchDueSlots(
     .order("due_at", { ascending: true });
   if (error) {
     log.error("cron.due_slots_query_failed", { parent_id: parent.id, err: error });
-    return 0;
+    return { triggered: 0, ok: false };
   }
 
   let triggered = 0;
@@ -352,14 +364,14 @@ export async function dispatchDueSlots(
     if (releaseError) log.error("cron.slot_release_failed", { parent_id: parent.id, slot_id: slot.id, err: releaseError });
     log.info("cron.slot_released", { parent_id: parent.id, slot_id: slot.id, reason: outcome.reason });
   }
-  return triggered;
+  return { triggered, ok: true };
 }
 
 /**
  * Accounts for slots that lapsed without a call. One branch, where there used to be two
  * near-identical ones with their own inserts and their own fingerprints.
  */
-export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>, parent: Parent, now: Date) {
+export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>, parent: Parent, now: Date): Promise<boolean> {
   const { data: lapsed, error } = await db
     .from("call_slots")
     .select("*")
@@ -368,7 +380,7 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     .lte("expires_at", now.toISOString());
   if (error) {
     log.error("cron.expired_slots_query_failed", { parent_id: parent.id, err: error });
-    return;
+    return false;
   }
 
   for (const slot of (lapsed ?? []) as CallSlot[]) {
@@ -492,6 +504,7 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     });
     log.info("cron.slot_expired", { parent_id: parent.id, slot_id: slot.id, due_at: slot.due_at, kind: slot.kind });
   }
+  return true;
 }
 
 /**

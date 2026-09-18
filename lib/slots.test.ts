@@ -151,6 +151,17 @@ describe("planSlotsForDay", () => {
     expect(slots[0].appointmentId).toBe("a-early");
   });
 
+  it("never lets an appointment reminder outlive the appointment", () => {
+    // reminderSlotFor refuses to plan a reminder that could only land after the start, but
+    // the flat two-hour catch-up handed it back: a 10:00 appointment reminds at 09:00 and
+    // stayed callable until 11:00, so a delayed tick rang about an appointment that began
+    // twenty minutes earlier.
+    const startsAt = new Date("2026-09-10T17:00:00Z"); // 10:00 PDT
+    const { slots } = planSlotsForDay([], [appt({ starts_at: startsAt.toISOString() })], TZ, NOW, COVERED_SINCE);
+    expect(slots).toHaveLength(1);
+    expect(slots[0].expiresAt.getTime()).toBeLessThanOrEqual(startsAt.getTime());
+  });
+
   it("collapses two appointments that would land on the same reminder time", () => {
     // The unique (parent_id, due_at) index would reject the second one anyway; planning it
     // twice would just make materialisation noisy.

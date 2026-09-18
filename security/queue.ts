@@ -136,7 +136,7 @@ async function main() {
       .insert({ parent_id: pid, scheduled_for: new Date(realNow.getTime() - 60 * 60 * 1000).toISOString(), status: "scheduled" })
       .select("id")
       .single();
-    const triggered = await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { triggered } = await dispatchDueSlots(admin as never, parent, ctx, realNow);
     slots = await slotsOf(pid);
     const elapsedAfter = slots.find((s) => s.id === elapsed.id)!;
     const futureAfter = slots.find((s) => s.id === future.id)!;
@@ -212,12 +212,12 @@ async function main() {
     // (parent_id, scheduled_for) so it can't be re-dialled, and the webhook records no
     // missed doses. The call reads as a clean check-in that asked nothing.
     const dueBefore = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
-    const triggeredBlind = await dispatchDueSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: false }, realNow);
+    const { triggered: triggeredBlind, ok: blindOk } = await dispatchDueSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: false }, realNow);
     const dueAfter = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
     check(
-      "an incomplete source read places no call and consumes no slot",
-      triggeredBlind === 0 && dueAfter === dueBefore,
-      `${triggeredBlind} calls, ${dueBefore} -> ${dueAfter} pending`
+      "an incomplete source read places no call, consumes no slot, and reports itself degraded",
+      triggeredBlind === 0 && dueAfter === dueBefore && blindOk === false,
+      `${triggeredBlind} calls, ${dueBefore} -> ${dueAfter} pending, ok=${blindOk}`
     );
 
     // ---- an appointment reminder yields to a call that already covered the day ----
@@ -326,6 +326,40 @@ async function main() {
       `state=${apptVsFailed!.state} call_id=${apptVsFailed!.call_id} — a Vapi outage silently cancelled the appointment reminder`
     );
     await admin.from("calls").delete().eq("id", neverConnected!.id);
+
+    // ---- a stranded 'scheduled' row is not proof anyone was spoken to ----
+    // A post-dial write failure leaves a row stuck at 'scheduled' — the exact condition the
+    // stale reaper exists for. Counting that as "already rung today" parked the afternoon's
+    // appointment slot against a call that never happened: never dispatched, never expired,
+    // reminder gone with no alert, while the reaper abandoned that same row as a miss.
+    // calls_parent_active_unique allows only one active row per parent, and earlier checks
+    // leave one behind. Cleared first, and the insert is checked rather than assumed —
+    // a null here would otherwise crash the run after the assertions it guards.
+    await admin.from("calls").delete().eq("parent_id", pid).in("status", ["scheduled", "in_progress"]);
+    const { data: strandedCall, error: strandedCallError } = await admin
+      .from("calls")
+      .insert({ parent_id: pid, scheduled_for: new Date(realNow.getTime() - 6 * 60 * 60000).toISOString(), status: "scheduled" })
+      .select("id")
+      .single();
+    if (strandedCallError || !strandedCall) throw new Error(`stranded fixture failed: ${strandedCallError?.message}`);
+    const apptDue3 = new Date(realNow.getTime() - 4 * 60000).toISOString();
+    const { data: apptSlot3 } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: apptDue3, expires_at: new Date(realNow.getTime() + 60 * 60000).toISOString(),
+        kind: "appointment", med_names: [], state: "pending",
+      })
+      .select("id")
+      .single();
+    await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { data: apptVsStranded } = await admin.from("call_slots").select("state, call_id").eq("id", apptSlot3!.id).single();
+    check(
+      "a row stranded at 'scheduled' does not count as covering the day",
+      apptVsStranded!.call_id !== strandedCall.id && apptVsStranded!.state !== "dispatched",
+      `state=${apptVsStranded!.state} call_id=${apptVsStranded!.call_id} — parked against a call that never happened`
+    );
+    await admin.from("call_slots").delete().eq("id", apptSlot3!.id);
+    await admin.from("calls").delete().eq("id", strandedCall.id);
 
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);
