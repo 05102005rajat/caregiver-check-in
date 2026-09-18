@@ -19,38 +19,80 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ## State as of this handover
 
-- `main` @ `7527c47`, deployed, healthy (cron ticking every ~5 min via cron-job.org).
-- **Migrations 0001–0030 applied. `0031` is NOT applied.**
-  `npm run security` is deliberately red at **27/28** until it is — the failing check is
-  real (see *Open work*).
+- Branch **`scheduler-queue-and-review-fixes`** @ `429ca12`, two commits ahead of `main`
+  (`f6e23be`). **Not merged, not deployed.** Merge with
+  `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
+- **Migrations 0001–0033 all applied and verified against the live database.** `0031`,
+  `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
+  checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
+  both CHECK constraints bite, and RLS hides `call_slots` from anon while the service role
+  can still read it.
+  - Not verifiable through PostgREST: whether `calls_transcript_retention_idx` was actually
+    rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
+    performance-only change with no behavioural signal. Everything else is confirmed.
+- `npm run security` is **31/31** (was 27/28). Two new runtime suites:
+  `npm run security:refusal` (8/8) and `npm run security:queue` (17/17). 139 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
-- Vapi: audio recording **off** (`artifactPlan.recordingEnabled: false`, now also set per
-  call in `lib/vapi.ts`), transcripts on. The system prompt in `prompts/vapi-system-prompt.txt`
-  is pasted into the Vapi dashboard — **the repo is not the live copy**; re-paste after
-  every edit.
-- Production data: two households, both pointed at the same real phone (`+19494660665`).
-  `manju` is the real one. `man` is leftover test data — see *Open work*.
+- Vapi: audio recording **off**, transcripts on. The system prompt in
+  `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
+  the live copy**; re-paste after every edit. `lib/vapi.ts` sets no `endCallPhrases` or
+  `endCallMessage`, so those are dashboard-only state the repo cannot protect.
+- Production data: **one** household, `manju`, on `+19494660665`. The `man` test household
+  was deleted this session via `delete_parent_household`.
 
 ---
 
 ## Open work, in the order I'd do it
 
-1. **Apply `0031_delete_household_scoping.sql`.** Deleting one household currently destroys
-   another household's SMS consent record for any shared phone number (two adult children
-   listing the same sibling). The isolation suite proves it.
-2. **Delete the `man` household** if the user confirms. Nothing depends on it; it has one
-   medication at 22:48 which is now outside the calling window and can never fire. Use
-   `delete_parent_household` — a good first real exercise of it.
-3. **The `medsDueNow` redesign.** Deliberately deferred; see *Known design debt*.
-4. **Vapi dashboard: trim End Call Phrases** to just `goodbye`. It currently contains
-   `take care` and `have a good day`, which hang up the call when Rosie says them warmly
-   mid-conversation.
+1. **Merge and deploy the branch.** Both migrations it needs are already applied, so `main`
+   is safe. Watch the first tick after 17:57 PDT — `manju`'s first slot under the new
+   queue. Expected: two `call_slots` rows, two calls a minute apart, same as before. A
+   read-only dry run of the planner against the live household produced exactly that.
+2. **Confirm an End Call tool exists in the Vapi Tools tab.** `End Call Phrases` is empty
+   (see below), so that tool is the only thing that lets Rosie hang up deliberately — and
+   the consent-refusal path in `prompts/vapi-system-prompt.txt:21` ("tell them you won't
+   ring again, say goodbye, and end the call") depends on it. If it isn't enabled, that
+   promise has no mechanism behind it.
+3. **Out-of-hours medication rows.** A row predating the calling-hours check in
+   `lib/validation.ts` can never be dialled. It is now reported by `planSlotsForDay` as
+   `uncallable` and logged as `cron.slot_uncallable` rather than vanishing, but it still
+   needs a backfill or a dashboard warning. Deliberately *not* queued: queueing it would
+   expire unrung every night and text the family daily, which is worse than the status quo.
+4. **Consent evidence is still a log line, not a durable row** — and there is now a
+   concrete instance. `+19494660665` has **no `sms_opt_ins` row at all**, before or after
+   the `man` deletion, yet 23 messages have been sent to it. Nothing is broken today
+   (the caregiver's own number is first-party consent), but the artifact `0020` exists to
+   produce does not exist for the live household.
+
+---
+
+## The Vapi "End Call Phrases" trap — read before touching it
+
+The previous handover said End Call Phrases contained `take care` and `have a good day` and
+should be trimmed to `goodbye`. **That was a misread, and acting on it would have introduced
+a bug rather than fixed one.**
+
+- The field is **empty**. `goodbye,take care,have a good day` is Vapi's grey *placeholder*.
+  Proof: editing another field produced a publish diff reporting `1 modified`. A real value
+  being changed would appear there.
+- Setting it to `goodbye` would be actively harmful. Phrases match **as a substring of the
+  bot's transcript**, and the prompt tells Rosie to "say goodbye" in three places. A natural
+  line like *"before we say goodbye, did you take your Metformin?"* contains the substring
+  and hangs up mid-question — the same defect the trim was meant to remove, relocated.
+  Vapi's own hint in that panel says to prefer multi-word phrases for this reason.
+- **Near miss worth recording:** the obvious way to act on the old instruction is to paste
+  the phrase list into the field, and the field directly *above* End Call Phrases is **End
+  Call Message** — the sentence Rosie speaks aloud when hanging up. Pasting there was one
+  click from publishing an assistant that says "goodbye comma take care comma have a good
+  day" to an elderly person. Always read the publish diff before confirming.
+
+Leave the field empty and end calls through the End Call Tool.
 
 ---
 
 ## Invariants that keep breaking
 
-Seven review rounds happened in one session. The same class of defect recurred five times.
+The same class of defect recurred five times across seven review rounds in one session.
 These are the specific lessons, stated as rules.
 
 ### 1. A fact must be recorded *before* the operation that can fail, not after
@@ -76,19 +118,31 @@ whether to notify by comparing before/after.
 **Rule:** a guarded UPDATE that matches zero rows is indistinguishable from success. That is
 how a person asking to be left alone got ignored, repeatedly.
 
+The corollary, used throughout the new queue: when you *do* need a guarded update, add
+`.select()` and read back whether it landed. `lib/dial.ts`'s refusal path and every
+`call_slots` claim use this to decide whether *they* are the one who made the transition,
+and therefore whether they owe anyone a message.
+
 ### 3. One rule, one place
 
 "Does this warrant telling someone" existed in three hand-maintained copies that had
 drifted — the dashboard's ignored mood, so a call that texted the family "needs a look"
 rendered as "doing okay". Now `lib/alerting.ts`, used by the webhook, the dashboard and the
-eval scorer. Same story for the spoken greeting (`lib/greeting.ts`) and the calling-hours
-window (`lib/callwindow.ts`).
+eval scorer. Same story for the spoken greeting (`lib/greeting.ts`), the calling-hours
+window (`lib/callwindow.ts`), and now the "this slot is too late" fingerprint
+(`tooLateFingerprint` in `lib/insights.ts`) — four paths can reach that conclusion for one
+slot and they must dedupe against each other.
 
 ### 4. Enforce safety invariants at the chokepoint, not per caller
 
 Three dial paths answered "is it too late to ring" three different ways and the most
 dangerous had no answer at all. `lib/callwindow.ts` is enforced inside `dialAndRecord`,
 which every path goes through, and refuses regardless of what the caller believes.
+
+**But refusing is only half of it.** That refusal was terminal *and silent* for months: the
+row was marked `failed` and left occupying `(parent_id, scheduled_for)`, so every later
+tick's too-late branch hit a 23505 and continued without a word. A chokepoint that refuses
+must also make the refusal into a fact somebody hears about.
 
 ### 5. SQL NULL is not falsy
 
@@ -102,34 +156,52 @@ the comment directly above claimed nulls still counted. Use
 The transcript retention sweep errored on every tick and only produced a log line, while
 `/privacy` told people transcripts are deleted after 30 days.
 
+### 7. Don't overload a column that the UI reads
+
+`retry_count` meant two things, so a row re-dialled twice by the reaper arrived "exhausted"
+and the family was told the parent didn't answer after 2 tries with no retry ever placed.
+The fix moved the reaper onto `called_at` — which meant "the call was placed", is rendered
+as "Called 9:03am" and "Last check-in", and was being stamped on calls that had never been
+dialled. Migration `0032` gives the reaper its own `stale_redial_at`. Same mistake, twice,
+one column over.
+
 ---
 
 ## How to verify (this is the part that actually worked)
 
 Reading code found the shallow bugs. **Driving the running app found the ones that
-mattered**, including two HIGH regressions shipped 30 minutes earlier.
+mattered.**
 
 ```bash
 npx next dev -p 3111                      # real .env.local: real Supabase, Vapi, Twilio
 ```
 
-Then drive the real HTTP surface. Three rules learned the hard way:
+Three rules learned the hard way:
 
-- **Never probe production records.** Earlier in this session an exploit was run against the
-  real parent row and wiped its medications and contacts. Create a throwaway household via
-  `save_parent_setup`, drive it, delete it. `security/isolation.ts` is the pattern.
-- **Pause the live households around any cron tick**, restoring in a `finally`. A tick
-  places real phone calls to a real elderly person.
-- **Use non-routable `+1202555xxxx` numbers.** Twilio refuses them, so the notify path runs
-  for real without reaching a handset.
+- **Never probe production records.** Earlier an exploit run against the real parent row
+  wiped its medications and contacts. Create a throwaway household via `save_parent_setup`,
+  drive it, delete it in a `finally`. `security/isolation.ts` is the pattern.
+- **Pause the live household around any cron tick**, restoring in a `finally`. A tick places
+  real phone calls to a real elderly person.
+- **Use non-routable `+1202555xxxx` numbers.** Twilio accepts and never delivers, so the
+  notify path runs for real without reaching a handset.
+
+**Take `now` as an argument.** This is what made the scheduler testable at all. `lib/queue.ts`
+and `lib/slots.ts` accept the current time rather than calling `new Date()`, so
+`security/queue.ts` drives a whole day — materialise, dispatch, expire, cancel — in a few
+seconds against a throwaway household, without touching the clock or running a real tick.
+The old scheduler could only be exercised by a real cron tick, which on this product means
+phoning a real person, so in practice it never was — and it regressed in four of five
+review rounds.
 
 **A passing check proves nothing without a control.** Verify the negative *and* the
-positive — "it didn't dial" is meaningless unless you also show it *would* have dialed with
-one variable changed. One control attempt in this session was itself invalid (a silently
-failed `DELETE` left a stale row blocking the dial for an unrelated reason); `scheduled_meds:
-null` in the output is what gave it away.
+positive. "It didn't dial" is meaningless unless you also show it *would* have dialed with
+one variable changed.
 
-**Mutation-test new guards.** Break the guard, confirm the test fails, restore.
+**Mutation-test new guards.** Break the guard, confirm the test fails, restore. Every guard
+added this session was mutation-tested: silent refusal, a consumed slot, a silent expiry,
+the local-day boundary, the calling-window clamp, and the coverage distinction each break
+their tests when reintroduced.
 
 ---
 
@@ -139,51 +211,95 @@ null` in the output is what gave it away.
 
 - `EVAL_REPEATS=` (empty) → `Number("")` is 0 → every persona reported `✓ 0/0`, suite exited green having run nothing
 - `medicationAccuracy` filtered failures containing `"med"` — `"confirmed"` ends in m-e-d and was excluded, `"missed"` was not, so failing to report every missed dose scored 100%
-- `run.ts` gated only on concern recall, which a model returning pure garbage scores 100% on (unparseable → mood `"unknown"` → counts as alerting)
+- `run.ts` gated only on concern recall, which a model returning pure garbage scores 100% on
 - a missing judge verdict scored every `mustNot` as satisfied
 - injection eval transcripts contained the keywords that made the backstop fire regardless
 - the isolation suite asserted B couldn't read A's appointments — while the fixture seeded none
 - the deletion check issued its own deletes then counted them
 - "deleting one household doesn't touch another" compared `0` to `0`, because B had no household
+- the deletion checks proved a *shared* number's consent survived, but nothing asserted the
+  other half — a `delete_parent_household` that never touched `sms_opt_ins` at all would
+  have passed all 28 checks
+
+**It is still happening.** Two more this session, both in harnesses written the same day:
+
+- a `med()` fixture that ignored its `overrides` argument, so every case in a new suite
+  would have exercised the same default medication
+- an "elapsed" slot seeded exactly `SLOT_CATCHUP_MINUTES` in the past — i.e. precisely at
+  its own expiry — so a control asserting "expiry leaves unexpired slots alone" failed for a
+  reason unrelated to the code under test
 
 Verification code is the one place a bug produces **no symptom**. Give it more suspicion
-than product code, not less. When you write a test, break the thing it guards and watch it
-fail.
+than product code, not less.
+
+---
+
+## The scheduler, after the redesign
+
+`medsDueNow` answered "was this slot ever due today", which stays true for the rest of the
+day after the slot is handled, missed, or abandoned. Everything built on top of it existed
+to reconstruct facts nothing had written down. That is gone. Migration `0033` materialises
+the day's calls as rows with explicit `due_at`/`expires_at`, and the tick is three passes:
+
+```
+lib/slots.ts   planSlotsForDay()  — pure. What today should look like.
+lib/queue.ts   materializeSlots() — write it down (idempotent via unique (parent_id, due_at))
+               dispatchDueSlots() — ring what is due
+               expireLapsedSlots()— account for what lapsed, once
+               cancelPendingSlots() — drop the rest when we stop being responsible
+```
+
+Deleted: `MAX_CATCHUP_MINUTES` (now a per-row `expires_at`), both "too late" branches,
+`hasCoveredCallToday`. 74 insertions, 208 deletions in the tick route.
+
+**Two things the previous handover predicted would disappear, which did not, and must not:**
+
+- **`coverageStartsAt` and `resumed_at` survive.** "This slot already passed" and "were we
+  responsible for it" are different questions. A slot that elapsed during a pause was never
+  ours to miss; a slot that elapsed because the scheduler was down absolutely was, and the
+  family needs telling. Materialising only future slots collapses both into silence — the
+  one direction this product must never fail in. There is a test pair pinning both.
+- **The queue is its own table, not a `'queued'` status on `calls`.** `calls.status` is read
+  by `parents_with_calls` — the consent gate that has been wrong in production three times.
+  A scheduler rewrite and a fourth status on the table that gate reads do not belong in one
+  blast radius.
+
+Two behaviours worth knowing:
+
+- A dispatch that doesn't result in a call (blocked by an in-flight call, a provider error)
+  **releases the slot back to `pending`** rather than consuming it. Expiry is then the single
+  place that declares a slot missed. A consumed slot is a check-in that silently never
+  happens.
+- `expires_at` is `min(due_at + SLOT_CATCHUP_MINUTES, end of the calling window that day)`,
+  so the queue never asks for a dial that `lib/dial.ts` would refuse.
 
 ---
 
 ## Known design debt (deliberate, not forgotten)
 
-**`medsDueNow` is cumulative for the whole local day.** Because "was this slot ever due
-today" stays true after the slot is handled or failed, the scheduler needs
-`MAX_CATCHUP_MINUTES`, two separate "too late" branches with their own inserts and
-fingerprints, `coverageStartsAt` (built from `max(paused_until, resumed_at, first_call_after,
-created_at)`), `hasCoveredCallToday`, and the `resumed_at` column. A queue that materialises
-the day's rows once with explicit `due_at`/`expires_at` deletes all of it.
-
-This is the highest-leverage change in the repo and it was **deliberately not done** at the
-end of a long session: it is a rewrite of the file that regressed in four of five review
-rounds, on the path that calls a real person daily. Do it as the only task in a session,
-with the runtime harness driving it.
-
-Smaller, also deliberate:
-- Existing medication rows outside 08:00–21:00 are rejected on *new* saves only. An old
-  one silently never calls and never alerts. Needs a backfill or a dashboard warning.
-- `retry_count` was overloaded by two different mechanisms; the stale reaper now bounds by
-  age instead, but the column still means "no-answer retries" only.
-- Consent evidence is a log line, not a durable row.
+- Out-of-hours medication rows — see *Open work* 3.
+- Consent evidence — see *Open work* 4.
+- `retry_count` still means "no-answer retries" only. The stale reaper now has its own
+  column (`stale_redial_at`, 0032) and bounds by age.
+- `call_slots` is not surfaced anywhere in the UI. RLS already allows a caregiver to read
+  their own, so a "what's scheduled today" panel is a small change if it's ever wanted.
 
 ---
 
 ## Commands
 
 ```bash
-npm test                  # 126 unit tests
-npm run security          # 28 tenant-isolation checks against real Supabase
+npm test                  # 139 unit tests
+npm run security          # 31 tenant-isolation checks against real Supabase
+npm run security:refusal  # 8 checks: an out-of-hours refusal must alert the family
+npm run security:queue    # 17 checks: the call queue, driven with a controlled clock
 npm run eval              # 19 summarizer cases (costs Anthropic tokens)
 npm run eval:conversation # 8 personas x3 against the real system prompt (costs tokens, slow)
 npx next build
 ```
+
+The three `security*` suites each create and clean up their own throwaway household against
+the real Supabase project. None of them run a cron tick, so none can call a real person.
 
 `npm run eval:conversation` scores `prompts/vapi-system-prompt.txt`, **not** what is live in
 Vapi. A green run on an unpasted change means nothing.
@@ -194,9 +310,13 @@ Vapi. A green run on an unpasted change means nothing.
 
 - The user applies migrations by hand and reports "done". **Always verify via the API
   before trusting it** — this has been wrong more than once, and `0025` partially applied
-  (statement-by-statement) while appearing to fail.
+  (statement-by-statement) while appearing to fail. Verify the *constraints*, not just that
+  the table exists: insert a duplicate and check for 23505, insert a bad enum and check it
+  is rejected, read as anon and check RLS bites, and read as the service role as a control.
 - Never rewrite a SQL function from a partial read. `0025` reconstructed
   `save_parent_setup` from ~16 visible lines of a 90-line body, introduced six differences,
   and took the setup form down in production. Copy the original, edit one clause.
 - Every `drop function` + `create` re-grants EXECUTE to PUBLIC. Re-apply the revoke, or you
-  silently re-open the anon-key hole `0018` was written to close.
+  silently re-open the anon-key hole `0018` was written to close. Nothing in the isolation
+  suite covers `delete_parent_household`'s grants — that was checked by hand this session
+  (anon gets `42501`, service role reaches the body) and is not guarded by anything standing.
