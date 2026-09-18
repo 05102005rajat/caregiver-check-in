@@ -2,7 +2,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { log } from "@/lib/log";
 import { describeLocalTime, isWithinCallingHours } from "@/lib/callwindow";
 import { triggerVapiCall } from "@/lib/vapi";
-import { consentGreeting } from "@/lib/greeting";
+import { consentGreeting, returningGreeting } from "@/lib/greeting";
 import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
@@ -20,8 +20,14 @@ export async function dialAndRecord(
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
   // switch into the consent question — cuts one full back-and-forth out of the call.
   // The wording, and why it is worded that way, lives in lib/greeting.ts.
+  // Set on BOTH branches. Passing undefined for a consented parent meant the line actually
+  // spoken on ~99% of calls came from the Vapi dashboard — so lib/greeting.ts's own promise
+  // ("it lives in one place, a copy drifting would mean scoring a line no one is read") was
+  // false for exactly the common case: the eval suite scored returningGreeting, Vapi spoke
+  // something else, and nothing could tell they had diverged. Three places described an
+  // utterance no code controlled.
   const firstMessage = parent.consent_given_at
-    ? undefined
+    ? returningGreeting(parent.name, parent.preferred_voice)
     : consentGreeting(parent.name, parent.preferred_voice, caregiverName);
 
   // Hard backstop on calling hours. Placed here, at the single point every dial path goes

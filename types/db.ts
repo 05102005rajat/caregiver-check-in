@@ -16,6 +16,12 @@ export interface Parent {
   consent_given_at: string | null;
   /** Set when they explicitly declined. Distinct from "not asked yet", which is both null. */
   consent_refused_at: string | null;
+  /** Caregiver confirmed they told their parent to expect the calls. Advisory only — it
+   *  is never treated as the parent's consent, which only Rosie can obtain on the call. */
+  prewarm_confirmed_at: string | null;
+  /** No call is placed before this instant, so the first one can be timed for when the
+   *  parent is ready. */
+  first_call_after: string | null;
   /** When check-ins were last explicitly resumed. Resume clears paused_until rather than
    *  moving it, so this is the only record that the gap was intentional. */
   resumed_at: string | null;

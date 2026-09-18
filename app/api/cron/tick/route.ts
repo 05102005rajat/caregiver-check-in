@@ -287,6 +287,14 @@ async function processParent(
     return 0;
   }
 
+  // Don't ring before the caregiver said their parent would be ready. The first contact is
+  // otherwise a cold call from a synthetic voice to someone trained to hang up on exactly
+  // that, and being expected is worth more than any wording (see migration 0030).
+  if (parent.first_call_after && new Date(parent.first_call_after) > now) {
+    log.info("cron.before_first_call_window", { parent_id: parent.id, first_call_after: parent.first_call_after });
+    return 0;
+  }
+
   // Consent gate (spec section 8): the very first call always goes out so Rosie can ask
   // for consent. Once at least one call has happened, further automatic scheduled calls
   // wait for consent_given_at to be set (the caregiver's manual test-call button, or a
@@ -462,20 +470,16 @@ async function processParent(
     const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
     const { data: strandedScheduled } = await db
       .from("calls")
-      .select("id, created_at, called_at, vapi_call_id")
+      .select("id")
       .eq("parent_id", parent.id)
       .eq("status", "scheduled")
       .lt("created_at", staleThreshold);
 
-    for (const row of (strandedScheduled ?? []) as Array<{ id: string; created_at: string; called_at: string | null; vapi_call_id: string | null }>) {
-      // called_at is stamped alongside status, not just status. A row is stranded at
-      // 'scheduled' precisely because the post-dial write that sets called_at failed, so
-      // it counts as a prior call *only* through status in ('scheduled','in_progress').
-      // Flipping it to 'failed' therefore removed it from parents_with_calls and re-opened
-      // the gate on the next tick — the same erasure 0025 fixed for no_answer rows, just
-      // by a different route. A dial was genuinely attempted here (dialAndRecord ran), so
-      // recording created_at as the attempt time is honest as well as necessary.
-      // dial_attempted_at already records the attempt durably — see the abandon path above.
+    for (const row of (strandedScheduled ?? []) as Array<{ id: string }>) {
+      // Safe to close out: dial_attempted_at (0027) was written before the dial, so this
+      // cannot erase the consent gate's evidence the way earlier versions did. Keeping the
+      // historical note deliberately — this line has been wrong three times, each time by
+      // reading a value written after the operation that fails.
       const { error } = await db
         .from("calls")
         .update({ status: "failed" })

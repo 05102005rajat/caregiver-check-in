@@ -6,6 +6,7 @@ import CallRow from "./CallRow";
 import PauseControl from "./PauseControl";
 import DangerZone from "./DangerZone";
 import TestCallButton from "./TestCallButton";
+import PrewarmCard from "./PrewarmCard";
 
 export const dynamic = "force-dynamic";
 
@@ -100,6 +101,19 @@ export default async function DashboardPage() {
         <h1 className="text-2xl font-semibold text-slate-900">Dashboard</h1>
         <p className="text-slate-500 mt-1">{parent.name}&apos;s check-in history</p>
       </div>
+
+      {/* Shown only while the first call hasn't happened — after that, pre-warming is moot
+          and the consent banners below take over. */}
+      {!parent.consent_given_at &&
+        !parent.consent_refused_at &&
+        !calls.some((c) => c.dial_attempted_at || c.called_at) && (
+          <PrewarmCard
+            parentName={parent.name}
+            timezone={parent.timezone}
+            confirmedAt={parent.prewarm_confirmed_at}
+            firstCallAfter={parent.first_call_after}
+          />
+        )}
 
       {/* Mirrors the cron's gate exactly (parents_with_calls, migration 0025): a dial was
           attempted, or one is in flight. The old condition here was status <> 'failed',
