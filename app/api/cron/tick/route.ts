@@ -208,7 +208,10 @@ async function processParent(
   // for consent. Once at least one call has happened, further automatic scheduled calls
   // wait for consent_given_at to be set (the caregiver's manual test-call button, or a
   // future call, can still obtain it) rather than repeatedly cold-calling without consent.
-  const consentBlocksNewCalls = ctx.hasPriorCalls && !parent.consent_given_at;
+  // An explicit refusal closes the door immediately, without waiting for a prior call to
+  // exist — Rosie tells them she won't ring again, and that has to be true.
+  const consentBlocksNewCalls =
+    Boolean(parent.consent_refused_at && !parent.consent_given_at) || (ctx.hasPriorCalls && !parent.consent_given_at);
 
   const due = medsDueNow(ctx.medications, parent.timezone, now);
   const distinctSlotTimes = [...new Set(due.map((m) => m.time_of_day))];
@@ -327,7 +330,21 @@ async function processParent(
     await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
   }
 
-  if (ctx.rules) {
+  // Retries sat outside the consent gate, which meant a parent who missed the morning call,
+  // picked up a later one and declined got re-dialled the same day — moments after Rosie
+  // had promised she wouldn't ring again. Any outstanding no-answer rows are closed out
+  // instead, so they don't sit in the queue waiting for consent that isn't coming.
+  if (consentBlocksNewCalls) {
+    const stranded = ctx.noAnswerCalls.map((c) => c.id);
+    if (stranded.length > 0) {
+      const { error } = await db.from("calls").update({ status: "failed" }).in("id", stranded).eq("status", "no_answer");
+      if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, err: error });
+      // Deliberately no "missed call" alert here: the call wasn't missed, it was declined,
+      // and the caregiver was already told that once by the consent webhook. Sending a
+      // daily "we couldn't reach them" on top would be both wrong and nagging.
+      log.info("cron.retries_skipped_no_consent", { parent_id: parent.id, closed: stranded.length });
+    }
+  } else if (ctx.rules) {
     await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now, ctx.watchItems);
   }
 

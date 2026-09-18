@@ -14,6 +14,8 @@ export interface Parent {
   timezone: string;
   preferred_voice: string;
   consent_given_at: string | null;
+  /** Set when they explicitly declined. Distinct from "not asked yet", which is both null. */
+  consent_refused_at: string | null;
   /** Scheduler skips this parent until this instant; null means active. */
   paused_until: string | null;
   created_at: string;

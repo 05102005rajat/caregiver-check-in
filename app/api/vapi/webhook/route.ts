@@ -142,6 +142,28 @@ export async function POST(request: Request) {
   const parentName = parent?.name ?? "your family member";
   const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
 
+  // No consent, no record.
+  //
+  // Consent is granted mid-call via the record_consent tool, so by the time this end-of-call
+  // report arrives, a parent who agreed already has consent_given_at set. If it's still null
+  // this is a call we had no permission to keep: they declined, or hung up before answering,
+  // or never understood the question. Storing the transcript anyway — which is what happened
+  // before — meant the words of someone who had just said "no, don't record me" were written
+  // to our database regardless, which is the violation the refusal was meant to prevent, and
+  // it persisted in our own system rather than only in Vapi's.
+  //
+  // So: keep the fact that a call happened, discard what was said, and don't send it to
+  // Claude either. The caregiver has already been told about a refusal by /api/vapi/consent.
+  if (!parent?.consent_given_at) {
+    const { error } = await db
+      .from("calls")
+      .update({ status: "completed", transcript: null, summary: null })
+      .eq("id", call.id);
+    if (error) log.error("webhook.no_consent_discard_failed", { call_id: call.id, err: error });
+    log.info("webhook.transcript_discarded_no_consent", { call_id: call.id, parent_id: call.parent_id });
+    return NextResponse.json({ ok: true });
+  }
+
   // Meds this specific call was actually for, so Claude's med-name output can be checked
   // against reality rather than trusted outright (see isKnownMed below). Prefer the
   // snapshot taken when the call was created (immune to later medication edits); fall

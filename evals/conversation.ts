@@ -53,8 +53,6 @@ interface Persona {
   /** What Rosie must not do. Checked by the judge. */
   mustNot: string[];
   vars?: Partial<typeof BASE_VARS>;
-  /** Overrides the opening line — first calls open with the consent ask instead. */
-  opening?: string;
 }
 
 
@@ -179,7 +177,6 @@ async function runCall(persona: Persona): Promise<string> {
 
   const transcript: string[] = [];
   const opening =
-    persona.opening ??
     (vars.consent_already_given === "false"
       ? // The exact line Vapi speaks, not a copy of it — see lib/greeting.ts.
         consentGreeting(vars.parent_name, vars.assistant_name, vars.family_setup_by)
@@ -263,11 +260,43 @@ ${transcript}
   });
 }
 
-/** One persona, run once. */
-async function runOnce(persona: Persona) {
-  const transcript = await runCall(persona);
-  const verdicts = await judge(persona, transcript);
-  return { transcript, failed: verdicts.filter((v) => !v.satisfied) };
+interface RunResult {
+  transcript: string;
+  failed: Verdict[];
+}
+
+/**
+ * One persona, run once. Never throws: judge() rejects by design on a malformed response,
+ * and a 429 rejects too. Propagating either would take down every other persona's results
+ * with it, so a broken run is recorded as a failed run instead of an aborted suite.
+ */
+async function runOnce(persona: Persona): Promise<RunResult> {
+  try {
+    const transcript = await runCall(persona);
+    const verdicts = await judge(persona, transcript);
+    return { transcript, failed: verdicts.filter((v) => !v.satisfied) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      transcript: `(run failed: ${message})`,
+      failed: [{ criterion: "completed a run at all", kind: "must", satisfied: false, evidence: message }],
+    };
+  }
+}
+
+/** Runs tasks with at most `limit` in flight. */
+async function pooled<T>(tasks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
+  const results = new Array<T>(tasks.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+      while (next < tasks.length) {
+        const i = next++;
+        results[i] = await tasks[i]!();
+      }
+    })
+  );
+  return results;
 }
 
 async function main() {
@@ -280,15 +309,31 @@ async function main() {
   // is a coin flip, not a verdict — an early version of this suite reported a different
   // set of failures on two consecutive runs of identical code. Repeat each persona and
   // report a rate, so a real regression is distinguishable from sampling noise.
-  const repeats = Number(process.env.EVAL_REPEATS ?? 3);
+  // `Number(process.env.X ?? 3)` only defaults on *unset*: EVAL_REPEATS= (empty, which is
+  // what an unfilled .env line or CI variable gives you) is 0, and anything non-numeric is
+  // NaN. Either way Array.from({length}) produces no runs, every persona reports "0/0",
+  // and the suite exits 0 having tested nothing — a green light on a safety-critical
+  // behaviour suite that never ran.
+  const raw = process.env.EVAL_REPEATS;
+  const repeats = raw === undefined || raw === "" ? 3 : Number(raw);
+  if (!Number.isInteger(repeats) || repeats < 1) {
+    console.error(`EVAL_REPEATS must be a whole number >= 1 (got ${JSON.stringify(raw)}).`);
+    process.exit(1);
+  }
   console.log(`Running ${PERSONAS.length} personas × ${repeats} against ${MODEL}…\n`);
 
-  const results = await Promise.all(
-    PERSONAS.map(async (persona) => {
-      const runs = await Promise.all(Array.from({ length: repeats }, () => runOnce(persona)));
-      return { persona, runs };
-    })
+  // Every conversation is ~15 sequential API calls, so fanning all of them out at once
+  // (personas x repeats) burst-fires hundreds of requests and gets rate limited. Cap the
+  // number of conversations in flight instead.
+  const CONCURRENCY = Number(process.env.EVAL_CONCURRENCY ?? 4);
+  const jobs = PERSONAS.flatMap((persona) =>
+    Array.from({ length: repeats }, () => async () => ({ persona, run: await runOnce(persona) }))
   );
+  const settled = await pooled(jobs, CONCURRENCY);
+  const results = PERSONAS.map((persona) => ({
+    persona,
+    runs: settled.filter((s) => s.persona === persona).map((s) => s.run),
+  }));
 
   let shaky = 0;
   let broken = 0;
