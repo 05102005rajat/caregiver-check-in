@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
+import { CONSENT_VERSION } from "@/lib/consent";
 
 export const dynamic = "force-dynamic";
 
@@ -108,7 +109,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, result: "Sorry, something went wrong on our end." }, { status: 500 });
   }
 
-  log.info("consent.recorded", { parent_id: parentId, from: priorState, to: nextState });
+  // What we ASKED is the evidence worth keeping, and it is our own words rather than
+  // theirs. Audio is not retained by design, and a refusal discards the transcript — so
+  // without this line, evidence exists exactly where it is least needed (consented calls)
+  // and nowhere it is most needed (a disputed refusal, or a consent the model misread).
+  // Logging the wording version rather than storing the person's speech keeps the record
+  // on our side of the conversation, which is the only side we have any business retaining
+  // from someone who just declined.
+  log.info("consent.recorded", {
+    parent_id: parentId,
+    from: priorState,
+    to: nextState,
+    consent_wording_version: CONSENT_VERSION,
+    asked_via: "consentGreeting",
+  });
 
   if (nextState === "refused" && priorState !== "refused") {
     const isWithdrawal = priorState === "given";
