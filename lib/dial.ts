@@ -1,6 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { log } from "@/lib/log";
 import { triggerVapiCall } from "@/lib/vapi";
+import { consentGreeting } from "@/lib/greeting";
 import { formatAppointments, formatMeds, formatWatchItems } from "@/lib/format";
 import type { Appointment, Medication, Parent, WatchItem } from "@/types/db";
 
@@ -17,9 +18,10 @@ export async function dialAndRecord(
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
   // switch into the consent question — cuts one full back-and-forth out of the call.
+  // The wording, and why it is worded that way, lives in lib/greeting.ts.
   const firstMessage = parent.consent_given_at
     ? undefined
-    : `Hi ${parent.name}, it's ${parent.preferred_voice} calling for your check-in. This call may be recorded so your family can see a summary later — is that okay?`;
+    : consentGreeting(parent.name, parent.preferred_voice, caregiverName);
 
   let vapiCall;
   try {
