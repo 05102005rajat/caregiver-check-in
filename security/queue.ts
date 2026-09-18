@@ -202,6 +202,57 @@ async function main() {
     await materializeSlots(admin as never, parent, ctx, realNow);
     slots = await slotsOf(pid);
 
+    // ---- an incomplete source read must not DIAL either ----
+    // materializeSlots refusing to reconcile is only half of it. ctx.medications defaulted
+    // to [] resolves every snapshot to no medications, so dispatching would ring the parent
+    // and never mention the pills — and the slot is consumed, the calls row is unique on
+    // (parent_id, scheduled_for) so it can't be re-dialled, and the webhook records no
+    // missed doses. The call reads as a clean check-in that asked nothing.
+    const dueBefore = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
+    const triggeredBlind = await dispatchDueSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: false }, realNow);
+    const dueAfter = (await slotsOf(pid)).filter((s) => s.state === "pending").length;
+    check(
+      "an incomplete source read places no call and consumes no slot",
+      triggeredBlind === 0 && dueAfter === dueBefore,
+      `${triggeredBlind} calls, ${dueBefore} -> ${dueAfter} pending`
+    );
+
+    // ---- an appointment reminder yields to a call that already covered the day ----
+    const apptDue = new Date(realNow.getTime() - 10 * 60000).toISOString();
+    const { data: apptSlot } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: apptDue, expires_at: new Date(realNow.getTime() + 60 * 60000).toISOString(),
+        kind: "appointment", med_names: [], state: "pending",
+      })
+      .select("id")
+      .single();
+    const { data: covering } = await admin
+      .from("calls")
+      .insert({ parent_id: pid, scheduled_for: new Date(realNow.getTime() - 3 * 60 * 60000).toISOString(), status: "completed", called_at: new Date(realNow.getTime() - 3 * 60 * 60000).toISOString() })
+      .select("id")
+      .single();
+    await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { data: apptAfter } = await admin.from("call_slots").select("state").eq("id", apptSlot!.id).single();
+    check(
+      "an appointment reminder is cancelled when a call already covered the day",
+      apptAfter!.state === "cancelled",
+      `state=${apptAfter!.state} — the parent gets a second call the old scheduler suppressed`
+    );
+
+    // Control: with nothing covering the day it must NOT be cancelled, or the check above is
+    // satisfied by a dispatch that cancels every appointment slot unconditionally.
+    await admin.from("calls").delete().eq("id", covering!.id);
+    await admin.from("call_slots").update({ state: "pending" }).eq("id", apptSlot!.id);
+    await admin.from("calls").delete().eq("parent_id", pid).in("status", ["scheduled", "in_progress"]);
+    await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { data: apptUncovered } = await admin.from("call_slots").select("state").eq("id", apptSlot!.id).single();
+    check(
+      "an appointment reminder is NOT cancelled when nothing covered the day (control)",
+      apptUncovered!.state !== "cancelled",
+      `state=${apptUncovered!.state} — a parent whose medication slot lapsed gets no call at all`
+    );
+
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);
     slots = await slotsOf(pid);

@@ -55,6 +55,34 @@ async function alreadyNotified(
   return Boolean(recent);
 }
 
+/**
+ * Whether we have already recorded that this recipient is opted out of this exact alert.
+ * Separate from alreadyNotified because an opt-out is written as status 'failed', which
+ * that check deliberately ignores — a failed send should be retried, a refusal to send
+ * should not be re-recorded.
+ */
+async function alreadySuppressed(
+  db: ReturnType<typeof createAdminClient>,
+  parentId: string,
+  recipient: string,
+  fingerprint: string | undefined,
+  since: string
+): Promise<boolean> {
+  if (!fingerprint) return false;
+  const { data } = await db
+    .from("messages")
+    .select("id")
+    .eq("parent_id", parentId)
+    .eq("fingerprint", fingerprint)
+    .eq("recipient", recipient)
+    .eq("status", "failed")
+    .eq("delivery_status", "undelivered")
+    .gte("sent_at", since)
+    .limit(1)
+    .maybeSingle();
+  return Boolean(data);
+}
+
 async function sendAlert(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
@@ -102,7 +130,15 @@ async function sendAlert(
     }
   };
 
-  if (await alreadyNotified(db, parentId, phone, fingerprint, since)) {
+  if (await alreadySuppressed(db, parentId, phone, fingerprint, since)) {
+    // Already recorded as opted out for this exact alert. The household-wide early return
+    // used to stop the whole function before reaching here; per-recipient dedupe only looks
+    // at `sent`, so without this every path sharing a fingerprint (dial refusal, slot
+    // expiry, stale reaper) inserted another "opted out" row for the same person and the
+    // same slot, padding the operator's failed-notification view with duplicates of a
+    // message that was never going to be sent.
+    log.info("notify.suppressed_duplicate_optout", { parent_id: parentId, call_id: callId, fingerprint, recipient: phone });
+  } else if (await alreadyNotified(db, parentId, phone, fingerprint, since)) {
     // Deliberately records nothing: a duplicate is the absence of a new message, not a new
     // event, and inserting a row for it would be a second `sent`-shaped fact about a text
     // that was never sent.

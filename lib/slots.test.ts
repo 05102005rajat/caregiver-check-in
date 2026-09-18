@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsByName, medsForNearestSlot, planSlotsForDay } from "./slots";
+import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsForNearestSlot, medsForSlot, planSlotsForDay } from "./slots";
 import { isWithinCallingHours } from "./callwindow";
 import type { Appointment, Medication } from "@/types/db";
 
@@ -72,11 +72,15 @@ describe("planSlotsForDay", () => {
     expect(slot.expiresAt.getTime() - slot.dueAt.getTime()).toBeLessThan(SLOT_CATCHUP_MINUTES * 60000);
   });
 
-  it("never plans a slot that is already past its own expiry at planning time", () => {
-    for (const timeOfDay of ["08:00:00", "12:00:00", "16:00:00", "20:00:00", "20:45:00"]) {
+  it("never lets a slot outlive the calling window it belongs to", () => {
+    // The real property. An earlier version of this test asserted only
+    // isWithinCallingHours(dueAt) — the exact predicate the planner already filters on, so
+    // it restated the filter instead of checking the expiry, and could not fail.
+    for (const timeOfDay of ["08:00:00", "12:00:00", "16:00:00", "20:00:00", "20:45:00", "20:59:00"]) {
       for (const { dueAt, expiresAt } of planSlotsForDay([med({ time_of_day: timeOfDay })], [], TZ, NOW, COVERED_SINCE).slots) {
         expect(expiresAt.getTime()).toBeGreaterThan(dueAt.getTime());
-        expect(isWithinCallingHours(dueAt, TZ)).toBe(true);
+        // 21:00 PDT on the slot's own day, i.e. the window close — never past it.
+        expect(expiresAt.getTime()).toBeLessThanOrEqual(new Date("2026-09-11T04:00:00.000Z").getTime());
       }
     }
   });
@@ -109,16 +113,23 @@ describe("planSlotsForDay", () => {
     expect(uncallable).toEqual([{ reason: "outside_calling_hours", timeOfDay: "22:48:00", medNames: ["m1"] }]);
   });
 
-  it("plans an appointment reminder only when the day has no medication call", () => {
-    const withMeds = planSlotsForDay([med({ time_of_day: "09:00:00" })], [appt()], TZ, NOW, COVERED_SINCE);
-    expect(withMeds.slots.every((s) => s.kind === "medication")).toBe(true);
+  it("plans an appointment reminder for a parent with no medications at all", () => {
+    // The appointment-only parent the fallback exists for, who would otherwise never be
+    // called.
+    const { slots } = planSlotsForDay([], [appt()], TZ, NOW, COVERED_SINCE);
+    expect(slots).toHaveLength(1);
+    expect(slots[0].kind).toBe("appointment");
+    expect(slots[0].appointmentId).toBe("a1");
+  });
 
-    // Same appointment, no medications: this is the appointment-only parent the fallback
-    // exists for, who would otherwise never be called at all.
-    const withoutMeds = planSlotsForDay([], [appt()], TZ, NOW, COVERED_SINCE);
-    expect(withoutMeds.slots).toHaveLength(1);
-    expect(withoutMeds.slots[0].kind).toBe("appointment");
-    expect(withoutMeds.slots[0].appointmentId).toBe("a1");
+  it("plans the appointment reminder even when the day already has a medication slot", () => {
+    // Deliberately NOT suppressed here. Whether the second call is wanted depends on
+    // whether the first actually happened, which only dispatch can know: gating on "a
+    // medication slot exists" meant a parent whose 09:00 slot lapsed unrung got no call at
+    // all that day and no appointment reminder either. dispatchDueSlots cancels it when a
+    // call has already covered the day.
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [appt()], TZ, NOW, COVERED_SINCE);
+    expect(slots.map((s) => s.kind).sort()).toEqual(["appointment", "medication"]);
   });
 
   it("plans at most ONE appointment reminder a day, the earliest", () => {
@@ -226,19 +237,36 @@ describe("medsForNearestSlot", () => {
   });
 });
 
-describe("medsByName", () => {
+describe("medsForSlot", () => {
+  // 08:00 and 18:00 PDT on 2026-09-10.
+  const morning = new Date("2026-09-10T15:00:00Z");
+  const evening = new Date("2026-09-11T01:00:00Z");
+  const meds = [
+    med({ id: "m1", name: "Insulin", dose: "10 units", time_of_day: "08:00:00" }),
+    med({ id: "m2", name: "Insulin", dose: "20 units", time_of_day: "18:00:00" }),
+  ];
+
   it("returns one row per name even when a medication is taken twice a day", () => {
-    // Nothing rejects the same medication at two times — validation only rejects the same
-    // name at the same time. A plain filter matched both rows against the 08:00 slot's
-    // ["Insulin"] snapshot, and Rosie was told to ask about "Insulin and Insulin".
-    const meds = [
-      med({ id: "m1", name: "Insulin", time_of_day: "08:00:00" }),
-      med({ id: "m2", name: "Insulin", time_of_day: "18:00:00" }),
-    ];
-    expect(medsByName(meds, ["Insulin"])).toHaveLength(1);
+    // A plain filter matched both rows against one slot's ["Insulin"] snapshot, and Rosie
+    // was told to ask about "Insulin and Insulin".
+    expect(medsForSlot(meds, ["Insulin"], morning, TZ)).toHaveLength(1);
+  });
+
+  it("returns the row for THIS slot's time, not the first one with that name", () => {
+    // find-by-name returned the 08:00 row for the evening slot, so Rosie would state the
+    // morning dose on the evening call. Confusing became wrong.
+    expect(medsForSlot(meds, ["Insulin"], evening, TZ)[0].dose).toBe("20 units");
+    expect(medsForSlot(meds, ["Insulin"], morning, TZ)[0].dose).toBe("10 units");
+  });
+
+  it("falls back to the name when no medication matches that time any more", () => {
+    // The snapshot predates an edit that moved the dose. The name is the best evidence left
+    // of what the call was for, so the slot still names something rather than nothing.
+    const moved = [med({ id: "m1", name: "Insulin", dose: "10 units", time_of_day: "09:30:00" })];
+    expect(medsForSlot(moved, ["Insulin"], morning, TZ).map((m) => m.name)).toEqual(["Insulin"]);
   });
 
   it("drops a name whose medication no longer exists", () => {
-    expect(medsByName([med({ name: "Kept" })], ["Kept", "Deleted"]).map((m) => m.name)).toEqual(["Kept"]);
+    expect(medsForSlot([med({ name: "Kept" })], ["Kept", "Deleted"], morning, TZ).map((m: Medication) => m.name)).toEqual(["Kept"]);
   });
 });

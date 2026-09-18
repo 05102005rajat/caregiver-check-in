@@ -1,7 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { appointmentsToday, formatLocalTime, localDayBoundsUtc } from "@/lib/schedule";
-import { coverageStartsAt, medsByName, planSlotsForDay } from "@/lib/slots";
+import { coverageStartsAt, medsForSlot as resolveMedsForSlot, planSlotsForDay } from "@/lib/slots";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { tooLateFingerprint } from "@/lib/insights";
@@ -39,6 +39,28 @@ export interface QueueContext {
    * anyone.
    */
   sourcesComplete: boolean;
+}
+
+/**
+ * Whether a call already exists today (the parent's local day) that either actually
+ * connected (called_at set) or is still pending. Deleted when the queue replaced the old
+ * scheduler, and restored here because the question it answers is real and cannot be
+ * answered at planning time: "has this parent already been rung today, so that the
+ * appointment was mentioned?" is a fact about what happened, not about what was planned.
+ */
+async function hasCoveredCallToday(
+  db: ReturnType<typeof createAdminClient>,
+  parent: Parent,
+  now: Date
+): Promise<boolean> {
+  const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
+  const { data } = await db
+    .from("calls")
+    .select("called_at, status")
+    .eq("parent_id", parent.id)
+    .gte("scheduled_for", startUtc.toISOString())
+    .lte("scheduled_for", endUtc.toISOString());
+  return (data ?? []).some((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
 }
 
 /**
@@ -163,6 +185,16 @@ export async function dispatchDueSlots(
   ctx: QueueContext,
   now: Date
 ): Promise<number> {
+  if (!ctx.sourcesComplete) {
+    // materializeSlots already refuses to reconcile without a good read; dialling is worse.
+    // ctx.medications defaulted to [] resolves every slot's snapshot to no medications, so
+    // Rosie rings and never mentions the pills — and the slot is consumed, the calls row is
+    // unique on (parent_id, scheduled_for) so it cannot be re-dialled, and the webhook
+    // records no missed doses. The call reads as a clean check-in that asked nothing.
+    log.warn("cron.dispatch_skipped_incomplete_sources", { parent_id: parent.id });
+    return 0;
+  }
+
   // A claim writes 'dispatched' before the dial. If the invocation dies in between — a
   // Vercel timeout, a crash — the slot matches neither the dispatch query (pending) nor the
   // expiry query (pending) and sits there forever: no call, no alert, no trace. `calls` rows
@@ -210,7 +242,22 @@ export async function dispatchDueSlots(
       .maybeSingle();
     if (!claimed) continue;
 
-    const medsForSlot = medsByName(ctx.medications, slot.med_names);
+    // Whether a second call is wanted depends on whether the first one actually happened.
+    // The planner can't know that, so it always plans the reminder and this cancels it —
+    // the job hasCoveredCallToday used to do, now asked at the only moment the answer is
+    // real. A medication slot that lapsed unrung leaves the day uncovered, and then the
+    // appointment reminder is the only call that parent gets.
+    if (slot.kind === "appointment" && (await hasCoveredCallToday(db, parent, now))) {
+      await db
+        .from("call_slots")
+        .update({ state: "cancelled", updated_at: now.toISOString() })
+        .eq("id", slot.id)
+        .eq("state", "dispatched");
+      log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id });
+      continue;
+    }
+
+    const medsForSlot = resolveMedsForSlot(ctx.medications, slot.med_names, new Date(slot.due_at), parent.timezone);
     const outcome = await scheduleAndDial(
       db,
       parent,
@@ -347,7 +394,12 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       continue;
     }
 
-    await db.from("call_slots").update({ call_id: callId, updated_at: new Date().toISOString() }).eq("id", slot.id);
+    const { error: linkError } = await db
+      .from("call_slots")
+      .update({ call_id: callId, updated_at: new Date().toISOString() })
+      .eq("id", slot.id)
+      .eq("state", "expired");
+    if (linkError) log.error("cron.expired_slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
 
     const time = formatLocalTime(new Date(slot.due_at), parent.timezone);
     const body =

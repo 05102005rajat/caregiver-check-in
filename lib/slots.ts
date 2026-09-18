@@ -1,5 +1,5 @@
 import { callingWindowEnd, isWithinCallingHours } from "@/lib/callwindow";
-import { appointmentsToday, localDayBoundsUtc, medsDueNow, reminderSlotFor, scheduledForToday } from "@/lib/schedule";
+import { appointmentsToday, localDayBoundsUtc, medsAtLocalTime, medsDueNow, reminderSlotFor, scheduledForToday } from "@/lib/schedule";
 import type { Appointment, Medication } from "@/types/db";
 
 /**
@@ -125,11 +125,17 @@ export function planSlotsForDay(
   // medication slot, the appointment is spoken about on that call (appointments_today is
   // passed to every dial), so a second call would be the double-call that
   // hasCoveredCallToday used to prevent with an extra query per parent per tick.
-  if (slots.length === 0) {
+  {
     // At most ONE reminder call, the earliest. Looping every appointment into its own slot
-    // meant a parent with no medications and appointments at 10:00, 14:00 and 16:00 was rung
-    // three times in a day — the double-calling hasCoveredCallToday used to prevent. Every
-    // dial already carries appointments_today, so the first call names all of them.
+    // rang an appointment-only parent three times in a day. Every dial carries
+    // appointments_today, so one call names all of them.
+    //
+    // Planned even when the day already has a medication slot, and NOT skipped here. Whether
+    // a second call is wanted depends on whether the first one actually happened, which is a
+    // fact about the world at dispatch time, not something the planner can know: gating on
+    // "a medication slot exists" meant a parent whose 09:00 slot lapsed unrung got no call
+    // at all that day and no appointment reminder either. dispatchDueSlots cancels this slot
+    // if a call has already covered the day — which is what hasCoveredCallToday did.
     const candidates = appointmentsToday(appointments, timezone, now)
       // Window-aware: returns null when no reminder could be placed at a reasonable hour.
       .map((appointment) => ({ appointment, dueAt: reminderSlotFor(appointment, timezone) }))
@@ -203,16 +209,29 @@ export function medsForNearestSlot(medications: Medication[], timezone: string, 
 }
 
 /**
- * Resolves a slot's snapshot of medication names back to rows — one row per name.
+ * Resolves a slot's snapshot of medication names back to rows — one row per name, and the
+ * row belonging to THIS slot's time.
  *
- * `medications.filter(m => names.includes(m.name))` looks equivalent and is not: a parent
- * taking Insulin at 08:00 and 18:00 has two rows with that name, so the 08:00 slot's
- * ["Insulin"] snapshot matched both and Rosie was told to ask about "Insulin and Insulin".
- * Nothing rejects the same medication at two times — validation only rejects the same
- * name at the same time.
+ * Both simpler versions are wrong when the same medication is taken twice a day, which
+ * nothing prevents (validation only rejects the same name at the same *time*):
+ *
+ *   filter(m => names.includes(m.name))   -> both rows match, so Rosie is told to ask about
+ *                                            "Insulin and Insulin"
+ *   find(m => m.name === name)            -> the FIRST row wins, so the 18:00 slot speaks
+ *                                            the 08:00 dose. Confusing became wrong.
+ *
+ * Matching on time_of_day first picks the right one. The name-only fallback covers a slot
+ * whose snapshot predates an edit to the schedule — the name is then the best evidence left
+ * of what the call was for.
  */
-export function medsByName(medications: Medication[], names: string[]): Medication[] {
+export function medsForSlot(
+  medications: Medication[],
+  names: string[],
+  scheduledFor: Date,
+  timezone: string
+): Medication[] {
+  const atThisTime = medsAtLocalTime(medications, scheduledFor, timezone);
   return names
-    .map((name) => medications.find((m) => m.name === name))
+    .map((name) => atThisTime.find((m) => m.name === name) ?? medications.find((m) => m.name === name))
     .filter((m): m is Medication => Boolean(m));
 }

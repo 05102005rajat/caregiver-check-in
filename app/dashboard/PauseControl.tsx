@@ -71,6 +71,12 @@ export default function PauseControl({
               day: "numeric",
               hour: "numeric",
               minute: "2-digit",
+              // In the PARENT's zone, with the zone named. "Today" resolves to their next
+              // local midnight, so rendering it in the viewer's zone told a caregiver in
+              // London that clicking "Today" paused their mother until "8:00 AM" — the same
+              // label-contradicts-banner bug, one layer over.
+              timeZone: timezone,
+              timeZoneName: "short",
             })}
           </strong>
           . {parentName} won&apos;t be called and no alerts will be sent.

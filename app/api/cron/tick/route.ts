@@ -4,7 +4,7 @@ import { dialAndRecord, scheduleAndDial } from "@/lib/dial";
 import { retryDecision } from "@/lib/retry";
 import { isWithinCallingHours } from "@/lib/callwindow";
 import { appointmentsToday, formatLocalTime, medsAtLocalTime } from "@/lib/schedule";
-import { SLOT_CATCHUP_MINUTES, medsByName } from "@/lib/slots";
+import { SLOT_CATCHUP_MINUTES, medsForSlot as resolveMedsForSlot } from "@/lib/slots";
 import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
 import { formatAppointments, formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
@@ -107,7 +107,7 @@ async function processRetries(
 
     const scheduledFor = new Date(call.scheduled_for);
     const medsForSlot = call.scheduled_meds
-      ? medsByName(medications, call.scheduled_meds)
+      ? resolveMedsForSlot(medications, call.scheduled_meds, scheduledFor, parent.timezone)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
 
     if (nextStatus === "failed") {
@@ -292,7 +292,7 @@ async function reapStaleScheduled(
     }
 
     const medsForSlot = row.scheduled_meds
-      ? medsByName(medications, row.scheduled_meds)
+      ? resolveMedsForSlot(medications, row.scheduled_meds, scheduledFor, parent.timezone)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
     await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
   }
@@ -355,7 +355,11 @@ async function processParent(
     callsTriggered = await dispatchDueSlots(db, parent, ctx, now);
     await expireLapsedSlots(db, parent, now);
 
-    await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
+    // Skipped on an incomplete read for the same reason as dispatch: this path re-dials,
+    // and an empty medication list would place a call that asks about nothing.
+    if (ctx.sourcesComplete) {
+      await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
+    }
   } else {
     // A parent who declined, or who hasn't consented after a first call, must not have
     // yesterday's queue quietly expire into "missed check-in" texts about calls the
