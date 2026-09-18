@@ -39,6 +39,12 @@ export interface QueueContext {
    * anyone.
    */
   sourcesComplete: boolean;
+  /**
+   * When the scheduler last completed a tick, or null if unknown. Used to tell a slot that
+   * lapsed because we were down (a real missed check-in) from one that only appeared after
+   * its deadline because the caregiver edited the setup form (not a miss at all).
+   */
+  lastTickAt: Date | null;
 }
 
 /**
@@ -86,7 +92,15 @@ async function coveringCallToday(
   // second active call, so an appointment slot dispatched while a medication call is
   // genuinely in flight gets `already_scheduled` and is released to try again later, by
   // which time the medication call has completed and does count as covering.
-  const COVERING_STATUSES = new Set(["completed", "in_progress"]);
+  // 'completed' only. 'in_progress' was kept as "a real conversation", but a call that is
+  // ringing and will end no_answer is in_progress for its entire life — and a retry sets
+  // in_progress too. An appointment slot becoming due during one was written dispatched
+  // against it, which makes it invisible to both the dispatch and expiry queries forever,
+  // so when that call ended no_answer the reminder was never placed and never reported.
+  // Nothing is lost by waiting: calls_parent_active_unique rejects a second active call, so
+  // the slot is released with already_scheduled and reconsidered once the call has an
+  // outcome — covered if it completed, still due if it did not.
+  const COVERING_STATUSES = new Set(["completed"]);
   const covering = (data ?? []).find((c) => COVERING_STATUSES.has(c.status ?? ""));
   return { covered: Boolean(covering), callId: (covering?.id as string) ?? null };
 }
@@ -110,7 +124,14 @@ export async function materializeSlots(
     return false;
   }
 
-  const { slots, uncallable } = planSlotsForDay(ctx.medications, ctx.appointments, parent.timezone, now, coverageStartsAt(parent));
+  const { slots, uncallable } = planSlotsForDay(
+    ctx.medications,
+    ctx.appointments,
+    parent.timezone,
+    now,
+    coverageStartsAt(parent),
+    ctx.lastTickAt
+  );
 
   for (const skipped of uncallable) {
     // A medication time that predates the calling-hours check in lib/validation.ts. It can

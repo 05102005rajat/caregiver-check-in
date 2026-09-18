@@ -103,7 +103,7 @@ async function main() {
     const { data: parentRow } = await admin.from("parents").select("*").eq("id", pid).single();
     const parent = parentRow as Parent;
     const { data: medRows } = await admin.from("medications").select("*").eq("parent_id", pid);
-    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [], sourcesComplete: true };
+    const ctx = { caregiverName: "Queue Probe", medications: (medRows ?? []) as Medication[], appointments: [], watchItems: [], sourcesComplete: true, lastTickAt: null };
 
     // ---- materialise ----
     await materializeSlots(admin as never, parent, ctx, realNow);

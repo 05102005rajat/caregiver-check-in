@@ -119,14 +119,21 @@ async function sendAlert(
     .not("revoked_at", "is", null)
     .limit(1)
     .maybeSingle();
+  // Three states, not two. Failing closed on a read error is right — treating it as "no
+  // opt-out on file" texts someone who sent STOP, which is a compliance breach rather than
+  // a degraded experience. But the previous version folded the error into `suppressed`, and
+  // the suppressed branch RECORDS a row saying `status:'failed'`,
+  // `delivery_status:'undelivered'`, "Recipient has opted out" — which is exactly what
+  // alreadySuppressed matches. So one transient read wrote a permanent-looking consent fact
+  // that silenced every later path sharing that fingerprint for the whole dedupe window,
+  // and told the operator the caregiver had opted out when they had not.
+  //
+  // Unknown now means: don't send, don't record anything, let the next attempt decide.
   if (optOutError) {
-    // Fails CLOSED, and this is the one place in this file where that is not a judgement
-    // call. Treating a failed read as "no opt-out on file" texts someone who sent STOP,
-    // which is a compliance violation and a broken promise, not a degraded experience.
-    // A missed alert to this recipient is recoverable; an unlawful message is not.
     log.error("notify.opt_out_lookup_failed", { parent_id: parentId, call_id: callId, recipient: phone, err: optOutError });
   }
-  const suppressed = Boolean(optOut) || Boolean(optOutError);
+  const optOutUnknown = Boolean(optOutError);
+  const suppressed = Boolean(optOut);
   if (suppressed) {
     log.info("notify.suppressed_opt_out", { parent_id: parentId, call_id: callId, recipient: phone });
   }
@@ -152,7 +159,9 @@ async function sendAlert(
     }
   };
 
-  if (await alreadySuppressed(db, parentId, phone, fingerprint, since)) {
+  if (optOutUnknown) {
+    // Nothing written: no message, and no row that a later attempt would read as consent.
+  } else if (await alreadySuppressed(db, parentId, phone, fingerprint, since)) {
     // Already recorded as opted out for this exact alert. The household-wide early return
     // used to stop the whole function before reaching here; per-recipient dedupe only looks
     // at `sent`, so without this every path sharing a fingerprint (dial refusal, slot
@@ -255,10 +264,15 @@ export async function notifyFamilyContacts(
   // how the account holder ended up never being told.
   const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
 
-  const [{ data: contacts }, { data: parentRow }] = await Promise.all([
+  const [{ data: contacts, error: contactsError }, { data: parentRow, error: parentError }] = await Promise.all([
     db.from("family_contacts").select("*").eq("parent_id", parentId).eq(flag, true),
     db.from("parents").select("caregiver_id").eq("id", parentId).single(),
   ]);
+  // These two gate everything below them. A failed contacts read notifies no family
+  // contact; a failed parents read drops the account holder as well, so the entire alert
+  // evaporates with nothing logged — the shape the rest of this file was just audited for.
+  if (contactsError) log.error("notify.contacts_lookup_failed", { parent_id: parentId, call_id: callId, err: contactsError });
+  if (parentError) log.error("notify.parent_lookup_failed", { parent_id: parentId, call_id: callId, err: parentError });
 
   for (const contact of (contacts ?? []) as FamilyContact[]) {
     await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since);

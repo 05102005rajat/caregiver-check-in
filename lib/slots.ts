@@ -62,6 +62,30 @@ function expiryFor(dueAt: Date, timezone: string, notAfter?: Date): Date {
 }
 
 /**
+ * Whether a slot appeared only after its own deadline had already passed, through no
+ * failure of ours — in which case reporting it as a missed check-in would be a fabrication.
+ *
+ * A caregiver adding "Metformin, 09:00" at 14:00 is an ordinary thing to do, and the
+ * household-level coverage window says nothing about it: the slot materialises at 09:00
+ * already past its expiry, the same tick expires it, and the whole family gets a safety
+ * alert about a dose that did not exist that morning. Editing the setup form should not
+ * manufacture a missed check-in.
+ *
+ * The medication row cannot answer this — save_parent_setup deletes and re-inserts every
+ * row on every save, so its age resets whenever anything is edited. The scheduler's own
+ * heartbeat can: if we were ticking while that slot lapsed and never queued it, the dose
+ * was not there to queue. If we were NOT ticking, the slot may well have been real and
+ * missed because we were down, which is exactly the outage this queue exists to report.
+ *
+ * Unknown heartbeat means report it. Silence is the failure that matters.
+ */
+function neverOurs(dueAt: Date, expiresAt: Date, now: Date, lastTickAt: Date | null): boolean {
+  if (expiresAt.getTime() > now.getTime()) return false; // still live; nothing to fabricate
+  if (!lastTickAt) return false;
+  return lastTickAt.getTime() >= expiresAt.getTime();
+}
+
+/**
  * The slots that should exist for this parent's local day.
  *
  * Idempotent by construction: it describes the day, and the unique (parent_id, due_at)
@@ -79,7 +103,8 @@ export function planSlotsForDay(
   appointments: Appointment[],
   timezone: string,
   now: Date,
-  coverageStartsAt: Date
+  coverageStartsAt: Date,
+  lastTickAt: Date | null = null
 ): SlotPlan {
   const slots: PlannedSlot[] = [];
   const uncallable: UncallableSlot[] = [];
@@ -94,14 +119,15 @@ export function planSlotsForDay(
   // silently dropped from today's queue.
   const { endUtc: endOfLocalDay } = localDayBoundsUtc(timezone, now);
   const activeToday = medsDueNow(medications, timezone, endOfLocalDay);
-  const byTime = new Map<string, string[]>();
+  const byTime = new Map<string, Medication[]>();
   for (const med of activeToday) {
     const bucket = byTime.get(med.time_of_day);
-    if (bucket) bucket.push(med.name);
-    else byTime.set(med.time_of_day, [med.name]);
+    if (bucket) bucket.push(med);
+    else byTime.set(med.time_of_day, [med]);
   }
 
-  for (const [timeOfDay, medNames] of byTime) {
+  for (const [timeOfDay, medsAtTime] of byTime) {
+    const medNames = medsAtTime.map((m) => m.name);
     const dueAt = scheduledForToday(timeOfDay, timezone, now);
 
     // Grandfathered rows. lib/validation.ts refuses a medication time outside calling hours
@@ -117,6 +143,9 @@ export function planSlotsForDay(
     // Not ours to miss: the slot elapsed before this household was our responsibility
     // (during a pause, before the account existed, or inside a deliberate pre-warm hold).
     if (dueAt < coverageStartsAt) continue;
+
+    // Nor is a slot that only appeared after its own deadline had passed.
+    if (neverOurs(dueAt, expiryFor(dueAt, timezone), now, lastTickAt)) continue;
 
     slots.push({ dueAt, expiresAt: expiryFor(dueAt, timezone), kind: "medication", medNames, appointmentId: null });
   }
@@ -142,6 +171,8 @@ export function planSlotsForDay(
       .map((appointment) => ({ appointment, dueAt: reminderSlotFor(appointment, timezone) }))
       .filter((c): c is { appointment: Appointment; dueAt: Date } => c.dueAt !== null)
       .filter((c) => c.dueAt >= coverageStartsAt)
+      // Same rule as medications.
+      .filter((c) => !neverOurs(c.dueAt, expiryFor(c.dueAt, timezone, new Date(c.appointment.starts_at)), now, lastTickAt))
       .sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
     const earliest = candidates[0];
     if (earliest) {

@@ -94,6 +94,32 @@ describe("planSlotsForDay", () => {
     expect(slots).toEqual([]);
   });
 
+  it("does not plan a lapsed slot the scheduler was running through (a mid-day edit)", () => {
+    // A caregiver adding "Metformin, 09:00" at 14:00 is ordinary. The slot would materialise
+    // already past its 11:00 expiry, be expired by the same tick, and text the whole family
+    // "their 9:00am check-in was missed" for a dose that did not exist that morning.
+    // lastTickAt at 13:55 proves we were ticking through 11:00 and never queued it.
+    const lastTick = new Date("2026-09-10T20:55:00Z");
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastTick);
+    expect(slots).toEqual([]);
+  });
+
+  it("DOES plan that same lapsed slot when the scheduler was down through it (an outage)", () => {
+    // Same slot, same instant — only the heartbeat differs. The scheduler last ticked at
+    // 08:55, before the 11:00 expiry, so this may be a genuinely missed check-in and has to
+    // be queued so expiry can report it. This is the pair that keeps the fix above from
+    // turning an outage into silence.
+    const lastTick = new Date("2026-09-10T15:55:00Z");
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, lastTick);
+    expect(slots).toHaveLength(1);
+  });
+
+  it("plans a lapsed slot when the heartbeat is unknown", () => {
+    // Unknown reads as "report it": silence is the failure that matters.
+    const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE, null);
+    expect(slots).toHaveLength(1);
+  });
+
   it("STILL plans a slot that elapsed while we were responsible (a scheduler outage)", () => {
     // Same elapsed slot, but coverage began long before it. This one is a genuine missed
     // check-in: it must be queued so that expiry can tell the family. A design that only

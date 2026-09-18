@@ -15,8 +15,13 @@
  * "everything is fine". Only exercising the real dial + notify + messages path can show it.
  *
  * Non-routable +1202555 numbers per HANDOVER, so notifyFamilyContacts runs for real —
- * Twilio refuses the send, a `messages` row is still written, and no handset rings.
- * Nothing here ever reaches dialing: both cases are refused before triggerVapiCall.
+ * Twilio accepts and never delivers, a `messages` row is still written, and no handset
+ * rings.
+ *
+ * The refusal cases are all decided before triggerVapiCall. The in-hours CONTROL at the end
+ * deliberately is not: it exists to prove the gate lets a dial through, so it reaches Vapi
+ * and places a real outbound call — to a non-routable number, so nothing is answered, but
+ * it is a real provider request and this file should not claim otherwise.
  */
 import { createClient } from "@supabase/supabase-js";
 import { dialAndRecord } from "@/lib/dial";

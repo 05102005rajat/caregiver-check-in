@@ -452,6 +452,8 @@ async function reapStaleScheduled(
 
 interface ParentContext {
   caregiverName: string;
+  /** See QueueContext.lastTickAt. */
+  lastTickAt: Date | null;
   /** See QueueContext.sourcesComplete — false when the medications/appointments read failed. */
   sourcesComplete: boolean;
   medications: Medication[];
@@ -611,6 +613,18 @@ export async function GET(request: Request) {
   const db = createAdminClient();
   const now = new Date();
 
+  // Read before anything is planned. A slot that lapsed while we were ticking and was never
+  // queued cannot have existed then, so reporting it as missed would be a fabrication; one
+  // that lapsed while we were down may be a real missed check-in. Unknown reads as "report
+  // it" — see neverOurs in lib/slots.ts.
+  const { data: priorHeartbeat, error: priorHeartbeatError } = await db
+    .from("cron_heartbeat")
+    .select("last_tick_at")
+    .eq("id", true)
+    .maybeSingle();
+  if (priorHeartbeatError) log.error("cron.heartbeat_read_failed", { err: priorHeartbeatError });
+  const lastTickAt = priorHeartbeat?.last_tick_at ? new Date(priorHeartbeat.last_tick_at as string) : null;
+
   // Paged. PostgREST caps an unbounded select at its configured maximum and says nothing
   // about it, so past that cap some households simply stop being processed: no call, no
   // alert, no error — the same silent-truncation class migration 0024 was written to fix
@@ -741,6 +755,7 @@ export async function GET(request: Request) {
         // and materialisation reconciles, so that empty plan would DELETE today's queue and
         // leave slots that never expire and never alert. Say so instead of guessing.
         sourcesComplete: sourceReadsOk,
+        lastTickAt,
         medications: medsByParent.get(parent.id) ?? [],
         appointments: apptsByParent.get(parent.id) ?? [],
         watchItems: watchByParent.get(parent.id) ?? [],
