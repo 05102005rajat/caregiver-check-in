@@ -1,12 +1,14 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { describeChanges, needsAttention } from "@/lib/insights";
-import type { Call, Message, Parent } from "@/types/db";
+import { weeklySummary } from "@/lib/weekly";
+import type { Appointment, Call, Message, Parent } from "@/types/db";
 import CallRow from "./CallRow";
 import PauseControl from "./PauseControl";
 import DangerZone from "./DangerZone";
 import TestCallButton from "./TestCallButton";
 import PrewarmCard from "./PrewarmCard";
+import WeeklySummary from "./WeeklySummary";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +95,15 @@ export default async function DashboardPage() {
   const latestCall = calls.find((c) => c.status === "completed" || c.status === "no_answer" || c.status === "failed") ?? null;
   const baseline = latestCall ? calls.filter((c) => c !== latestCall && c.status === "completed").slice(0, BASELINE_CALLS) : [];
   const changes = latestCall ? describeChanges(latestCall, baseline) : [];
+
+  // The week behind today's call. Needs appointments, which the dashboard did not read
+  // before — one small query for the one line in this panel the caregiver can still act on.
+  const { data: apptRows } = await supabase
+    .from("appointments")
+    .select("*")
+    .eq("parent_id", parent.id)
+    .order("starts_at", { ascending: true });
+  const week = weeklySummary(calls, (apptRows ?? []) as Appointment[], parent.timezone);
   const attention = latestCall ? needsAttention(latestCall) : false;
 
   return (
@@ -205,6 +216,8 @@ export default async function DashboardPage() {
           </>
         )}
       </div>
+
+      <WeeklySummary parentName={parent.name} summary={week} />
 
       <div
         className={`rounded-xl border p-4 mb-6 text-sm ${
