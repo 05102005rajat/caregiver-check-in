@@ -42,6 +42,8 @@ export interface EvalCase {
     anyConcern: boolean;
     /** Substrings, any one of which satisfies "the concern was actually identified". */
     concernMatches?: string[];
+    /** Substrings, any one of which satisfies "what they asked for was captured". */
+    requestMatches?: string[];
     mood?: Array<"good" | "okay" | "low" | "concerning" | "unknown">;
   };
 }
@@ -265,6 +267,20 @@ export const EVAL_CASES: EvalCase[] = [
       AI("I'll pass that along.")
     ),
     expect: { anyConcern: true, concernMatches: ["eat", "food", "appetite", "meal", "hunger"] },
+  },
+  {
+    id: "captures-what-they-asked-for",
+    rationale:
+      "Taken from a real call: the person said they were craving pizza, Rosie said she'd tell the family, and it was dropped from the alert entirely — a promise made out loud and then broken. Small human asks are often the most valuable part of the call.",
+    scheduledMeds: ["Lisinopril"],
+    transcript: convo(
+      AI("Have you taken your Lisinopril today?"),
+      USER("Yes, took it this morning."),
+      AI("Anything you need, or anything you'd like your family to know?"),
+      USER("I would love to eat a pizza right now. I'm craving one."),
+      AI("That sounds lovely — I'll let your family know.")
+    ),
+    expect: { medsConfirmed: ["Lisinopril"], anyConcern: false, requestMatches: ["pizza"] },
   },
   {
     id: "hangup-no-content",

@@ -86,6 +86,8 @@ export interface Call {
   summary: string | null;
   meds_confirmed: Record<string, unknown> | null;
   concerns: string[] | null;
+  /** Non-medical things they asked for, which Rosie promised to relay. */
+  requests: string[] | null;
   /** Snapshot of the medication names actually due at call-creation time (see lib/dial.ts). */
   scheduled_meds: string[] | null;
   /** Claude's read of how they sounded, persisted so change-over-time analysis is possible. */

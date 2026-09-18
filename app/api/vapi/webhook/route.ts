@@ -233,6 +233,7 @@ export async function POST(request: Request) {
       summary: extracted.summary,
       meds_confirmed: { confirmed: medsConfirmed, missed: medsMissed, appointments_acknowledged: appointmentsAcknowledged },
       concerns,
+      requests: extracted.requests,
       mood: extracted.mood,
     })
     .eq("id", call.id);
@@ -245,21 +246,37 @@ export async function POST(request: Request) {
     concerns.length > 0 || extracted.mood === "concerning" || extracted.mood === "unknown" || medsMissed.length > 0;
 
   if (hasConcern) {
-    const lines = [`Heads up from ${parentName}'s check-in: ${extracted.summary}`];
+    // Bulleted and scannable rather than one long paragraph: this arrives as a text on a
+    // phone, and a worried family member should be able to see what's wrong at a glance
+    // instead of reading a five-line summary to find the one fact that matters.
+    const lines = [`${parentName}'s check-in — needs a look:`];
     if (medsMissed.length > 0) {
-      lines.push(`Not confirmed taken: ${medsMissed.join(", ")}.`);
+      lines.push("", "Not taken:", ...medsMissed.map((m) => `• ${m}`));
     }
     if (concerns.length > 0) {
-      lines.push(`Concerns noted: ${concerns.join(", ")}.`);
+      lines.push("", "Concerns:", ...concerns.map((c) => `• ${c}`));
+    }
+    // Rosie promised on the call to pass these on, so they go in whether or not anything
+    // else was concerning.
+    if (extracted.requests.length > 0) {
+      lines.push("", `${parentName} asked for:`, ...extracted.requests.map((r) => `• ${r}`));
     }
 
     // Fingerprint the structured facts, not the prose: Claude rewords the same situation
     // differently every call, so body text would never match and nothing would dedupe.
-    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join(" "), {
+    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
       fingerprint: alertFingerprint("concern", [...concerns, ...medsMissed.map((m) => `missed:${m}`)]),
     });
+  } else if (extracted.requests.length > 0) {
+    // Nothing is wrong, but they asked for something and Rosie said she'd pass it on.
+    // Staying silent here would quietly break a promise the person heard her make — and
+    // "Mum would like a visit" is exactly what a family wants to hear, even on a good day.
+    const lines = [`${parentName} is doing fine, and asked for:`, "", ...extracted.requests.map((r) => `• ${r}`)];
+    await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
+      fingerprint: alertFingerprint("request", extracted.requests),
+    });
   }
-  // Healthy call, no concerns: log silently, no text. No news is good news (spec section 7).
+  // Healthy call, nothing asked for: log silently, no text. No news is good news.
 
   return NextResponse.json({ ok: true });
 }

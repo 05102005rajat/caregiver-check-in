@@ -74,6 +74,13 @@ export function scoreCase(testCase: EvalCase, output: CallSummary): CaseResult {
     }
   }
 
+  if (expect.requestMatches) {
+    const blob = output.requests.join(" ").toLowerCase();
+    if (!expect.requestMatches.some((m) => blob.includes(m.toLowerCase()))) {
+      failures.push(`request not captured (got: ${output.requests.join(", ") || "nothing"})`);
+    }
+  }
+
   if (expect.mood && !expect.mood.includes(output.mood)) {
     failures.push(`mood ${output.mood} outside expected ${expect.mood.join("/")}`);
   }

@@ -15,6 +15,7 @@ function call(overrides: Partial<Call> = {}): Call {
     summary: "…",
     meds_confirmed: { confirmed: [], missed: [], appointments_acknowledged: [] },
     concerns: [],
+    requests: [],
     scheduled_meds: [],
     mood: "good",
     created_at: "2026-09-10T16:00:00Z",

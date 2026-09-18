@@ -9,6 +9,7 @@ function output(overrides: Partial<CallSummary> = {}): CallSummary {
     meds_confirmed: [],
     meds_missed: [],
     concerns: [],
+    requests: [],
     mood: "good",
     appointments_acknowledged: [],
     ...overrides,

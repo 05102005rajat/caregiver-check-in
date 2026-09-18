@@ -7,6 +7,8 @@ export interface CallSummary {
   meds_confirmed: string[];
   meds_missed: string[];
   concerns: string[];
+  /** Things they asked for or wanted passed on — Rosie promises to relay these. */
+  requests: string[];
   mood: "good" | "okay" | "low" | "concerning" | "unknown";
   appointments_acknowledged: string[];
 }
@@ -17,6 +19,7 @@ Return ONLY a JSON object (no markdown fences, no commentary) with these fields:
 - meds_confirmed: array of med names they clearly confirmed already taking (or taking right now) during this call
 - meds_missed: array of med names that were NOT clearly confirmed as taken — this includes explicitly skipping it, saying they'll take it later, deferring, making excuses, saying they can't find it, or refusing. Be inclusive here: if in doubt whether it was actually taken, count it as missed rather than confirmed.
 - concerns: array of short strings for anything the family should actually act on (fall, new or worsening pain, confusion, loneliness, aide problem, scam call, not eating). Err toward including anything genuinely new, worsening, or unexplained — a missed concern is far worse than an extra one. But do NOT flag a long-standing complaint that the person themselves describes as unchanged and routine ("my knee aches same as always, nothing new") unless it sounds worse than usual, since alerting a family daily about their normal is how they stop reading alerts entirely.
+- requests: array of short strings for anything they asked for or wanted their family to know that isn't a medical concern — wanting a particular food, needing something from the shop, wanting someone to visit or call, help with a chore. Rosie explicitly promises on the call to pass these along, so omitting them breaks a promise the person heard her make. Keep the person's own framing ("craving pizza", not "nutritional request").
 - mood: one of [good, okay, low, concerning]
 - appointments_acknowledged: array of appointment titles they remembered
 
@@ -71,6 +74,7 @@ export function normalize(raw: unknown): CallSummary {
     meds_confirmed: asStringArray(obj.meds_confirmed),
     meds_missed: asStringArray(obj.meds_missed),
     concerns: asStringArray(obj.concerns),
+    requests: asStringArray(obj.requests),
     // An invalid/missing mood means Claude gave no real signal — that's "we don't know,"
     // not "everything's fine." Defaulting to "okay" would let malformed output quietly
     // look like a healthy call; "unknown" preserves that this needs a closer look
