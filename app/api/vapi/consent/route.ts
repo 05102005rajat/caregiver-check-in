@@ -59,67 +59,63 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No active call for this parent" }, { status: 409 });
   }
 
-  if (consented) {
-    // Don't clobber an existing timestamp (e.g. a duplicate tool invocation).
-    const { error } = await db
-      .from("parents")
-      .update({ consent_given_at: new Date().toISOString() })
-      .eq("id", parentId)
-      .is("consent_given_at", null);
-    if (error) {
-      console.error(`Failed to persist consent for parent ${parentId}`, error);
-      return NextResponse.json(
-        { ok: false, result: "Sorry, something went wrong on our end — could you say that again?" },
-        { status: 500 }
-      );
-    }
-  } else {
-    // A refusal is recorded, honoured and reported. Writing nothing (the original
-    // behaviour) made it indistinguishable from "hasn't been asked yet": the retry path
-    // re-dialled the same day moments after Rosie promised otherwise, and the caregiver was
-    // never told — which in a product built on "no news is good news" reads exactly like
-    // everything working.
-    //
-    // Withdrawal counts too, not just a first refusal.
-    //
-    // This was guarded by .is("consent_given_at", null), which meant an already-consented
-    // parent saying "stop calling me" matched zero rows: nothing recorded, nobody told, and
-    // consentBlocksNewCalls needs consent_refused_at AND no consent_given_at — so the daily
-    // calls carried on after Rosie had promised they wouldn't. Someone withdrawing consent
-    // is the clearest possible instruction this system can receive, and it was the one case
-    // it ignored. Clearing consent_given_at here is what makes the gate actually close.
-    const { data: prior } = await db
-      .from("parents")
-      .select("consent_given_at, consent_refused_at")
-      .eq("id", parentId)
-      .maybeSingle();
-    const isWithdrawal = Boolean(prior?.consent_given_at);
+  // Consent is a two-state machine — granted or refused — and the two states are mutually
+  // exclusive. Writing them as two independent nullable columns, each guarded by "only if
+  // the other is null", is what produced the same bug three times running:
+  //
+  //   * guarded on consent_given_at   -> an already-consented parent could not withdraw
+  //   * guarded on consent_refused_at -> anyone who ever refused could never withdraw later,
+  //                                      because nothing cleared consent_refused_at when
+  //                                      they subsequently said yes
+  //
+  // Each fix closed one path and left the next one open. So: write the new state
+  // unconditionally, always clearing the opposite field, and decide whether to notify by
+  // comparing the state before and after — not by whether a guarded UPDATE happened to
+  // match a row. A guard that silently matches nothing is indistinguishable from success,
+  // which is precisely how a person asking to be left alone got ignored.
+  const { data: prior, error: readError } = await db
+    .from("parents")
+    .select("consent_given_at, consent_refused_at")
+    .eq("id", parentId)
+    .maybeSingle();
 
-    const { data: refused, error } = await db
-      .from("parents")
-      .update({ consent_refused_at: new Date().toISOString(), consent_given_at: null })
-      .eq("id", parentId)
-      .is("consent_refused_at", null)
-      .select("id")
-      .maybeSingle();
-    if (error) {
-      // Don't fail the tool call: making Rosie apologise and re-ask would press someone who
-      // has just declined, which is the one thing the refusal path must never do.
-      log.error("consent.persist_refusal_failed", { parent_id: parentId, err: error });
-    }
+  if (readError || !prior) {
+    log.error("consent.prior_state_read_failed", { parent_id: parentId, err: readError });
+    return NextResponse.json({ ok: false, result: "Sorry, something went wrong on our end." }, { status: 500 });
+  }
 
-    // Only announce when something actually changed. The remaining no-op case is a repeat
-    // refusal (consent_refused_at already set) — real, but already reported, and telling
-    // the caregiver again every time they retry would be its own kind of noise.
-    if (!refused) {
-      log.info("consent.refusal_already_recorded", { parent_id: parentId });
-      return NextResponse.json({ ok: true, result: "Understood." });
-    }
+  const priorState = prior.consent_given_at ? "given" : prior.consent_refused_at ? "refused" : "unasked";
+  const nextState = consented ? "given" : "refused";
+  const now = new Date().toISOString();
 
-    // Tell the caregiver their parent said no, once. Without this the only signal is an
-    // absence of alerts, which is the same signal a healthy week produces.
+  // Repeating the same answer keeps the original timestamp — that is when consent was
+  // actually given or refused, and it is the date shown to the caregiver and the one that
+  // matters if anyone ever has to evidence it.
+  const { error: writeError } = await db
+    .from("parents")
+    .update(
+      consented
+        ? { consent_given_at: prior.consent_given_at ?? now, consent_refused_at: null }
+        : { consent_refused_at: prior.consent_refused_at ?? now, consent_given_at: null }
+    )
+    .eq("id", parentId);
+
+  if (writeError) {
+    // Never fall through to "nothing changed" on an error. That is what made a failed write
+    // look like an already-handled refusal: nothing recorded, the scheduler still calling,
+    // and a log line actively stating the refusal had already been dealt with.
+    log.error("consent.persist_failed", { parent_id: parentId, consented, prior_state: priorState, err: writeError });
+    return NextResponse.json({ ok: false, result: "Sorry, something went wrong on our end." }, { status: 500 });
+  }
+
+  log.info("consent.recorded", { parent_id: parentId, from: priorState, to: nextState });
+
+  if (nextState === "refused" && priorState !== "refused") {
+    const isWithdrawal = priorState === "given";
     const { data: parent } = await db.from("parents").select("name").eq("id", parentId).maybeSingle();
     const parentName = parent?.name ?? "Your parent";
+    // Tell the caregiver, once per transition into refusal. Without this the only signal is
+    // an absence of alerts, which is the same signal a healthy week produces.
     await notifyFamilyContacts(
       db,
       parentId,
@@ -128,9 +124,7 @@ export async function POST(request: Request) {
       isWithdrawal
         ? `${parentName} asked us to stop the daily check-in calls, so we've stopped. They'd agreed before, so this is a change of mind rather than a first refusal — it may be worth a conversation. If they'd like to start again, use the button on your dashboard.`
         : `${parentName} declined the daily check-in calls when asked, so we've stopped calling. If you'd like to try again, it's worth speaking to them yourself first — then use the button on your dashboard.`,
-      // Withdrawal and first refusal are genuinely different events for a family, so they
-      // don't dedupe against each other.
-      { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId]) }
+      { fingerprint: alertFingerprint(isWithdrawal ? "consent-withdrawn" : "consent-refused", [parentId, now]) }
     );
   }
 

@@ -161,15 +161,43 @@ async function reapStaleScheduled(
     // every tick forever; closing it out after the window bounds that.
     const scheduledFor = new Date(row.scheduled_for);
     if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
-      // Same reasoning as the consent close-out: stamp called_at so abandoning the row
-      // doesn't delete the fact that a dial was attempted, which the consent gate reads.
+      // called_at is stamped only when a dial provably happened — i.e. Vapi accepted the
+      // call and gave us an id, and it was our own bookkeeping write that failed after.
+      // A row stranded before the dial (the process died between insert and dial, which
+      // this function's doc comment describes) never rang, and claiming otherwise would
+      // both shut the consent gate on a parent who has never been contacted and make the
+      // dashboard render "Last check-in ..." for a call that never happened.
+      const dialHappened = Boolean(row.vapi_call_id);
       const { error } = await db
         .from("calls")
-        .update({ status: "failed", called_at: row.called_at ?? row.created_at })
+        .update({
+          status: "failed",
+          ...(dialHappened ? { called_at: row.called_at ?? row.created_at } : {}),
+        })
         .eq("id", row.id)
         .eq("status", "scheduled");
-      if (error) log.error("cron.abandon_stale_scheduled_failed", { call_id: row.id, err: error });
-      log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for });
+      if (error) {
+        // Don't log success after a failure: the row stays 'scheduled' and is re-abandoned
+        // every tick, and a cheerful "abandoned" line each time hides that it never worked.
+        log.error("cron.abandon_stale_scheduled_failed", { call_id: row.id, err: error });
+        continue;
+      }
+      log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for, dial_happened: dialHappened });
+
+      // Tell the family. The row still occupies (parent_id, scheduled_for), so the slot
+      // loop's own "too late to call" branch hits a 23505 and continues silently — meaning
+      // a check-in that never happened would otherwise produce no call, no text and no
+      // record anywhere that it was missed. Previously the row was re-dialled, so at worst
+      // the parent got a late call; abandoning it without this is strictly quieter.
+      const time = formatLocalTime(scheduledFor, parent.timezone);
+      await notifyFamilyContacts(
+        db,
+        parent.id,
+        "notify_on_miss",
+        row.id,
+        `Heads up: ${parent.name}'s ${time} check-in didn't go through and it's now too late to call about it. Please check in with them directly.`,
+        { fingerprint: alertFingerprint("too-late", [row.scheduled_for]) }
+      );
       continue;
     }
     const medsForSlot = row.scheduled_meds
@@ -398,12 +426,12 @@ async function processParent(
     const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
     const { data: strandedScheduled } = await db
       .from("calls")
-      .select("id, created_at, called_at")
+      .select("id, created_at, called_at, vapi_call_id")
       .eq("parent_id", parent.id)
       .eq("status", "scheduled")
       .lt("created_at", staleThreshold);
 
-    for (const row of (strandedScheduled ?? []) as Array<{ id: string; created_at: string; called_at: string | null }>) {
+    for (const row of (strandedScheduled ?? []) as Array<{ id: string; created_at: string; called_at: string | null; vapi_call_id: string | null }>) {
       // called_at is stamped alongside status, not just status. A row is stranded at
       // 'scheduled' precisely because the post-dial write that sets called_at failed, so
       // it counts as a prior call *only* through status in ('scheduled','in_progress').
@@ -411,9 +439,14 @@ async function processParent(
       // the gate on the next tick — the same erasure 0025 fixed for no_answer rows, just
       // by a different route. A dial was genuinely attempted here (dialAndRecord ran), so
       // recording created_at as the attempt time is honest as well as necessary.
+      // Only claim a dial when Vapi gave us a call id for it — see the abandon path above.
+      const dialHappened = Boolean(row.vapi_call_id);
       const { error } = await db
         .from("calls")
-        .update({ status: "failed", called_at: row.called_at ?? row.created_at })
+        .update({
+          status: "failed",
+          ...(dialHappened ? { called_at: row.called_at ?? row.created_at } : {}),
+        })
         .eq("id", row.id)
         .eq("status", "scheduled");
       if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, call_id: row.id, err: error });

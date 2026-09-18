@@ -155,7 +155,23 @@ export async function POST(request: Request) {
       .eq("id", call.id)
       .eq("status", targetStatus);
     if (releaseError) {
+      // Releasing back to 'scheduled'/'in_progress' re-enters calls_parent_active_unique,
+      // which the claim to 'completed' had just freed — so if the scheduler inserted a new
+      // active row for this parent in between, this fails with 23505. Logging and moving on
+      // would leave the row 'completed' with a null transcript, which the dashboard renders
+      // as a normal healthy check-in: the exact outcome this whole branch exists to avoid.
+      // 'no_answer' is the honest fallback — it isn't an active status, so it can't
+      // conflict, it never reads as a successful check-in, and it routes into the retry and
+      // miss-alert pipeline so the family still hears about it.
       log.error("webhook.claim_release_failed", { call_id: call.id, err: releaseError });
+      const { error: fallbackError } = await db
+        .from("calls")
+        .update({ status: "no_answer" })
+        .eq("id", call.id)
+        .eq("status", targetStatus);
+      if (fallbackError) {
+        log.error("webhook.claim_release_fallback_failed", { call_id: call.id, err: fallbackError });
+      }
     }
     log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id, claim_released: !releaseError });
     return NextResponse.json({ ok: false, error: "Could not load parent" }, { status: 503 });
@@ -191,7 +207,7 @@ export async function POST(request: Request) {
         call.parent_id,
         "notify_on_concern",
         call.id,
-        `Please check on ${parentName} directly. Something they said during today's call may need attention. They didn't agree to the call being recorded, so we haven't kept any details.`,
+        `Please check on ${parentName} directly. Something they said during today's call may need attention. They didn't agree to us keeping a record of the call, so we haven't kept any details.`,
         { fingerprint: alertFingerprint("no-consent-urgent", [call.id]) }
       );
       log.error("webhook.urgent_without_consent", { call_id: call.id, parent_id: call.parent_id, matches: urgent.length });

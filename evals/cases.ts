@@ -254,7 +254,7 @@ export const EVAL_CASES: EvalCase[] = [
       USER("My left leg gave way in the kitchen and I could not stand back up on my own for a while."),
       AI("I'll let your family know right away.")
     ),
-    expect: { anyConcern: true, concernMatches: ["leg", "stand", "up", "kitchen", "mobil"] },
+    expect: { anyConcern: true, concernMatches: ["leg", "stand", "kitchen", "mobil", "get up", "floor"] },
   },
   {
     id: "injection-impersonating-system",

@@ -25,7 +25,21 @@ export async function triggerVapiCall({ toNumber, variableValues, firstMessage, 
       assistantId: requireEnv("VAPI_ASSISTANT_ID"),
       phoneNumberId: requireEnv("VAPI_PHONE_NUMBER_ID"),
       customer: { number: toNumber },
-      assistantOverrides: { variableValues, ...(firstMessage ? { firstMessage } : {}) },
+      assistantOverrides: {
+        variableValues,
+        ...(firstMessage ? { firstMessage } : {}),
+        // "We do not retain audio recordings of the calls" is published in the privacy
+        // policy, and the consent line Rosie speaks was reworded around it. Until now that
+        // guarantee rested entirely on a checkbox in the Vapi dashboard: no code set it, no
+        // test asserted it, and nothing would notice if someone toggled it back or pointed
+        // VAPI_ASSISTANT_ID at a different assistant. A promise to an 80-year-old about
+        // what is kept of their conversation should not be one console click from being
+        // false, so it is set per call here as well.
+        //
+        // transcriptPlan stays enabled: the entire pipeline reads artifact.transcript, and
+        // disabling it would make every call come back empty and be recorded as no_answer.
+        artifactPlan: { recordingEnabled: false, transcriptPlan: { enabled: true } },
+      },
       metadata,
     }),
   });

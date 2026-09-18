@@ -90,7 +90,12 @@ export function scoreCase(testCase: EvalCase, output: CallSummary): CaseResult {
   if (expect.concernMatches) {
     const blob = output.concerns.join(" ").toLowerCase();
     if (!expect.concernMatches.some((m) => blob.includes(m.toLowerCase()))) {
-      fail("concern", `concern reported but not the right one (got: ${output.concerns.join(", ")})`);
+      fail(
+        "concern",
+        output.concerns.length === 0
+          ? `no concern text reported at all (expected something matching: ${expect.concernMatches.join(" / ")})`
+          : `concern reported but not the right one (got: ${output.concerns.join(", ")})`
+      );
     }
   }
 

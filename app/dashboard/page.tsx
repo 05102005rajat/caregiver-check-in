@@ -114,10 +114,10 @@ export default async function DashboardPage() {
         // Without this the caregiver has no way to discover that automatic calls are
         // blocked — they'd just notice calls quietly stopping and assume it was broken.
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-4 text-sm text-amber-900">
-          <p className="font-medium">Recording consent not yet given</p>
+          <p className="font-medium">Check-ins paused — consent not yet given</p>
           <p className="mt-1">
-            {parent.name} hasn&apos;t agreed to the call being recorded yet, so automatic check-ins are
-            paused until they do. It&apos;s worth speaking to them yourself first — then use the button
+            {parent.name} hasn&apos;t yet agreed to us keeping a written record of the calls, so
+            automatic check-ins are paused until they do. It&apos;s worth speaking to them yourself first — then use the button
             below, and Rosie will ask again at the start of that call.
           </p>
           <TestCallButton parentName={parent.name} />
@@ -140,7 +140,7 @@ export default async function DashboardPage() {
       )}
       {parent.consent_given_at && (
         <p className="text-xs text-slate-400 mb-4">
-          Recording consent given {new Date(parent.consent_given_at).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}.
+          Consent given {new Date(parent.consent_given_at).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}.
         </p>
       )}
 

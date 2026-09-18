@@ -56,8 +56,15 @@ begin
         preferred_voice = excluded.preferred_voice,
         -- THE ONLY INTENTIONAL CHANGE (see 0025's rationale): consent belongs to the person
         -- on the end of the line, not to the row. If the number changes, the consent we
-        -- hold is for a number we no longer call, so it is cleared and Rosie asks again.
-        -- A refusal clears with it — the new number never refused anything.
+        -- hold is for a number we no longer call, so it is cleared. A refusal clears with
+        -- it — the new number never refused anything.
+        --
+        -- Note what this does NOT do: the call history is untouched, so the scheduler's
+        -- consent gate (hasPriorCalls && !consent_given_at) closes on the next tick and
+        -- automatic check-ins stop rather than Rosie ringing the new number to ask. That is
+        -- the safe direction — a number we have never asked should not be cold-called on a
+        -- daily schedule — but it does mean the caregiver has to press the test-call button
+        -- on the dashboard, where the banner tells them so.
         consent_given_at = case
           when parents.phone is distinct from excluded.phone then null
           else parents.consent_given_at
