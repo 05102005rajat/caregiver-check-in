@@ -26,6 +26,19 @@ import type { Appointment, Medication } from "@/types/db";
  */
 export const SLOT_CATCHUP_MINUTES = 120;
 
+/**
+ * The shortest life a slot may have and still be reachable.
+ *
+ * expiryFor clamps to the calling window's close, and validation accepts any hour before
+ * 21:00 — so a dose at 20:58 produced a slot live from 20:58 to 21:00. A five-minute cron
+ * landing on :55 and :00 never falls inside two minutes, so that slot was never dialled,
+ * expired every evening, and texted the family a safety alert about a check-in the system
+ * had not attempted. Every night, for as long as the medication existed.
+ *
+ * Three ticks' worth of room, so a single delayed or skipped tick does not decide it.
+ */
+export const SLOT_MIN_WINDOW_MINUTES = 15;
+
 export interface PlannedSlot {
   dueAt: Date;
   expiresAt: Date;
@@ -36,7 +49,7 @@ export interface PlannedSlot {
 
 /** Slots that could not be planned, so the caller can say so out loud rather than drop them. */
 export interface UncallableSlot {
-  reason: "outside_calling_hours";
+  reason: "outside_calling_hours" | "window_too_short";
   timeOfDay: string;
   medNames: string[];
 }
@@ -140,14 +153,23 @@ export function planSlotsForDay(
       continue;
     }
 
+    // Too close to the window's close to be reachable. Validation rejects these on new
+    // saves; this covers rows that predate that check, and keeps them out of the queue
+    // rather than letting them expire unrung and alert every single evening.
+    const expiresAt = expiryFor(dueAt, timezone);
+    if (expiresAt.getTime() - dueAt.getTime() < SLOT_MIN_WINDOW_MINUTES * 60000) {
+      uncallable.push({ reason: "window_too_short", timeOfDay, medNames });
+      continue;
+    }
+
     // Not ours to miss: the slot elapsed before this household was our responsibility
     // (during a pause, before the account existed, or inside a deliberate pre-warm hold).
     if (dueAt < coverageStartsAt) continue;
 
     // Nor is a slot that only appeared after its own deadline had passed.
-    if (neverOurs(dueAt, expiryFor(dueAt, timezone), now, lastTickAt)) continue;
+    if (neverOurs(dueAt, expiresAt, now, lastTickAt)) continue;
 
-    slots.push({ dueAt, expiresAt: expiryFor(dueAt, timezone), kind: "medication", medNames, appointmentId: null });
+    slots.push({ dueAt, expiresAt, kind: "medication", medNames, appointmentId: null });
   }
 
   // The appointment fallback exists for a day with an appointment and no medication call —

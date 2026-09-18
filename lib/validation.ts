@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CALLING_HOURS_END, CALLING_HOURS_START } from "@/lib/callwindow";
+import { SLOT_MIN_WINDOW_MINUTES } from "@/lib/slots";
 
 const phoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, "Must be E.164 format, e.g. +15551234567");
 // Medication times are also *call* times, so they have to sit inside the hours we are
@@ -7,15 +8,22 @@ const phoneSchema = z.string().regex(/^\+[1-9]\d{6,14}$/, "Must be E.164 format,
 // accepted 22:48 and the dialer — which now refuses outside the window — would never call
 // about it: the caregiver configures a reminder that can never fire and is told nothing.
 // Rejecting it here, where the message reaches them, is the only honest option.
+// The latest dose time we can actually reach. A slot's callable life is clamped to the
+// close of the calling window, so a time too near it leaves a gap no cron tick lands in —
+// 20:58 gave two minutes. Rejecting it here, where the caregiver reads the message, beats
+// accepting a reminder that can never fire and reports itself missed every night.
+const LATEST_CALLABLE_MINUTE = CALLING_HOURS_END * 60 - SLOT_MIN_WINDOW_MINUTES;
+const latestCallableLabel = `${String(Math.floor(LATEST_CALLABLE_MINUTE / 60)).padStart(2, "0")}:${String(LATEST_CALLABLE_MINUTE % 60).padStart(2, "0")}`;
+
 const timeOfDaySchema = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Must be HH:mm, 24-hour")
   .refine(
     (value) => {
-      const hour = Number(value.slice(0, 2));
-      return hour >= CALLING_HOURS_START && hour < CALLING_HOURS_END;
+      const [hour, minute] = value.split(":").map(Number);
+      return hour >= CALLING_HOURS_START && hour * 60 + minute <= LATEST_CALLABLE_MINUTE;
     },
-    `Check-in calls only go out between ${CALLING_HOURS_START}:00 and ${CALLING_HOURS_END}:00 — pick a time in that range`
+    `Check-in calls only go out between ${CALLING_HOURS_START}:00 and ${latestCallableLabel} — pick a time in that range`
   );
 const dateSchema = z.union([z.literal(""), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Must be YYYY-MM-DD")]);
 
