@@ -297,6 +297,36 @@ async function main() {
       check("a revived slot picks up medication edits made during the hold", false, "no future pending slot to exercise this");
     }
 
+    // ---- a call that never connected must not cancel the appointment reminder ----
+    // lib/dial.ts stamps called_at on a provider error so the row enters the retry pipeline.
+    // Reading that column as "already rung today" meant a Vapi outage on the morning slot
+    // silently cancelled the afternoon's reminder — one column, two meanings, the defect
+    // 0032 exists for.
+    const failedDue = new Date(realNow.getTime() - 4 * 60 * 60000).toISOString();
+    const { data: neverConnected } = await admin
+      .from("calls")
+      .insert({ parent_id: pid, scheduled_for: failedDue, status: "no_answer", called_at: failedDue, dial_attempted_at: failedDue })
+      .select("id")
+      .single();
+    const apptDue2 = new Date(realNow.getTime() - 5 * 60000).toISOString();
+    const { data: apptSlot2 } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: apptDue2, expires_at: new Date(realNow.getTime() + 60 * 60000).toISOString(),
+        kind: "appointment", med_names: [], state: "pending",
+      })
+      .select("id")
+      .single();
+    await admin.from("calls").delete().eq("parent_id", pid).in("status", ["scheduled", "in_progress"]);
+    await dispatchDueSlots(admin as never, parent, ctx, realNow);
+    const { data: apptVsFailed } = await admin.from("call_slots").select("state, call_id").eq("id", apptSlot2!.id).single();
+    check(
+      "a call that never connected does not count as covering the day",
+      apptVsFailed!.state === "dispatched" && apptVsFailed!.call_id !== neverConnected!.id,
+      `state=${apptVsFailed!.state} call_id=${apptVsFailed!.call_id} — a Vapi outage silently cancelled the appointment reminder`
+    );
+    await admin.from("calls").delete().eq("id", neverConnected!.id);
+
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);
     slots = await slotsOf(pid);

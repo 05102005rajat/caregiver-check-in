@@ -55,7 +55,7 @@ async function coveringCallToday(
   const { startUtc, endUtc } = localDayBoundsUtc(parent.timezone, now);
   const { data, error } = await db
     .from("calls")
-    .select("id, called_at, status")
+    .select("id, status")
     .eq("parent_id", parent.id)
     .gte("scheduled_for", startUtc.toISOString())
     .lte("scheduled_for", endUtc.toISOString());
@@ -67,7 +67,19 @@ async function coveringCallToday(
     log.error("cron.covering_call_lookup_failed", { parent_id: parent.id, err: error });
     return { covered: true, callId: null };
   }
-  const covering = (data ?? []).find((c) => c.called_at || c.status === "scheduled" || c.status === "in_progress");
+  // By status, not by called_at. lib/dial.ts stamps called_at on a provider error so the
+  // row enters the retry pipeline (retryDecision needs it), which means a Vapi outage on
+  // the 09:00 slot left a called_at behind for a call that never connected — and this
+  // function then read it as "already rung today" and silently cancelled the afternoon's
+  // appointment reminder. One column, two meanings, which is the defect 0032 was written
+  // for and whose own comment names this function as a victim. Fixed at the reader,
+  // because the writer is load-bearing for retries.
+  //
+  // 'completed' and 'in_progress' are a real conversation; 'scheduled' is one about to
+  // happen. 'no_answer' and 'failed' mean nobody was spoken to, so the appointment was
+  // never mentioned and the reminder is still worth placing.
+  const COVERING_STATUSES = new Set(["completed", "in_progress", "scheduled"]);
+  const covering = (data ?? []).find((c) => COVERING_STATUSES.has(c.status ?? ""));
   return { covered: Boolean(covering), callId: (covering?.id as string) ?? null };
 }
 
@@ -217,10 +229,12 @@ export async function dispatchDueSlots(
   // failed, because expires_at still bounds it and expiry is the one place that declares a
   // miss. call_id is the discriminator: a slot that really dialled has one.
   const strandedBefore = new Date(now.getTime() - STRANDED_DISPATCH_MINUTES * 60000).toISOString();
-  // Bounded to today. Yesterday's stranded slot released into today's queue expires
-  // immediately and texts "their 9:00am check-in was missed" — about yesterday, with only a
-  // time of day in the message, so it reads as this morning.
-  const { startUtc: todayStart, endUtc: todayEnd } = localDayBoundsUtc(parent.timezone, now);
+  // Deliberately NOT bounded to the current local day. An earlier version was, to stop
+  // yesterday's slot expiring into "their 9:00am check-in was missed" read as this morning
+  // — but expireLapsedSlots now names the date for a slot from another day, so the bound
+  // only created a worse problem: a strand late in the evening with the cron down overnight
+  // left a slot matching neither the dispatch query nor the expiry query, stuck forever
+  // with no call and no alert. Releasing it means it expires and gets reported, dated.
   const { data: stranded, error: strandedError } = await db
     .from("call_slots")
     .update({ state: "pending", updated_at: now.toISOString() })
@@ -228,8 +242,6 @@ export async function dispatchDueSlots(
     .eq("state", "dispatched")
     .is("call_id", null)
     .lt("updated_at", strandedBefore)
-    .gte("due_at", todayStart.toISOString())
-    .lte("due_at", todayEnd.toISOString())
     .select("id");
   if (strandedError) log.error("cron.stranded_slots_release_failed", { parent_id: parent.id, err: strandedError });
   else if ((stranded ?? []).length > 0) {
@@ -320,7 +332,8 @@ export async function dispatchDueSlots(
       const { error: linkError } = await db
         .from("call_slots")
         .update({ call_id: outcome.callId, updated_at: new Date().toISOString() })
-        .eq("id", slot.id);
+        .eq("id", slot.id)
+        .eq("state", "dispatched");
       if (linkError) log.error("cron.slot_link_failed", { parent_id: parent.id, slot_id: slot.id, err: linkError });
       continue;
     }

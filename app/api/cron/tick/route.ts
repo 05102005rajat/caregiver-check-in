@@ -167,23 +167,23 @@ async function processRetries(
  * Fails CLOSED on a read error — "scheduled" is the noisy-but-safe answer, since the cost
  * of guessing wrong that way is a alert about a real slot rather than silence about one.
  */
-async function isQueuedObligation(
+async function slotFor(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
   scheduledFor: string
-): Promise<boolean> {
+): Promise<{ found: boolean; state: string | null }> {
   const { data, error } = await db
     .from("call_slots")
-    .select("id")
+    .select("id, state")
     .eq("parent_id", parentId)
     .eq("due_at", scheduledFor)
     .limit(1)
     .maybeSingle();
   if (error) {
     log.error("cron.slot_lookup_failed", { parent_id: parentId, scheduled_for: scheduledFor, err: error });
-    return true;
+    return { found: true, state: null };
   }
-  return Boolean(data);
+  return { found: Boolean(data), state: (data?.state as string) ?? null };
 }
 
 /**
@@ -322,7 +322,7 @@ async function reapStaleScheduled(
       // to this row, so it will never expire either — the check-in simply stops existing.
       // Only for a call the queue actually asked for: a stranded manual test call is not a
       // missed check-in and must not be reported to the family as one.
-      if (closed && (await isQueuedObligation(db, parent.id, row.scheduled_for))) {
+      if (closed && (await slotFor(db, parent.id, row.scheduled_for)).found) {
         const time = formatLocalTime(scheduledFor, parent.timezone);
         await notifyFamilyContacts(
           db,
@@ -339,6 +339,21 @@ async function reapStaleScheduled(
     const medsForSlot = row.scheduled_meds
       ? resolveMedsForSlot(medications, row.scheduled_meds, scheduledFor, parent.timezone)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
+    const slot = await slotFor(db, parent.id, row.scheduled_for);
+
+    // expireLapsedSlots runs earlier in the same tick, and at the boundary the two used to
+    // disagree: a 09:00 slot expiring at 11:00 was reported to the family as "too late to
+    // call about", and then this reaper computed minutesLate = 120, which is not greater
+    // than SLOT_CATCHUP_MINUTES, and re-dialled — placing a real call to the parent
+    // seconds after telling their family it was too late to place one. The slot's own
+    // state is the authority on whether that slot is still live.
+    if (slot.state === "expired" || slot.state === "cancelled") {
+      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      if (error) log.error("cron.stale_close_after_slot_done_failed", { call_id: row.id, err: error });
+      log.info("cron.stale_row_slot_already_closed", { call_id: row.id, parent_id: parent.id, slot_state: slot.state });
+      continue;
+    }
+
     await dialAndRecord(
       db,
       row.id,
@@ -352,7 +367,7 @@ async function reapStaleScheduled(
       // go out" about a call that was never on the schedule — undoing the whole point of
       // the "manual" purpose the test-call route passes. A scheduled obligation is one the
       // queue asked for, so a row with no slot behind it is the caregiver's own button.
-      (await isQueuedObligation(db, parent.id, row.scheduled_for)) ? "scheduled" : "manual"
+      slot.found ? "scheduled" : "manual"
     );
   }
 }
@@ -383,6 +398,11 @@ async function processParent(
     // The rest of today's queue goes with the pause. Leaving it pending means every slot
     // the pause covers lapses and reports itself as a missed check-in the moment the pause
     // lifts — the burst that coverageStartsAt existed to suppress, re-created one layer up.
+    // Lapsed slots are accounted for first. Cancelling the whole queue swallowed any slot
+    // that had already passed its deadline but not yet been expired — a check-in that
+    // really was missed, which then never got a calls row and never told anyone, because
+    // the caregiver happened to hit Pause a couple of minutes later.
+    await expireLapsedSlots(db, parent, now);
     await cancelPendingSlots(db, parent.id, "paused", now);
     return 0;
   }
@@ -392,6 +412,11 @@ async function processParent(
   // that, and being expected is worth more than any wording (see migration 0030).
   if (parent.first_call_after && new Date(parent.first_call_after) > now) {
     log.info("cron.before_first_call_window", { parent_id: parent.id, first_call_after: parent.first_call_after });
+    // Lapsed slots are accounted for first. Cancelling the whole queue swallowed any slot
+    // that had already passed its deadline but not yet been expired — a check-in that
+    // really was missed, which then never got a calls row and never told anyone, because
+    // the caregiver happened to hit Pause a couple of minutes later.
+    await expireLapsedSlots(db, parent, now);
     await cancelPendingSlots(db, parent.id, "prewarm_hold", now);
     return 0;
   }
@@ -424,6 +449,9 @@ async function processParent(
     // yesterday's queue quietly expire into "missed check-in" texts about calls the
     // scheduler was never going to place. Cancelling is the honest state: not missed, not
     // pending — withdrawn.
+    // Same as the pause and pre-warm holds: a slot that genuinely lapsed before the gate
+    // shut is a missed check-in and is reported, then the rest of the queue is dropped.
+    await expireLapsedSlots(db, parent, now);
     await cancelPendingSlots(db, parent.id, "consent_gate", now);
   }
 
@@ -465,8 +493,14 @@ async function processParent(
     if ((strandedScheduled ?? []).length > 0) {
       log.info("cron.cleared_stranded_no_consent", { parent_id: parent.id, cleared: strandedScheduled!.length });
     }
-  } else if (ctx.rules) {
+  } else if (ctx.rules && ctx.sourcesComplete) {
+    // The third dial path, and it was the one left ungated. With medications defaulted to
+    // [] by a failed read, a retry rings the parent and asks about nothing, consumes an
+    // attempt, and the "didn't answer" text that eventually follows names nothing that was
+    // missed — the same reasoning already written on dispatch and the stale reaper.
     await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now, ctx.watchItems);
+  } else if (ctx.rules) {
+    log.warn("cron.retries_skipped_incomplete_sources", { parent_id: parent.id });
   }
 
   return callsTriggered;
