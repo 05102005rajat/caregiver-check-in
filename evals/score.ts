@@ -87,7 +87,7 @@ export function scoreCase(testCase: EvalCase, output: CallSummary): CaseResult {
   if (!expect.anyConcern && alerted)
     fail("false-alarm", `false alarm: concerns=[${output.concerns.join(", ")}] missed=[${output.meds_missed.join(", ")}] mood=${output.mood}`);
 
-  if (expect.concernMatches && output.concerns.length > 0) {
+  if (expect.concernMatches) {
     const blob = output.concerns.join(" ").toLowerCase();
     if (!expect.concernMatches.some((m) => blob.includes(m.toLowerCase()))) {
       fail("concern", `concern reported but not the right one (got: ${output.concerns.join(", ")})`);

@@ -153,9 +153,22 @@ async function reapStaleScheduled(
     .lt("created_at", staleThreshold);
 
   for (const row of (staleRows ?? []) as Call[]) {
+    // Respect the same catch-up window as every other dial path. Without this a row
+    // stranded overnight was re-dialled the next day at whatever hour the tick ran —
+    // exactly the "very-late, confusing check-in call about a medication from hours ago"
+    // MAX_CATCHUP_MINUTES exists to prevent. There is also no attempt cap here, so if the
+    // post-dial write keeps failing (the very thing that strands a row) it would re-dial
+    // every tick forever; closing it out after the window bounds that.
+    const scheduledFor = new Date(row.scheduled_for);
+    if (minutesBetween(now, scheduledFor) > MAX_CATCHUP_MINUTES) {
+      const { error } = await db.from("calls").update({ status: "failed" }).eq("id", row.id).eq("status", "scheduled");
+      if (error) log.error("cron.abandon_stale_scheduled_failed", { call_id: row.id, err: error });
+      log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for });
+      continue;
+    }
     const medsForSlot = row.scheduled_meds
       ? medications.filter((m) => row.scheduled_meds!.includes(m.name))
-      : medsAtLocalTime(medications, new Date(row.scheduled_for), parent.timezone);
+      : medsAtLocalTime(medications, scheduledFor, parent.timezone);
     await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
   }
 }
@@ -222,9 +235,13 @@ async function processParent(
   // family got a burst of "their 9:00am check-in was missed" for a day nobody was ever
   // going to be called on. Ending a pause is precisely when they should hear nothing, and
   // a brand-new account has no missed history to report.
+  // resumed_at matters because the Resume button sets paused_until to null rather than
+  // moving it, so after an explicit resume this would otherwise collapse to created_at and
+  // fire the whole day's backlog of "missed check-in" texts — the exact burst it prevents.
   const coverageStartsAt = new Date(
     Math.max(
       parent.paused_until ? new Date(parent.paused_until).getTime() : 0,
+      parent.resumed_at ? new Date(parent.resumed_at).getTime() : 0,
       parent.created_at ? new Date(parent.created_at).getTime() : 0
     )
   );
@@ -362,13 +379,16 @@ async function processParent(
   // had promised she wouldn't ring again. Any outstanding no-answer rows are closed out
   // instead, so they don't sit in the queue waiting for consent that isn't coming.
   if (consentBlocksNewCalls) {
-    // Also clear any row stuck at 'scheduled'. reapStaleScheduled lives inside the gate
-    // above, so once the gate closes it never runs again — and a row left 'scheduled' by a
-    // failed post-dial write holds the calls_parent_active_unique index forever. That made
-    // /api/parents/test-call return 409 "there's already an active call" permanently, and
-    // the test call is the only documented way back out of the consent gate: both the
-    // dashboard banner and the refusal SMS tell the caregiver to use it. The recovery path
-    // was blocked by the very state it was meant to recover from.
+    // Clear only rows stranded at 'scheduled' — a dial that never happened, which holds
+    // calls_parent_active_unique and makes /api/parents/test-call return 409 forever. That
+    // test call is the documented way back out of the gate (dashboard banner and refusal
+    // SMS both point at it), so leaving it blocked made the gate inescapable.
+    //
+    // 'no_answer' rows are deliberately left alone. Closing them out as 'failed' rewrote
+    // the history the gate reads: a parent who never consented and simply didn't answer had
+    // their only call flipped, parents_with_calls stopped returning them, and the gate
+    // re-opened on the following tick — cold-calling resumed. Retries are already skipped
+    // here, so there is nothing to gain by touching them.
     const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
     const { data: strandedScheduled } = await db
       .from("calls")
@@ -377,18 +397,11 @@ async function processParent(
       .eq("status", "scheduled")
       .lt("created_at", staleThreshold);
 
-    const stranded = [...ctx.noAnswerCalls.map((c) => c.id), ...(strandedScheduled ?? []).map((r) => r.id as string)];
+    const stranded = (strandedScheduled ?? []).map((r) => r.id as string);
     if (stranded.length > 0) {
-      const { error } = await db
-        .from("calls")
-        .update({ status: "failed" })
-        .in("id", stranded)
-        .in("status", ["no_answer", "scheduled"]);
+      const { error } = await db.from("calls").update({ status: "failed" }).in("id", stranded).eq("status", "scheduled");
       if (error) log.error("cron.close_stranded_failed", { parent_id: parent.id, err: error });
-      // Deliberately no "missed call" alert here: the call wasn't missed, it was declined,
-      // and the caregiver was already told that once by the consent webhook. Sending a
-      // daily "we couldn't reach them" on top would be both wrong and nagging.
-      log.info("cron.retries_skipped_no_consent", { parent_id: parent.id, closed: stranded.length });
+      log.info("cron.cleared_stranded_no_consent", { parent_id: parent.id, cleared: stranded.length });
     }
   } else if (ctx.rules) {
     await processRetries(db, parent, ctx.caregiverName, ctx.rules, ctx.medications, ctx.appointments, ctx.noAnswerCalls, now, ctx.watchItems);

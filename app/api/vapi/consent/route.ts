@@ -79,16 +79,28 @@ export async function POST(request: Request) {
     // moments after Rosie promised she wouldn't ring again; and the caregiver was never
     // told, so the scheduler simply went quiet — which in a product built on "no news is
     // good news" reads exactly like everything working.
-    const { error } = await db
+    const { data: refused, error } = await db
       .from("parents")
       .update({ consent_refused_at: new Date().toISOString() })
       .eq("id", parentId)
       .is("consent_given_at", null)
-      .is("consent_refused_at", null);
+      .is("consent_refused_at", null)
+      .select("id")
+      .maybeSingle();
     if (error) {
       // Don't fail the tool call: making Rosie apologise and re-ask would press someone who
       // has just declined, which is the one thing the refusal path must never do.
       log.error("consent.persist_refusal_failed", { parent_id: parentId, err: error });
+    }
+
+    // Only when the refusal was actually recorded. The tool is reachable on any call and
+    // the prompt tells the model to use it whenever someone "seems unwilling", so an
+    // already-consented parent could otherwise trigger "we've stopped calling" while the
+    // scheduler carried on calling normally — an alert that contradicts the system's own
+    // behaviour. No row updated means nothing changed, so there is nothing to announce.
+    if (!refused) {
+      log.info("consent.refusal_not_recorded", { parent_id: parentId });
+      return NextResponse.json({ ok: true, result: "Understood." });
     }
 
     // Tell the caregiver their parent said no, once. Without this the only signal is an

@@ -16,6 +16,9 @@ export interface Parent {
   consent_given_at: string | null;
   /** Set when they explicitly declined. Distinct from "not asked yet", which is both null. */
   consent_refused_at: string | null;
+  /** When check-ins were last explicitly resumed. Resume clears paused_until rather than
+   *  moving it, so this is the only record that the gap was intentional. */
+  resumed_at: string | null;
   /** Scheduler skips this parent until this instant; null means active. */
   paused_until: string | null;
   created_at: string;

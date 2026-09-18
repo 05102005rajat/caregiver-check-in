@@ -139,7 +139,16 @@ export async function POST(request: Request) {
     db.from("watch_items").select("*").eq("parent_id", call.parent_id),
   ]);
   const parent = parentRow as Parent | null;
-  const parentName = parent?.name ?? "your family member";
+  if (!parent) {
+    // "We could not read the parent row" is not the same as "they did not consent", but the
+    // discard branch below cannot tell them apart — it would destroy the transcript, skip
+    // Claude, send nothing to the family, and log it as a refusal. A transient read failure
+    // must be retryable instead, so return 5xx and let Vapi redeliver; the atomic claim
+    // above makes redelivery safe.
+    log.error("webhook.parent_lookup_failed", { call_id: call.id, parent_id: call.parent_id });
+    return NextResponse.json({ ok: false, error: "Could not load parent" }, { status: 503 });
+  }
+  const parentName = parent.name;
   const concernKeywords = (rulesRow as EscalationRules | null)?.concern_keywords ?? DEFAULT_CONCERN_KEYWORDS;
 
   // No consent, no record.
@@ -154,7 +163,7 @@ export async function POST(request: Request) {
   //
   // So: keep the fact that a call happened, discard what was said, and don't send it to
   // Claude either. The caregiver has already been told about a refusal by /api/vapi/consent.
-  if (!parent?.consent_given_at) {
+  if (!parent.consent_given_at) {
     // Not storing the words is right. Dropping the emergency backstop with them is not:
     // someone can decline recording and, in the same breath, say "I fell and I can't get
     // up". The keyword scan exists precisely so a Claude outage or misclassification can't

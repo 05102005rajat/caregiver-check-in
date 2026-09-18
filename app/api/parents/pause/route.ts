@@ -38,11 +38,15 @@ export async function POST(request: Request) {
 
   // Scoped by caregiver_id, and RLS independently restricts this to their own parent —
   // there's no parent id in the request body to tamper with in the first place.
+  // Resuming clears paused_until, which erases any record that the gap was intentional.
+  // The scheduler needs that record: without it, the first tick after a resume sees every
+  // slot that already elapsed today as due-and-too-late and texts the family one "missed
+  // check-in" per slot — a burst of alarms for a day nobody was ever going to be called on.
   const { data, error } = await supabase
     .from("parents")
-    .update({ paused_until: until })
+    .update(until ? { paused_until: until } : { paused_until: null, resumed_at: new Date().toISOString() })
     .eq("caregiver_id", user.id)
-    .select("id, paused_until")
+    .select("id, paused_until, resumed_at")
     .maybeSingle();
 
   if (error || !data) {
