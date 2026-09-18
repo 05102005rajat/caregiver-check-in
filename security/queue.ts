@@ -272,6 +272,31 @@ async function main() {
       `state=${apptUncovered!.state} call_id=${apptUncovered!.call_id} — dispatch did not act, so the check above proves nothing`
     );
 
+    // ---- a slot revived after a hold must pick up edits made during it ----
+    // The medication reconcile loop reads a snapshot taken before the revive, so a slot
+    // revived on the same tick used to keep the list it was cancelled with: a caregiver who
+    // adds a dose while paused resumes into an evening call that never mentions it.
+    const { data: revivableSlot } = await admin
+      .from("call_slots")
+      .select("id, due_at")
+      .eq("parent_id", pid)
+      .eq("state", "pending")
+      .gt("due_at", realNow.toISOString())
+      .limit(1)
+      .maybeSingle();
+    if (revivableSlot) {
+      await admin.from("call_slots").update({ state: "cancelled", med_names: ["StaleMed"] }).eq("id", revivableSlot.id);
+      await materializeSlots(admin as never, parent, ctx, realNow);
+      const { data: revivedSlot } = await admin.from("call_slots").select("state, med_names").eq("id", revivableSlot.id).single();
+      check(
+        "a revived slot picks up medication edits made during the hold",
+        revivedSlot!.state === "pending" && !revivedSlot!.med_names.includes("StaleMed"),
+        `state=${revivedSlot!.state} med_names=${JSON.stringify(revivedSlot!.med_names)} — the call would name the wrong medication`
+      );
+    } else {
+      check("a revived slot picks up medication edits made during the hold", false, "no future pending slot to exercise this");
+    }
+
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);
     slots = await slotsOf(pid);

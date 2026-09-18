@@ -154,7 +154,14 @@ export async function materializeSlots(
       .in("id", revivable.map((r) => r.id))
       .eq("state", "cancelled");
     if (error) log.error("cron.revive_slots_failed", { parent_id: parent.id, err: error });
-    else log.info("cron.slots_revived", { parent_id: parent.id, count: revivable.length });
+    else {
+      log.info("cron.slots_revived", { parent_id: parent.id, count: revivable.length });
+      // The medication loop below reads this snapshot and skips anything that wasn't
+      // pending when it was taken, so a slot revived on this same tick would keep the
+      // medication list it was cancelled with. A caregiver who adds a dose while paused
+      // would then resume into an evening call that never mentions it.
+      for (const row of revivable) row.state = "pending";
+    }
   }
 
   // Same time, different medications.
@@ -263,6 +270,20 @@ export async function dispatchDueSlots(
     // appointment reminder is the only call that parent gets.
     if (slot.kind === "appointment") {
       const covering = await coveringCallToday(db, parent, now);
+      if (covering.covered && !covering.callId) {
+        // Covered, but we don't know by what — coveringCallToday failed closed on a read
+        // error. Parking the slot as dispatched with a null call_id makes it neither
+        // dispatchable nor expirable, recoverable only by the 10-minute stranded release;
+        // an appointment slot's life is short enough that a lookup error near expires_at
+        // would lose the reminder entirely, with no call and no alert. Release and retry.
+        await db
+          .from("call_slots")
+          .update({ state: "pending", updated_at: now.toISOString() })
+          .eq("id", slot.id)
+          .eq("state", "dispatched");
+        log.warn("cron.appointment_coverage_unknown", { parent_id: parent.id, slot_id: slot.id });
+        continue;
+      }
       if (covering.covered) {
         // Recorded as DISPATCHED against the call that covered it, not cancelled.
         //
@@ -347,12 +368,20 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     // dial_attempted_at is the right question to ask, and it is stamped before the dial
     // precisely so it survives whatever happens afterwards (0027). If it is set, we rang,
     // and the webhook and retry pipeline own reporting the outcome — not this branch.
-    const { data: existingCall } = await db
+    const { data: existingCall, error: existingCallError } = await db
       .from("calls")
       .select("id, status, dial_attempted_at")
       .eq("parent_id", parent.id)
       .eq("scheduled_for", slot.due_at)
       .maybeSingle();
+    if (existingCallError) {
+      // Fails CLOSED, like coveringCallToday. Treating a read error as "no call exists"
+      // bypasses the dial_attempted_at guard below and texts "their 9:00am check-in was
+      // missed" about a call that was placed and connected — the exact false alarm that
+      // guard was added to prevent. The slot stays pending and the next tick decides.
+      log.error("cron.expiry_call_lookup_failed", { parent_id: parent.id, slot_id: slot.id, err: existingCallError });
+      continue;
+    }
 
     if (existingCall?.dial_attempted_at) {
       const { data: served } = await db

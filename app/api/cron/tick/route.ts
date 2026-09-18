@@ -160,6 +160,33 @@ async function processRetries(
 }
 
 /**
+ * Whether a `calls` row corresponds to a slot the queue planned, as opposed to a manual
+ * test call the caregiver started from the dashboard. The two rows are identical; only the
+ * presence of a slot at that instant tells them apart.
+ *
+ * Fails CLOSED on a read error — "scheduled" is the noisy-but-safe answer, since the cost
+ * of guessing wrong that way is a alert about a real slot rather than silence about one.
+ */
+async function isQueuedObligation(
+  db: ReturnType<typeof createAdminClient>,
+  parentId: string,
+  scheduledFor: string
+): Promise<boolean> {
+  const { data, error } = await db
+    .from("call_slots")
+    .select("id")
+    .eq("parent_id", parentId)
+    .eq("due_at", scheduledFor)
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    log.error("cron.slot_lookup_failed", { parent_id: parentId, scheduled_for: scheduledFor, err: error });
+    return true;
+  }
+  return Boolean(data);
+}
+
+/**
  * A calls row can get stuck in 'scheduled' forever if dialAndRecord's post-dial DB write
  * failed right after a successful Vapi call (rare, but the row never got its vapi_call_id
  * or a called_at, so the in_progress reaper below never sees it) — or, less likely, if
@@ -264,7 +291,7 @@ async function reapStaleScheduled(
     // status='scheduled' meant two overlapping invocations both matched the same row, both
     // "claimed" it and both dialled — two real phone calls to the same person. The column
     // was named for the claim without the guard that implements it.
-    const { data: claimed } = await db
+    const { data: claimed, error: claimError } = await db
       .from("calls")
       .update({ stale_redial_at: now.toISOString() })
       .eq("id", row.id)
@@ -272,6 +299,14 @@ async function reapStaleScheduled(
       .or(`stale_redial_at.is.null,stale_redial_at.lt.${staleThreshold}`)
       .select("id")
       .maybeSingle();
+    // Distinguished, because they mean opposite things: no error and no row = another tick
+    // holds the claim, which is fine; an error = this reaper did nothing and said nothing.
+    // A missing column or a permissions change would otherwise turn the whole recovery path
+    // into a silent no-op — no redial, no give-up, no alert, and not a line in the logs.
+    if (claimError) {
+      log.error("cron.stale_redial_claim_failed", { call_id: row.id, parent_id: parent.id, err: claimError });
+      continue;
+    }
     if (!claimed) continue;
 
     if (giveUp) {
@@ -285,7 +320,9 @@ async function reapStaleScheduled(
       log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, stranded_for_minutes: Math.round(strandedForMinutes) });
       // Giving up here was silent. The slot for this time is already 'dispatched' and linked
       // to this row, so it will never expire either — the check-in simply stops existing.
-      if (closed) {
+      // Only for a call the queue actually asked for: a stranded manual test call is not a
+      // missed check-in and must not be reported to the family as one.
+      if (closed && (await isQueuedObligation(db, parent.id, row.scheduled_for))) {
         const time = formatLocalTime(scheduledFor, parent.timezone);
         await notifyFamilyContacts(
           db,
@@ -302,7 +339,21 @@ async function reapStaleScheduled(
     const medsForSlot = row.scheduled_meds
       ? resolveMedsForSlot(medications, row.scheduled_meds, scheduledFor, parent.timezone)
       : medsAtLocalTime(medications, scheduledFor, parent.timezone);
-    await dialAndRecord(db, row.id, parent, caregiverName, medsForSlot, appointmentsToday(appointments, parent.timezone, now), watchItems);
+    await dialAndRecord(
+      db,
+      row.id,
+      parent,
+      caregiverName,
+      medsForSlot,
+      appointmentsToday(appointments, parent.timezone, now),
+      watchItems,
+      // A manual test call's `calls` row looks exactly like a scheduled one, so re-dialling
+      // it with the default purpose let the family be texted "their 8:55pm check-in didn't
+      // go out" about a call that was never on the schedule — undoing the whole point of
+      // the "manual" purpose the test-call route passes. A scheduled obligation is one the
+      // queue asked for, so a row with no slot behind it is the caregiver's own button.
+      (await isQueuedObligation(db, parent.id, row.scheduled_for)) ? "scheduled" : "manual"
+    );
   }
 }
 

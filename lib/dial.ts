@@ -82,13 +82,21 @@ export async function dialAndRecord(
     // consent withdrawal be ignored three times. Here it decides whether *we* are the ones
     // who closed this slot out, and therefore whether we owe anyone a message: without it,
     // an overlapping tick that already handled this row would send a second identical text.
-    const { data: closed } = await db
+    const { data: closed, error: closeError } = await db
       .from("calls")
       .update({ status: "failed" })
       .eq("id", callId)
       .in("status", ["scheduled", "in_progress"])
       .select("scheduled_for")
       .maybeSingle();
+    // A null `closed` means two different things and only one of them is fine. No error =
+    // another tick already closed this slot, so staying quiet is right. An error = the row
+    // is still scheduled/in_progress and nobody has been told, which is the silent path
+    // this whole branch exists to close — and the next tick will find the row and try
+    // again, so the alert is delayed rather than lost. Logged either way so it is visible.
+    if (closeError) {
+      log.error("dial.close_out_failed", { call_id: callId, parent_id: parent.id, err: closeError });
+    }
 
     // Tell the family. This is the whole point of the fix: refusing the window is correct,
     // but the refusal used to be terminal *and* silent — the row is left occupying
