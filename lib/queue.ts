@@ -142,7 +142,7 @@ export async function materializeSlots(
 
   const { data: existing, error: existingError } = await db
     .from("call_slots")
-    .select("id, due_at, expires_at, med_names, state")
+    .select("id, due_at, expires_at, kind, appointment_id, med_names, state")
     .eq("parent_id", parent.id)
     .gte("due_at", startUtc.toISOString())
     .lte("due_at", endUtc.toISOString());
@@ -152,7 +152,9 @@ export async function materializeSlots(
   }
 
   let ok = true;
-  const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "expires_at" | "med_names" | "state">>;
+  const rows = (existing ?? []) as Array<
+    Pick<CallSlot, "id" | "due_at" | "expires_at" | "kind" | "appointment_id" | "med_names" | "state">
+  >;
   const sameMeds = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
   // Still pending but no longer planned at all: the medication moved or was removed.
@@ -203,18 +205,39 @@ export async function materializeSlots(
     }
   }
 
-  // Same time, different medications.
+  // Same time, different plan. Not just med_names: a slot keeps its due_at but everything
+  // else about it can change underneath.
+  //
+  // The damaging case is `kind`. An appointment at 12:00 materialises a reminder at 11:00;
+  // the caregiver then adds a medication at 11:00, so the plan holds a medication slot at
+  // that instant and the row is not orphaned — but rewriting only med_names left
+  // kind='appointment', so dispatch took the appointment branch, found the morning's call
+  // covering the day, and parked it. The 11:00 dose was never asked about. `expires_at`
+  // matters too: an 08:30 appointment moved to 09:00 keeps its clamped 08:00 reminder, and
+  // a stale expires_at pinned to the old start expires it half an hour early.
   for (const row of rows) {
     if (row.state !== "pending") continue;
     const planned = plannedByDue.get(new Date(row.due_at).getTime());
-    if (!planned || sameMeds(row.med_names, planned.medNames)) continue;
+    if (!planned) continue;
+    const drifted =
+      !sameMeds(row.med_names, planned.medNames) ||
+      row.kind !== planned.kind ||
+      row.appointment_id !== planned.appointmentId ||
+      new Date(row.expires_at).getTime() !== planned.expiresAt.getTime();
+    if (!drifted) continue;
     const { error } = await db
       .from("call_slots")
-      .update({ med_names: planned.medNames, updated_at: now.toISOString() })
+      .update({
+        med_names: planned.medNames,
+        kind: planned.kind,
+        appointment_id: planned.appointmentId,
+        expires_at: planned.expiresAt.toISOString(),
+        updated_at: now.toISOString(),
+      })
       .eq("id", row.id)
       .eq("state", "pending");
     if (error) {
-      log.error("cron.slot_meds_update_failed", { parent_id: parent.id, slot_id: row.id, err: error });
+      log.error("cron.slot_reconcile_failed", { parent_id: parent.id, slot_id: row.id, err: error });
       ok = false;
     }
   }
@@ -518,17 +541,22 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
         // 23505 means a row appeared between the read above and this insert. Re-read rather
         // than abandoning the alert, which is what a bare `continue` used to do.
         if (insertError.code !== "23505") {
+          // Falls into the same recovery as the !callId block below rather than a bare
+          // continue: the slot is already claimed 'expired' and expiry only ever re-reads
+          // 'pending', so continuing consumes a real missed check-in permanently — no calls
+          // row, no text, ok still true, heartbeat stamped, /api/health green.
           log.error("cron.expired_slot_call_insert_failed", { parent_id: parent.id, slot_id: slot.id, err: insertError });
-          continue;
+          callId = null;
+        } else {
+          const { data: raced, error: racedError } = await db
+            .from("calls")
+            .select("id")
+            .eq("parent_id", parent.id)
+            .eq("scheduled_for", slot.due_at)
+            .maybeSingle();
+          if (racedError) log.error("cron.expired_slot_reread_failed", { parent_id: parent.id, slot_id: slot.id, err: racedError });
+          callId = raced?.id ?? null;
         }
-        const { data: raced, error: racedError } = await db
-          .from("calls")
-          .select("id")
-          .eq("parent_id", parent.id)
-          .eq("scheduled_for", slot.due_at)
-          .maybeSingle();
-        if (racedError) log.error("cron.expired_slot_reread_failed", { parent_id: parent.id, slot_id: slot.id, err: racedError });
-        callId = raced?.id ?? null;
       } else {
         callId = inserted?.id ?? null;
       }

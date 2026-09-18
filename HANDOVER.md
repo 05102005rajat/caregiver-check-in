@@ -33,7 +33,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33** (was 27/28). Two new runtime suites:
-  `npm run security:refusal` (10/10) and `npm run security:queue` (31/31). 157 unit tests.
+  `npm run security:refusal` (10/10) and `npm run security:queue` (32/32). 157 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off**, transcripts on. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
@@ -249,6 +249,13 @@ their tests when reintroduced.
 
 Verification code is the one place a bug produces **no symptom**. Give it more suspicion
 than product code, not less.
+
+**And the same applies to the edits themselves.** Several fixes in this branch were applied
+with `str.replace()` and no assertion that the pattern matched. One of them — a revert that
+stops an expired slot consuming its own alert — silently did nothing for two review rounds,
+and the code read as if the fix were present because the comment describing it landed
+elsewhere. If you patch by search-and-replace, assert the match count, and re-read the
+result. A no-op edit and a successful one look identical afterwards.
 
 ---
 

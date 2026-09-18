@@ -19,6 +19,7 @@ import { createClient } from "@supabase/supabase-js";
 import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
 import { SLOT_CATCHUP_MINUTES } from "@/lib/slots";
 import { isWithinCallingHours } from "@/lib/callwindow";
+import { scheduledForToday } from "@/lib/schedule";
 import { tooLateFingerprint } from "@/lib/insights";
 import type { CallSlot, Medication, Parent } from "@/types/db";
 
@@ -398,6 +399,41 @@ async function main() {
     );
     await admin.from("call_slots").delete().eq("id", apptSlot3!.id);
     await admin.from("calls").delete().eq("id", strandedCall.id);
+
+    // ---- an appointment slot re-planned as a medication slot must change kind ----
+    // Reconciliation rewrote med_names only. An appointment reminder at 11:00, then a
+    // medication added at 11:00, left kind='appointment' on a row the plan now says is a
+    // medication call — so dispatch took the appointment branch, found the morning's call
+    // covering the day, parked it, and the dose was never asked about.
+    // Built with scheduledForToday, the same function the planner uses. A timestamp carrying
+    // seconds would not match the plan's whole-minute due_at, so the slot would be orphaned
+    // and deleted — the fixture would exercise reconciliation's delete path, not its update.
+    const driftLocal = hhmm(new Date(realNow.getTime() + 45 * 60000), tz);
+    const driftDue = scheduledForToday(driftLocal, tz, realNow).toISOString();
+    const { data: driftSlot, error: driftError } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: driftDue, expires_at: new Date(realNow.getTime() + 3 * 60 * 60000).toISOString(),
+        kind: "appointment", med_names: [], state: "pending",
+      })
+      .select("id")
+      .single();
+    if (driftError || !driftSlot) throw new Error(`drift fixture failed: ${driftError?.message}`);
+    const { data: driftMed } = await admin
+      .from("medications")
+      .insert({ parent_id: pid, name: "DriftMed", dose: "", time_of_day: driftLocal, active: true })
+      .select("*")
+      .single();
+    const { data: allMeds } = await admin.from("medications").select("*").eq("parent_id", pid);
+    await materializeSlots(admin as never, parent, { ...ctx, medications: (allMeds ?? []) as Medication[] }, realNow);
+    const { data: drifted } = await admin.from("call_slots").select("kind, med_names").eq("id", driftSlot.id).single();
+    check(
+      "a slot whose plan changed kind is reconciled, not just its medication list",
+      drifted!.kind === "medication" && drifted!.med_names.includes("DriftMed"),
+      `kind=${drifted!.kind} med_names=${JSON.stringify(drifted!.med_names)} — dispatch would treat a medication call as an appointment reminder and park it`
+    );
+    if (driftMed) await admin.from("medications").delete().eq("id", driftMed.id);
+    await admin.from("call_slots").delete().eq("id", driftSlot.id);
 
     // ---- cancel ----
     await cancelPendingSlots(admin as never, pid, "harness", realNow);

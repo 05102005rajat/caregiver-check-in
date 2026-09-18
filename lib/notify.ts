@@ -37,7 +37,7 @@ async function alreadyNotified(
   // duplicate of a message that came back `undelivered` means nobody is ever told —
   // the system has the data to know better and was not consulting it. A null
   // delivery_status (no callback yet) still counts: we have no evidence it failed.
-  const { data: recent } = await db
+  const { data: recent, error: recentError } = await db
     .from("messages")
     .select("id")
     .eq("parent_id", parentId)
@@ -52,6 +52,15 @@ async function alreadyNotified(
     .gte("sent_at", since)
     .limit(1)
     .maybeSingle();
+  if (recentError) {
+    // Fails OPEN, deliberately and in the opposite direction to the opt-out check above: a
+    // dedupe read that errors means we cannot prove the family already heard this, and for
+    // a safety alert a duplicate text is much better than a silence we cannot detect.
+    // Logged because the refactor runs this two or three times per alert, so a persistent
+    // read failure shows up as the same message repeating rather than as an error anywhere.
+    log.error("notify.dedupe_lookup_failed", { parent_id: parentId, recipient, fingerprint, err: recentError });
+    return false;
+  }
   return Boolean(recent);
 }
 
@@ -69,7 +78,7 @@ async function alreadySuppressed(
   since: string
 ): Promise<boolean> {
   if (!fingerprint) return false;
-  const { data } = await db
+  const { data, error } = await db
     .from("messages")
     .select("id")
     .eq("parent_id", parentId)
@@ -80,6 +89,12 @@ async function alreadySuppressed(
     .gte("sent_at", since)
     .limit(1)
     .maybeSingle();
+  if (error) {
+    // Fails open like the dedupe check: the cost is one duplicate "opted out" row, which is
+    // bookkeeping noise, never a message to anyone.
+    log.error("notify.suppression_lookup_failed", { parent_id: parentId, recipient, fingerprint, err: error });
+    return false;
+  }
   return Boolean(data);
 }
 
@@ -97,14 +112,21 @@ async function sendAlert(
   // Honour opt-outs. The public form and every message promise that replying STOP or
   // asking us to remove a number takes effect — a promise with no mechanism behind it is
   // worse than not making it, and for SMS it's a compliance obligation, not a courtesy.
-  const { data: optOut } = await db
+  const { data: optOut, error: optOutError } = await db
     .from("sms_opt_ins")
     .select("revoked_at")
     .eq("phone", phone)
     .not("revoked_at", "is", null)
     .limit(1)
     .maybeSingle();
-  const suppressed = Boolean(optOut);
+  if (optOutError) {
+    // Fails CLOSED, and this is the one place in this file where that is not a judgement
+    // call. Treating a failed read as "no opt-out on file" texts someone who sent STOP,
+    // which is a compliance violation and a broken promise, not a degraded experience.
+    // A missed alert to this recipient is recoverable; an unlawful message is not.
+    log.error("notify.opt_out_lookup_failed", { parent_id: parentId, call_id: callId, recipient: phone, err: optOutError });
+  }
+  const suppressed = Boolean(optOut) || Boolean(optOutError);
   if (suppressed) {
     log.info("notify.suppressed_opt_out", { parent_id: parentId, call_id: callId, recipient: phone });
   }
@@ -243,11 +265,16 @@ export async function notifyFamilyContacts(
   }
 
   if (parentRow?.caregiver_id) {
-    const { data: caregiver } = await db
+    const { data: caregiver, error: caregiverError } = await db
       .from("caregivers")
       .select("phone, email")
       .eq("id", parentRow.caregiver_id)
       .single();
+    // The account holder is the one person guaranteed to be on every alert. A failed read
+    // here drops them from it silently, which is the shape this whole branch is about.
+    if (caregiverError) {
+      log.error("notify.caregiver_lookup_failed", { parent_id: parentId, call_id: callId, err: caregiverError });
+    }
     if (caregiver?.phone) {
       await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint, since);
     }

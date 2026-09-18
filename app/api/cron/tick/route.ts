@@ -89,7 +89,7 @@ async function processRetries(
     // Optimistic-concurrency claim: only proceeds if the row is still exactly as we
     // read it. If an overlapping cron tick already claimed it, this affects 0 rows and
     // we back off, instead of both invocations placing a duplicate retry call.
-    const { data: claimed } = await db
+    const { data: claimed, error: retryClaimError } = await db
       .from("calls")
       .update(
         nextStatus === "failed"
@@ -107,6 +107,10 @@ async function processRetries(
       .select()
       .maybeSingle();
 
+    if (retryClaimError) {
+      log.error("cron.retry_claim_failed", { call_id: call.id, parent_id: parent.id, err: retryClaimError });
+      continue;
+    }
     if (!claimed) continue; // lost the race to another cron invocation
 
     const scheduledFor = new Date(call.scheduled_for);
@@ -225,19 +229,26 @@ async function reapStaleScheduled(
   appointments: Appointment[],
   now: Date,
   watchItems: WatchItem[]
-) {
+): Promise<boolean> {
   // Same 10-minute (2x max call duration) buffer as the in_progress reaper below — a call
   // that's actually still ringing/talking can legitimately keep this row at 'scheduled'
   // for close to the full call duration if the post-dial bookkeeping write failed; a
   // shorter threshold risked re-dialing a parent mid-conversation.
   const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
-  const { data: staleRows } = await db
+  const { data: staleRows, error: staleRowsError } = await db
     .from("calls")
     .select("*")
     .eq("parent_id", parent.id)
     .eq("status", "scheduled")
     .lt("created_at", staleThreshold);
+  if (staleRowsError) {
+    // "No stranded rows" and "could not look" are opposite facts. This is the only path
+    // that recovers a call whose post-dial write failed.
+    log.error("cron.stale_rows_query_failed", { parent_id: parent.id, err: staleRowsError });
+    return false;
+  }
 
+  let ok = true;
   for (const row of (staleRows ?? []) as Call[]) {
     // Respect the same catch-up window as every other dial path. Without this a row
     // stranded overnight was re-dialled the next day at whatever hour the tick ran —
@@ -250,6 +261,17 @@ async function reapStaleScheduled(
     // abandon a row scheduled in the future as though it were hours late.
     const minutesLate = (now.getTime() - scheduledFor.getTime()) / 60000;
     if (minutesLate > SLOT_CATCHUP_MINUTES) {
+      // Asked BEFORE the close-out, not after. slotFor's contract is that an unreadable
+      // call_slots leaves the row alone for this tick — but consulting it after flipping
+      // the row to 'failed' closed the row out AND skipped the alert forever, since expiry
+      // never looks at a dispatched slot. The decision has to precede the irreversible bit.
+      const abandonSlot = await slotFor(db, parent.id, row.scheduled_for);
+      if (!abandonSlot.known) {
+        log.warn("cron.abandon_deferred_unknown_slot", { call_id: row.id, parent_id: parent.id });
+        ok = false;
+        continue;
+      }
+
       // Nothing to preserve here any more: dial_attempted_at (migration 0027) was written
       // before the dial and survives whatever happened after, so closing the row out can no
       // longer erase the consent gate's evidence. The previous attempt to preserve it —
@@ -264,6 +286,7 @@ async function reapStaleScheduled(
         // Don't log success after a failure: the row stays 'scheduled' and is re-abandoned
         // every tick, and a cheerful "abandoned" line each time hides that it never worked.
         log.error("cron.abandon_stale_scheduled_failed", { call_id: row.id, err: error });
+        ok = false;
         continue;
       }
       log.info("cron.abandoned_stale_scheduled", { call_id: row.id, parent_id: parent.id, scheduled_for: row.scheduled_for });
@@ -277,13 +300,8 @@ async function reapStaleScheduled(
       // manual test call at 15:42 stranded gets the family texted "we couldn't complete
       // their check-in around 3:42pm" about a call that was never on the schedule — the
       // fabricated alarm the "manual" purpose exists to prevent, arriving by another door.
-      const abandonSlot = await slotFor(db, parent.id, row.scheduled_for);
-      if (!abandonSlot.known || !abandonSlot.found) {
-        log.info("cron.abandon_alert_skipped", {
-          call_id: row.id,
-          parent_id: parent.id,
-          reason: abandonSlot.known ? "no_slot_manual_call" : "slot_unknown",
-        });
+      if (!abandonSlot.found) {
+        log.info("cron.abandon_alert_skipped", { call_id: row.id, parent_id: parent.id, reason: "no_slot_manual_call" });
         continue;
       }
       const time = formatLocalTime(scheduledFor, parent.timezone);
@@ -341,11 +359,19 @@ async function reapStaleScheduled(
     // into a silent no-op — no redial, no give-up, no alert, and not a line in the logs.
     if (claimError) {
       log.error("cron.stale_redial_claim_failed", { call_id: row.id, parent_id: parent.id, err: claimError });
+      ok = false;
       continue;
     }
     if (!claimed) continue;
 
     if (giveUp) {
+      // Same ordering rule as the abandon branch above: decide before the close-out.
+      const giveUpSlot = await slotFor(db, parent.id, row.scheduled_for);
+      if (!giveUpSlot.known) {
+        log.warn("cron.giveup_deferred_unknown_slot", { call_id: row.id, parent_id: parent.id });
+        ok = false;
+        continue;
+      }
       const { data: closed, error: closeError } = await db
         .from("calls")
         .update({ status: "failed" })
@@ -357,15 +383,16 @@ async function reapStaleScheduled(
       // check that was in this line before — in the commit whose subject was discarded
       // errors turning guards back into silence. Logging "exhausted" while the close-out
       // failed asserts in the logs that a row was closed when it is still scheduled.
-      if (closeError) log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: closeError });
+      if (closeError) {
+        log.error("cron.stale_redial_giveup_failed", { call_id: row.id, err: closeError });
+        ok = false;
+      }
       log.error("cron.stale_redial_exhausted", { call_id: row.id, parent_id: parent.id, stranded_for_minutes: Math.round(strandedForMinutes) });
       // Giving up here was silent. The slot for this time is already 'dispatched' and linked
       // to this row, so it will never expire either — the check-in simply stops existing.
       // Only for a call the queue actually asked for: a stranded manual test call is not a
       // missed check-in and must not be reported to the family as one.
-      const giveUpSlot = await slotFor(db, parent.id, row.scheduled_for);
-      if (!giveUpSlot.known) log.error("cron.giveup_alert_skipped_unknown_slot", { call_id: row.id, parent_id: parent.id });
-      if (closed && giveUpSlot.known && giveUpSlot.found) {
+      if (closed && giveUpSlot.found) {
         const time = formatLocalTime(scheduledFor, parent.timezone);
         await notifyFamilyContacts(
           db,
@@ -387,6 +414,7 @@ async function reapStaleScheduled(
       // Leave the row exactly as it is and try again next tick, rather than guessing at a
       // purpose. The claim already advanced stale_redial_at, so this costs one attempt.
       log.warn("cron.stale_redial_deferred_unknown_slot", { call_id: row.id, parent_id: parent.id });
+      ok = false;
       continue;
     }
 
@@ -419,6 +447,7 @@ async function reapStaleScheduled(
       slot.found ? "scheduled" : "manual"
     );
   }
+  return ok;
 }
 
 interface ParentContext {
@@ -495,7 +524,9 @@ async function processParent(
     // Skipped on an incomplete read for the same reason as dispatch: this path re-dials,
     // and an empty medication list would place a call that asks about nothing.
     if (ctx.sourcesComplete) {
-      await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems);
+      if (!(await reapStaleScheduled(db, parent, ctx.caregiverName, ctx.medications, ctx.appointments, now, ctx.watchItems))) {
+        degraded = true;
+      }
     }
   } else {
     // A parent who declined, or who hasn't consented after a first call, must not have
@@ -524,13 +555,17 @@ async function processParent(
     // re-opened on the following tick — cold-calling resumed. Retries are already skipped
     // here, so there is nothing to gain by touching them.
     const staleThreshold = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
-    const { data: strandedScheduled } = await db
+    const { data: strandedScheduled, error: strandedScheduledError } = await db
       .from("calls")
       .select("id")
       .eq("parent_id", parent.id)
       .eq("status", "scheduled")
       .lt("created_at", staleThreshold);
 
+    if (strandedScheduledError) {
+      log.error("cron.stranded_scheduled_query_failed", { parent_id: parent.id, err: strandedScheduledError });
+      degraded = true;
+    }
     for (const row of (strandedScheduled ?? []) as Array<{ id: string }>) {
       // Safe to close out: dial_attempted_at (0027) was written before the dial, so this
       // cannot erase the consent gate's evidence the way earlier versions did. Keeping the

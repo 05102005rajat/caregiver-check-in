@@ -179,7 +179,7 @@ export async function dialAndRecord(
     // as 'failed' instead: processRetries only ever reads no_answer, so this stays out of
     // it, and the caregiver already learns it failed from the response to their click.
     log.error("dial.trigger_failed", { call_id: callId, parent_id: parent.id, purpose, err });
-    await db
+    const { error: providerStatusError } = await db
       .from("calls")
       .update(
         purpose === "manual"
@@ -187,6 +187,12 @@ export async function dialAndRecord(
           : { status: "no_answer", called_at: new Date().toISOString() }
       )
       .eq("id", callId);
+    // If this fails the row stays scheduled/in_progress and enters neither the retry
+    // pipeline nor any terminal state — the stale reaper is the only thing that will ever
+    // look at it again, so the failure needs to be visible.
+    if (providerStatusError) {
+      log.error("dial.provider_error_status_write_failed", { call_id: callId, parent_id: parent.id, err: providerStatusError });
+    }
     return { dialed: false, reason: "provider_error" };
   }
 
