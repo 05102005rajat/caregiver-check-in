@@ -40,7 +40,7 @@ function check(name: string, passed: boolean, detail?: string) {
 }
 
 /** Rows a tenant must never see belonging to another tenant. */
-const CHILD_TABLES = ["medications", "appointments", "family_contacts", "watch_items", "calls", "messages"] as const;
+const CHILD_TABLES = ["medications", "appointments", "family_contacts", "watch_items", "calls", "messages", "call_slots"] as const;
 
 async function makeUser(tag: string) {
   const email = `sec-probe-${tag}-${Date.now()}@example.invalid`;
@@ -95,6 +95,18 @@ async function main() {
       .select()
       .single();
     await admin.from("messages").insert({ parent_id: parentA, call_id: call!.id, recipient: "+15555550103", body: "secret alert", status: "sent", channel: "sms" });
+
+    // A queue slot, so the call_slots RLS policy added in 0033 is actually exercised. It is
+    // the newest caregiver-readable table in the schema, and this suite is the only thing
+    // that proves such a policy holds — HANDOVER records that policies which looked right
+    // have shipped here before and weren't.
+    await admin.from("call_slots").insert({
+      parent_id: parentA,
+      due_at: new Date(Date.now() + 3600000).toISOString(),
+      expires_at: new Date(Date.now() + 7200000).toISOString(),
+      kind: "medication",
+      med_names: ["SecretMed"],
+    });
 
     console.log("");
 
@@ -287,7 +299,7 @@ async function main() {
       p_parent_id: parentA,
     });
 
-    const CLEANUP_TABLES = ["messages", "calls", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"] as const;
+    const CLEANUP_TABLES = ["messages", "calls", "call_slots", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"] as const;
     let residue = 0;
     for (const t of CLEANUP_TABLES) {
       // escalation_rules is keyed by parent_id with no `id` column, so selecting "id" there
@@ -387,7 +399,7 @@ async function main() {
       const pid = row.id as string;
       await admin.from("messages").delete().eq("parent_id", pid);
       await admin.from("calls").delete().eq("parent_id", pid);
-      for (const t of ["medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
+      for (const t of ["call_slots", "medications", "appointments", "family_contacts", "watch_items", "escalation_rules"]) {
         await admin.from(t).delete().eq("parent_id", pid);
       }
       await admin.from("parents").delete().eq("id", pid);

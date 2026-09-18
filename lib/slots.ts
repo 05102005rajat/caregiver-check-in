@@ -164,6 +164,10 @@ export function planSlotsForDay(
   // collide on the unique index. First one wins; the rest of the day's appointments are
   // still named inside that call.
   const seen = new Set<number>();
+  // Sorted before deduping, so a due_at collision resolves to the earliest slot rather than
+  // whichever the medication query happened to return first. Harmless while time_of_day is
+  // uniformly HH:MM:SS, but "first one wins" is not what this means.
+  slots.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
   return {
     slots: slots.filter((slot) => {
       const key = slot.dueAt.getTime();

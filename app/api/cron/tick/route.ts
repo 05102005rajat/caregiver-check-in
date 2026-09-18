@@ -273,6 +273,19 @@ async function reapStaleScheduled(
       // a check-in that never happened would otherwise produce no call, no text and no
       // record anywhere that it was missed. Previously the row was re-dialled, so at worst
       // the parent got a late call; abandoning it without this is strictly quieter.
+      // Gated like the give-up and redial branches below. Without it, a caregiver whose
+      // manual test call at 15:42 stranded gets the family texted "we couldn't complete
+      // their check-in around 3:42pm" about a call that was never on the schedule — the
+      // fabricated alarm the "manual" purpose exists to prevent, arriving by another door.
+      const abandonSlot = await slotFor(db, parent.id, row.scheduled_for);
+      if (!abandonSlot.known || !abandonSlot.found) {
+        log.info("cron.abandon_alert_skipped", {
+          call_id: row.id,
+          parent_id: parent.id,
+          reason: abandonSlot.known ? "no_slot_manual_call" : "slot_unknown",
+        });
+        continue;
+      }
       const time = formatLocalTime(scheduledFor, parent.timezone);
       await notifyFamilyContacts(
         db,
@@ -439,8 +452,8 @@ async function processParent(
     // really was missed, which then never got a calls row and never told anyone, because
     // the caregiver happened to hit Pause a couple of minutes later.
     const expired = await expireLapsedSlots(db, parent, now);
-    await cancelPendingSlots(db, parent.id, "paused", now);
-    return { callsTriggered: 0, degraded: !expired };
+    const cancelled = await cancelPendingSlots(db, parent.id, "paused", now);
+    return { callsTriggered: 0, degraded: !expired || !cancelled };
   }
 
   // Don't ring before the caregiver said their parent would be ready. The first contact is
@@ -453,8 +466,8 @@ async function processParent(
     // really was missed, which then never got a calls row and never told anyone, because
     // the caregiver happened to hit Pause a couple of minutes later.
     const expired = await expireLapsedSlots(db, parent, now);
-    await cancelPendingSlots(db, parent.id, "prewarm_hold", now);
-    return { callsTriggered: 0, degraded: !expired };
+    const cancelled = await cancelPendingSlots(db, parent.id, "prewarm_hold", now);
+    return { callsTriggered: 0, degraded: !expired || !cancelled };
   }
 
   // Consent gate (spec section 8): the very first call always goes out so Rosie can ask
@@ -492,7 +505,7 @@ async function processParent(
     // Same as the pause and pre-warm holds: a slot that genuinely lapsed before the gate
     // shut is a missed check-in and is reported, then the rest of the queue is dropped.
     if (!(await expireLapsedSlots(db, parent, now))) degraded = true;
-    await cancelPendingSlots(db, parent.id, "consent_gate", now);
+    if (!(await cancelPendingSlots(db, parent.id, "consent_gate", now))) degraded = true;
   }
 
   // Retries sat outside the consent gate, which meant a parent who missed the morning call,

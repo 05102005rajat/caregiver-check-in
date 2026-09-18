@@ -193,13 +193,46 @@ async function main() {
       `${beforeWipe} pending before, ${afterWipe} after — a transient query error deleted the day`
     );
 
-    // Control: with sourcesComplete true, an empty plan really does clear them, so the
-    // check above is testing the guard and not an inert code path.
+    // A lapsed-but-unexpired slot must survive reconciliation. materializeSlots runs before
+    // expireLapsedSlots, so deleting it as an orphan consumes a genuine missed check-in: the
+    // dial failed and released it to pending, the caregiver then moved that medication, and
+    // the next tick deleted the slot before expiry could write a calls row or tell anyone.
+    const lapsedDue = new Date(realNow.getTime() - 3 * 60 * 60000).toISOString();
+    const { data: lapsedSlot, error: lapsedSlotError } = await admin
+      .from("call_slots")
+      .insert({
+        parent_id: pid, due_at: lapsedDue, expires_at: new Date(realNow.getTime() - 60 * 60000).toISOString(),
+        kind: "medication", med_names: ["GoneMed"], state: "pending",
+      })
+      .select("id")
+      .single();
+    if (lapsedSlotError || !lapsedSlot) throw new Error(`lapsed-slot fixture failed: ${lapsedSlotError?.message}`);
     await materializeSlots(admin as never, parent, { ...ctx, medications: [], sourcesComplete: true }, realNow);
+    const { data: lapsedStill } = await admin.from("call_slots").select("state").eq("id", lapsedSlot!.id).maybeSingle();
     check(
-      "a genuinely empty plan does clear pending slots (control)",
+      "reconciliation does not delete a lapsed slot before it has been reported",
+      lapsedStill !== null,
+      "the slot was deleted as an orphan — a missed check-in with no calls row and no alert"
+    );
+    // And it must then be reported, not just survive.
+    await expireLapsedSlots(admin as never, parent, realNow);
+    const { data: lapsedMsgs } = await admin
+      .from("messages")
+      .select("id")
+      .eq("parent_id", pid)
+      .eq("fingerprint", tooLateFingerprint(lapsedDue));
+    check(
+      "that lapsed slot is then reported to the family",
+      (lapsedMsgs ?? []).length > 0,
+      `${(lapsedMsgs ?? []).length} messages`
+    );
+
+    // Control: an empty plan really does clear a still-live pending slot, so the check
+    // above is testing the expires_at bound and not an inert code path.
+    check(
+      "a genuinely empty plan does clear still-live pending slots (control)",
       (await slotsOf(pid)).filter((s) => s.state === "pending").length === 0,
-      "reconciliation did nothing — the guard above proves nothing"
+      "reconciliation did nothing — the check above proves nothing"
     );
     // Put the day back for the checks that follow.
     await materializeSlots(admin as never, parent, ctx, realNow);
@@ -230,11 +263,16 @@ async function main() {
       })
       .select("id")
       .single();
-    const { data: covering } = await admin
+    // A distinct scheduled_for: calls is unique on (parent_id, scheduled_for) and the
+    // lapsed-slot check above already wrote a row three hours back. Checked, not assumed —
+    // a null here crashes the run after the assertions it feeds.
+    const coveringAt = new Date(realNow.getTime() - 2 * 60 * 60000).toISOString();
+    const { data: covering, error: coveringError } = await admin
       .from("calls")
-      .insert({ parent_id: pid, scheduled_for: new Date(realNow.getTime() - 3 * 60 * 60000).toISOString(), status: "completed", called_at: new Date(realNow.getTime() - 3 * 60 * 60000).toISOString() })
+      .insert({ parent_id: pid, scheduled_for: coveringAt, status: "completed", called_at: coveringAt })
       .select("id")
       .single();
+    if (coveringError || !covering) throw new Error(`covering-call fixture failed: ${coveringError?.message}`);
     await dispatchDueSlots(admin as never, parent, ctx, realNow);
     const { data: apptAfter } = await admin.from("call_slots").select("state, call_id").eq("id", apptSlot!.id).single();
     check(
@@ -243,8 +281,8 @@ async function main() {
       // being responsible" and materialisation revives it, which looped revive -> claim ->
       // cancel every tick and eventually expired into "the appointment reminder didn't go
       // out" for a day the parent was called and the appointment was named on that call.
-      apptAfter!.state === "dispatched" && apptAfter!.call_id === covering!.id,
-      `state=${apptAfter!.state} call_id=${apptAfter!.call_id} (expected dispatched, linked to ${covering!.id})`
+      apptAfter!.state === "dispatched" && apptAfter!.call_id === covering.id,
+      `state=${apptAfter!.state} call_id=${apptAfter!.call_id} (expected dispatched, linked to ${covering.id})`
     );
 
     // It must also survive the next materialisation rather than being revived into a
@@ -259,7 +297,7 @@ async function main() {
 
     // Control: with nothing covering the day it must NOT be cancelled, or the check above is
     // satisfied by a dispatch that cancels every appointment slot unconditionally.
-    await admin.from("calls").delete().eq("id", covering!.id);
+    await admin.from("calls").delete().eq("id", covering.id);
     await admin.from("call_slots").update({ state: "pending" }).eq("id", apptSlot!.id);
     await admin.from("calls").delete().eq("parent_id", pid).in("status", ["scheduled", "in_progress"]);
     await dispatchDueSlots(admin as never, parent, ctx, realNow);

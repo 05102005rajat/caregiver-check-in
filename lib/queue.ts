@@ -142,7 +142,7 @@ export async function materializeSlots(
 
   const { data: existing, error: existingError } = await db
     .from("call_slots")
-    .select("id, due_at, med_names, state")
+    .select("id, due_at, expires_at, med_names, state")
     .eq("parent_id", parent.id)
     .gte("due_at", startUtc.toISOString())
     .lte("due_at", endUtc.toISOString());
@@ -152,12 +152,23 @@ export async function materializeSlots(
   }
 
   let ok = true;
-  const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "med_names" | "state">>;
+  const rows = (existing ?? []) as Array<Pick<CallSlot, "id" | "due_at" | "expires_at" | "med_names" | "state">>;
   const sameMeds = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
   // Still pending but no longer planned at all: the medication moved or was removed.
   // Only pending rows — a dispatched or expired slot is history, not a plan.
-  const orphaned = rows.filter((r) => r.state === "pending" && !plannedByDue.has(new Date(r.due_at).getTime()));
+  // `expires_at > now` matters. processParent materialises before it expires, so deleting a
+  // lapsed-but-unexpired slot here consumes a genuine missed check-in: the 09:00 dial fails
+  // and releases to pending, the caregiver moves that medication at 11:05, and the 11:10
+  // tick deletes the slot as an orphan before expiry can write a calls row or tell anyone.
+  // Exactly the reasoning the pause and pre-warm branches were given — account for lapsed
+  // slots first — which was never applied to reconciliation.
+  const orphaned = rows.filter(
+    (r) =>
+      r.state === "pending" &&
+      !plannedByDue.has(new Date(r.due_at).getTime()) &&
+      new Date(r.expires_at).getTime() > now.getTime()
+  );
   if (orphaned.length > 0) {
     const { error } = await db.from("call_slots").delete().in("id", orphaned.map((r) => r.id)).eq("state", "pending");
     if (error) {
@@ -292,13 +303,18 @@ export async function dispatchDueSlots(
     // Claim before dialing, and read back whether the claim landed. A guarded UPDATE that
     // matches zero rows is indistinguishable from one that matched, which is how an
     // overlapping tick ends up placing a second call to the same person.
-    const { data: claimed } = await db
+    const { data: claimed, error: claimError } = await db
       .from("call_slots")
       .update({ state: "dispatched", updated_at: now.toISOString() })
       .eq("id", slot.id)
       .eq("state", "pending")
       .select("id")
       .maybeSingle();
+    if (claimError) {
+      log.error("cron.slot_claim_failed", { parent_id: parent.id, slot_id: slot.id, err: claimError });
+      ok = false;
+      continue;
+    }
     if (!claimed) continue;
 
     // Whether a second call is wanted depends on whether the first one actually happened.
@@ -314,11 +330,15 @@ export async function dispatchDueSlots(
         // dispatchable nor expirable, recoverable only by the 10-minute stranded release;
         // an appointment slot's life is short enough that a lookup error near expires_at
         // would lose the reminder entirely, with no call and no alert. Release and retry.
-        await db
+        const { error: unknownReleaseError } = await db
           .from("call_slots")
           .update({ state: "pending", updated_at: now.toISOString() })
           .eq("id", slot.id)
           .eq("state", "dispatched");
+        if (unknownReleaseError) {
+          log.error("cron.appointment_release_failed", { parent_id: parent.id, slot_id: slot.id, err: unknownReleaseError });
+        }
+        ok = false;
         log.warn("cron.appointment_coverage_unknown", { parent_id: parent.id, slot_id: slot.id });
         continue;
       }
@@ -332,11 +352,19 @@ export async function dispatchDueSlots(
         // parent WAS called and the appointment WAS named on that call. This slot is not
         // abandoned, it is served by another call, which is exactly what 'dispatched' with
         // a call_id says.
-        await db
+        const { error: coveredError } = await db
           .from("call_slots")
           .update({ state: "dispatched", call_id: covering.callId, updated_at: now.toISOString() })
           .eq("id", slot.id)
           .eq("state", "dispatched");
+        if (coveredError) {
+          // Left dispatched with a null call_id, the stranded reaper releases it ten minutes
+          // later, dispatch re-claims it, coverage says covered, and this write fails again
+          // — every tick until expires_at, when expiry texts "the appointment reminder
+          // didn't go out" for a day the parent WAS rung. Surfaced instead of looped.
+          log.error("cron.appointment_covered_write_failed", { parent_id: parent.id, slot_id: slot.id, err: coveredError });
+          ok = false;
+        }
         log.info("cron.appointment_slot_covered", { parent_id: parent.id, slot_id: slot.id, call_id: covering.callId });
         continue;
       }
@@ -431,13 +459,18 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
     }
 
     if (existingCall?.dial_attempted_at) {
-      const { data: served } = await db
+      const { data: served, error: servedError } = await db
         .from("call_slots")
         .update({ state: "dispatched", call_id: existingCall.id, updated_at: now.toISOString() })
         .eq("id", slot.id)
         .eq("state", "pending")
         .select("id")
         .maybeSingle();
+      if (servedError) {
+        log.error("cron.slot_served_write_failed", { parent_id: parent.id, slot_id: slot.id, err: servedError });
+        ok = false;
+        continue;
+      }
       if (served) {
         log.info("cron.slot_rang_after_all", {
           parent_id: parent.id,
@@ -449,13 +482,21 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
       continue;
     }
 
-    const { data: claimed } = await db
+    const { data: claimed, error: expireClaimError } = await db
       .from("call_slots")
       .update({ state: "expired", updated_at: now.toISOString() })
       .eq("id", slot.id)
       .eq("state", "pending")
       .select("id")
       .maybeSingle();
+    if (expireClaimError) {
+      // Rule #2, one more time: a null `claimed` with no error means another tick took it,
+      // which is fine; a null `claimed` WITH an error means this missed check-in was
+      // silently skipped — no calls row, no text — while the tick reported healthy.
+      log.error("cron.expire_claim_failed", { parent_id: parent.id, slot_id: slot.id, err: expireClaimError });
+      ok = false;
+      continue;
+    }
     if (!claimed) continue; // another tick already accounted for this one
 
     // A `calls` row so the miss is visible where the caregiver actually looks. Same
@@ -480,12 +521,13 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
           log.error("cron.expired_slot_call_insert_failed", { parent_id: parent.id, slot_id: slot.id, err: insertError });
           continue;
         }
-        const { data: raced } = await db
+        const { data: raced, error: racedError } = await db
           .from("calls")
           .select("id")
           .eq("parent_id", parent.id)
           .eq("scheduled_for", slot.due_at)
           .maybeSingle();
+        if (racedError) log.error("cron.expired_slot_reread_failed", { parent_id: parent.id, slot_id: slot.id, err: racedError });
         callId = raced?.id ?? null;
       } else {
         callId = inserted?.id ?? null;
@@ -556,7 +598,7 @@ export async function cancelPendingSlots(
   parentId: string,
   reason: string,
   now: Date
-) {
+): Promise<boolean> {
   const { data, error } = await db
     .from("call_slots")
     .update({ state: "cancelled", updated_at: now.toISOString() })
@@ -564,10 +606,14 @@ export async function cancelPendingSlots(
     .eq("state", "pending")
     .select("id");
   if (error) {
+    // A failed cancel leaves the slots pending, and the hold branches now expire lapsed
+    // slots on every tick — so the next tick texts "their 12:00pm check-in was missed"
+    // during a pause, whose entire purpose is silence.
     log.error("cron.cancel_slots_failed", { parent_id: parentId, reason, err: error });
-    return;
+    return false;
   }
   if ((data ?? []).length > 0) {
     log.info("cron.slots_cancelled", { parent_id: parentId, reason, count: data!.length });
   }
+  return true;
 }
