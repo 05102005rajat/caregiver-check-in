@@ -10,6 +10,8 @@ function call(overrides: Partial<Call> = {}): Call {
     called_at: "2026-09-10T16:00:00.000Z",
     dial_attempted_at: null,
     stale_redial_at: null,
+    urgent: false,
+    outstanding_meds: [],
     status: "no_answer",
     vapi_call_id: "vapi_1",
     retry_count: 0,

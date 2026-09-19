@@ -96,6 +96,10 @@ export function needsAttention(call: Call): boolean {
   // It previously ignored mood entirely, so a call that alerted the family because the
   // model returned an unreadable mood rendered here as "doing okay".
   return warrantsAttention({
+    // Stored in 0037 precisely so this cannot disagree with what was texted: a call the
+    // family got an "URGENT" text about used to render here unflagged whenever the model's
+    // only signal was urgent.
+    urgent: call.urgent === true,
     concerns: call.concerns ?? [],
     medsMissed: medsOf(call, "missed"),
     mood: call.mood,

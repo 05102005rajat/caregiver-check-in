@@ -1,7 +1,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { appointmentsToday, formatLocalTime, localDayBoundsUtc } from "@/lib/schedule";
-import { coverageStartsAt, medsForSlot as resolveMedsForSlot, planSlotsForDay } from "@/lib/slots";
+import { SLOT_MERGE_MINUTES, coverageStartsAt, medsForSlot as resolveMedsForSlot, planSlotsForDay } from "@/lib/slots";
 import { outstandingMedsToday } from "@/lib/outstanding";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
@@ -175,6 +175,25 @@ export async function materializeSlots(
     return false;
   }
 
+  // Calls that actually happened today, for the already-served check below. Read alongside
+  // the slots rather than lazily, so the cost is one query per tick either way.
+  const { data: completedRows, error: completedError } = await db
+    .from("calls")
+    .select("scheduled_for, scheduled_meds")
+    .eq("parent_id", parent.id)
+    .eq("status", "completed")
+    .gte("scheduled_for", startUtc.toISOString())
+    .lte("scheduled_for", endUtc.toISOString());
+  if (completedError) {
+    // Fails CLOSED, for the same reason coveringCallToday does: not knowing what has already
+    // been asked about and queueing anyway is a second robot call to an elderly person about
+    // a dose they already confirmed. Skipping the insert costs one tick — the next one
+    // re-plans the identical slot — so the safe direction here is to wait.
+    log.error("cron.completed_calls_lookup_failed", { parent_id: parent.id, err: completedError });
+    return false;
+  }
+  const completedToday = (completedRows ?? []) as Array<Pick<Call, "scheduled_for" | "scheduled_meds">>;
+
   let ok = true;
   const rows = (existing ?? []) as Array<
     Pick<CallSlot, "id" | "due_at" | "expires_at" | "kind" | "appointment_id" | "med_names" | "state">
@@ -268,8 +287,42 @@ export async function materializeSlots(
 
   if (slots.length === 0) return ok;
 
+  // A medication slot that no row exists for yet, sitting minutes away from a call that has
+  // already happened and already asked about exactly these medications, is a second real
+  // phone call about a dose confirmed a few minutes earlier. The planner cannot see this:
+  // it merges by planned time, and a caregiver editing the setup form mid-morning creates a
+  // due_at the morning's call never had. Only NEW rows are filtered — an existing row at
+  // this due_at is the one that was dialled, and upsert would ignore it anyway.
+  //
+  // Bounded by SLOT_MERGE_MINUTES, the same window the planner merges within, and by the
+  // medication names: a genuinely new medication, or the evening dose of the same one, is
+  // still queued. Dropping the time bound would silence every repeat dose in the day.
+  const existingDue = new Set(rows.map((r) => new Date(r.due_at).getTime()));
+  const served = completedToday.map((c) => ({
+    at: new Date(c.scheduled_for).getTime(),
+    meds: new Set((c.scheduled_meds ?? []).map((m) => m.toLowerCase())),
+  }));
+  const toInsert = slots.filter((slot) => {
+    if (slot.kind !== "medication") return true;
+    if (existingDue.has(slot.dueAt.getTime())) return true;
+    const covered = served.find(
+      (c) =>
+        Math.abs(c.at - slot.dueAt.getTime()) <= SLOT_MERGE_MINUTES * 60_000 &&
+        slot.medNames.every((name) => c.meds.has(name.toLowerCase()))
+    );
+    if (!covered) return true;
+    log.info("cron.slot_already_served", {
+      parent_id: parent.id,
+      due_at: slot.dueAt.toISOString(),
+      med_names: slot.medNames,
+      covered_by: new Date(covered.at).toISOString(),
+    });
+    return false;
+  });
+  if (toInsert.length === 0) return ok;
+
   const { error } = await db.from("call_slots").upsert(
-    slots.map((slot) => ({
+    toInsert.map((slot) => ({
       parent_id: parent.id,
       due_at: slot.dueAt.toISOString(),
       expires_at: slot.expiresAt.toISOString(),
@@ -672,12 +725,21 @@ export async function expireLapsedSlots(db: ReturnType<typeof createAdminClient>
         : `Heads up: ${parent.name}'s ${onDay} check-in was missed and is now too late to call about.${
             slot.med_names.length > 0 ? ` Their ${formatMeds(slot.med_names.map((name) => ({ name }) as Medication))} was scheduled.` : ""
           }`;
-    await notifyFamilyContacts(db, parent.id, "notify_on_miss", callId, body, {
+    const reached = await notifyFamilyContacts(db, parent.id, "notify_on_miss", callId, body, {
       // Shared with lib/dial.ts's refusal path and the stale reaper, so one missed slot
       // produces one text however many paths notice it.
       fingerprint: tooLateFingerprint(slot.due_at),
       severity: "safety",
     });
+    if (!reached) {
+      // This alert is one-shot: the slot is already claimed 'expired' and linked to callId,
+      // so no later tick re-reads it and nothing retries. A recipient skipped because a read
+      // failed — not because they opted out — therefore means a genuinely missed check-in
+      // that nobody is ever told about. Degrade the tick so /api/health goes red instead of
+      // the family concluding, from silence, that nothing is wrong.
+      log.error("cron.expired_slot_notify_incomplete", { parent_id: parent.id, slot_id: slot.id, call_id: callId });
+      ok = false;
+    }
     log.info("cron.slot_expired", { parent_id: parent.id, slot_id: slot.id, due_at: slot.due_at, kind: slot.kind });
   }
   return ok;

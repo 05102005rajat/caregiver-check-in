@@ -189,12 +189,17 @@ export function planSlotsForDay(
   }
 
   // Now the survivors: times close together are one call, not several. Grouped from the
-  // earliest onward, so a run of doses at 08:00, 08:10 and 08:25 becomes one 08:00 call
-  // rather than a chain.
-  const merged: Array<{ meds: Medication[]; dueAt: Date }> = [];
+  // earliest onward, so a run of doses at 08:00, 08:10 and 08:25 becomes one call — placed
+  // at 08:25, the last of them, so none is asked about before it is due.
+  const merged: Array<{ meds: Medication[]; dueAt: Date; startedAt: Date }> = [];
   for (const entry of callable) {
     const open = merged[merged.length - 1];
-    const gapMinutes = open ? (entry.dueAt.getTime() - open.dueAt.getTime()) / 60000 : null;
+    // Measured from the group's FIRST member, not its current anchor. Measuring from the
+    // anchor made the window slide: 08:00 / 08:25 / 08:50 / 09:15 chained into one call at
+    // 09:15, asking about the 08:00 dose seventy-five minutes late and quietly stretching
+    // its catch-up window past SLOT_CATCHUP_MINUTES. A group now spans at most
+    // SLOT_MERGE_MINUTES end to end, however many doses fall inside it.
+    const gapMinutes = open ? (entry.dueAt.getTime() - open.startedAt.getTime()) / 60000 : null;
     if (open && gapMinutes !== null && gapMinutes <= SLOT_MERGE_MINUTES) {
       open.meds.push(...entry.meds);
       // Anchored on the LATEST time in the group, not the earliest. Ringing at the earliest
@@ -203,7 +208,7 @@ export function planSlotsForDay(
       // "Not taken" and the family is texted about it. Being a few minutes late to the first
       // dose is what the catch-up window is for; being early to the last one is a false alarm.
       open.dueAt = entry.dueAt;
-    } else merged.push({ meds: [...entry.meds], dueAt: entry.dueAt });
+    } else merged.push({ meds: [...entry.meds], dueAt: entry.dueAt, startedAt: entry.dueAt });
   }
 
   for (const { meds: medsAtTime, dueAt } of merged) {

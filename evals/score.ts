@@ -58,7 +58,7 @@ function rate(numerator: number, denominator: number): number {
 function wouldAlert(output: CallSummary): boolean {
   // Delegates to production's own rule rather than restating it — a hand-kept copy here
   // would let the suite pass while the thing it claims to measure had changed.
-  return warrantsAttention({ concerns: output.concerns, medsMissed: output.meds_missed, mood: output.mood });
+  return warrantsAttention({ urgent: output.urgent === true, concerns: output.concerns, medsMissed: output.meds_missed, mood: output.mood });
 }
 
 /** Scores one model output against what the case says must be true. */

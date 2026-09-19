@@ -577,6 +577,121 @@ async function main() {
       `state=${strandedAfter!.state} call_id=${strandedAfter!.call_id} — stuck forever, invisible to both queries`
     );
 
+    // ---- a mid-day setup edit must not manufacture a second call for a time already served ----
+    // The planner cannot see this: it merges by planned time, and a caregiver editing the
+    // setup form after the morning call creates a due_at that call never had. Without the
+    // already-served filter the new row is inserted, is due, and dispatches — a second robot
+    // call about a dose confirmed minutes earlier.
+    // Far enough from EarlyMed/LaterMed that SLOT_MERGE_MINUTES cannot fold it into either,
+    // which would make both the check and its control assert about the wrong row.
+    const servedLocal = hhmm(new Date(realNow.getTime() - 5 * 60000), tz);
+    const { data: servedMed, error: servedMedError } = await admin
+      .from("medications")
+      .insert({ parent_id: pid, name: "ServedMed", dose: "", time_of_day: servedLocal, active: true })
+      .select("*")
+      .single();
+    if (servedMedError || !servedMed) throw new Error(`served-med fixture failed: ${servedMedError?.message}`);
+    const withServed = async () => {
+      const { data: meds } = await admin.from("medications").select("*").eq("parent_id", pid);
+      await materializeSlots(admin as never, parent, { ...ctx, medications: (meds ?? []) as Medication[] }, realNow);
+    };
+    // Materialise once to learn the exact instant the planner chose, rather than
+    // reconstructing it here — an off-by-a-second fixture would miss the filter entirely and
+    // the check would pass for the wrong reason.
+    await withServed();
+    const servedSlot = (await slotsOf(pid)).find((sl) => sl.med_names.includes("ServedMed"));
+    if (!servedSlot) throw new Error("served-slot fixture failed: the planner queued no ServedMed slot");
+    const servedInstant = servedSlot.due_at;
+    await admin.from("call_slots").delete().eq("id", servedSlot.id);
+
+    // The control comes FIRST and deliberately: it proves this slot is re-created when
+    // nothing has served it, so the assertion below means "the filter stopped it", not
+    // "nothing was ever going to be queued here".
+    await withServed();
+    check(
+      "a medication slot with no call covering it IS queued (control)",
+      (await slotsOf(pid)).some((sl) => sl.due_at === servedInstant),
+      "nothing queued at all — the already-served check below would pass vacuously"
+    );
+    await admin.from("call_slots").delete().eq("parent_id", pid).eq("due_at", servedInstant);
+
+    const { data: coveringCall } = await admin
+      .from("calls")
+      .insert({
+        parent_id: pid, scheduled_for: servedInstant, status: "completed",
+        called_at: servedInstant, dial_attempted_at: servedInstant, scheduled_meds: ["ServedMed"],
+      })
+      .select("id")
+      .single();
+    await withServed();
+    check(
+      "a dose a completed call already asked about is NOT queued again",
+      !(await slotsOf(pid)).some((sl) => sl.due_at === servedInstant),
+      "a second real phone call to an elderly person about a dose they already confirmed"
+    );
+
+    // And the other half: a medication that call did NOT ask about still gets its call.
+    // Without this, "don't ring twice" is indistinguishable from "stop ringing".
+    await admin.from("medications").update({ name: "UnservedMed" }).eq("id", servedMed.id);
+    await withServed();
+    check(
+      "a medication that call did not cover is still queued",
+      (await slotsOf(pid)).some((sl) => sl.due_at === servedInstant && sl.med_names.includes("UnservedMed")),
+      "a dose added after the morning call is silently never asked about"
+    );
+    if (coveringCall) await admin.from("calls").delete().eq("id", coveringCall.id);
+
+    // ---- a one-shot missed-check-in alert must not evaporate on a transient read error ----
+    // expireLapsedSlots claims the slot and links the calls row BEFORE notifying, so there is
+    // no second attempt. If the opt-out read fails, nobody is texted and nobody ever will be;
+    // the only remaining signal is the tick reporting itself degraded. A green tick there
+    // means a genuinely missed check-in that the family never hears about.
+    const brokenOptOuts = new Proxy(admin, {
+      get(target, prop, recv) {
+        if (prop !== "from") return Reflect.get(target, prop, recv);
+        return (table: string) => {
+          if (table !== "sms_opt_ins") return (target as never as typeof admin).from(table as never);
+          const readError: Record<string, unknown> = {
+            then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: { message: "forced read failure" } }),
+          };
+          // Every builder method returns the PROXY, not the bare target — returning the
+          // target would end the chain one call in with a TypeError instead of exercising
+          // the read-error branch, which is a different bug wearing this test's clothes.
+          const failing: unknown = new Proxy(readError, {
+            get: (t, k) => (k in t ? t[k as string] : () => failing),
+          });
+          return failing;
+        };
+      },
+    });
+    const degradeDue = new Date(realNow.getTime() - 40 * 60000).toISOString();
+    const seedLapsed = async () => {
+      await admin.from("call_slots").delete().eq("parent_id", pid).eq("due_at", degradeDue);
+      const { error } = await admin.from("call_slots").insert({
+        parent_id: pid, due_at: degradeDue, expires_at: new Date(realNow.getTime() - 5 * 60000).toISOString(),
+        kind: "medication", med_names: ["LapsedMed"], state: "pending",
+      });
+      if (error) throw new Error(`lapsed-slot fixture failed: ${error.message}`);
+    };
+    await seedLapsed();
+    const degraded = await expireLapsedSlots(brokenOptOuts as never, parent, realNow);
+    check(
+      "a missed check-in nobody could be told about degrades the tick",
+      degraded === false,
+      "expiry reported success, the heartbeat is stamped and /api/health stays green — while the family was never told"
+    );
+    // Control: the same slot, the same code path, with the read working. Without this,
+    // the assertion above is satisfied by expiry failing for any reason at all.
+    await admin.from("calls").delete().eq("parent_id", pid).eq("scheduled_for", degradeDue);
+    await seedLapsed();
+    check(
+      "the same expiry with a working read reports success (control)",
+      (await expireLapsedSlots(admin as never, parent, realNow)) === true,
+      "expiry fails even on the happy path — the check above proves nothing"
+    );
+    await admin.from("medications").delete().eq("id", servedMed.id);
+    await admin.from("call_slots").delete().eq("parent_id", pid).eq("due_at", servedInstant);
+
   } finally {
     if (pid) {
       await admin.from("call_slots").delete().eq("parent_id", pid);

@@ -241,6 +241,11 @@ export async function scheduleAndDial(
       // Snapshot at creation time so later analysis (and any future caregiver edits to
       // medications) can't retroactively change what this specific call was actually for.
       scheduled_meds: medsForSlot.map((m) => m.name),
+      // Recorded, not just spoken. The webhook validates every medication name the model
+      // returns against this row; without it, an answer to the carried-forward question —
+      // "yes, I took the Lisinopril" — is rejected as a name this call was not about, and
+      // the same dose is raised again on every later call for the rest of the day.
+      outstanding_meds: outstandingMeds,
     })
     .select()
     .single();

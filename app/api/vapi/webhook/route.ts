@@ -230,10 +230,16 @@ export async function POST(request: Request) {
   // against reality rather than trusted outright (see isKnownMed below). Prefer the
   // snapshot taken when the call was created (immune to later medication edits); fall
   // back to reconstructing from current medications only for calls predating that column.
-  const knownMedNames = (
-    call.scheduled_meds ??
-    (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : [])
-  ).map((n) => n.toLowerCase());
+  // Includes what this call was asked to CARRY FORWARD, not just what it was scheduled for.
+  // Rosie is told to raise an unconfirmed morning dose on a later call; the name validation
+  // below only knew this slot's snapshot, so the answer — "yes, I took the Lisinopril" —
+  // failed the check, was discarded, and the same dose was raised again on every later call
+  // for the rest of the day. The feature could ask but could never hear the reply.
+  const knownMedNames = [
+    ...(call.outstanding_meds ?? []),
+    ...(call.scheduled_meds ??
+      (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : [])),
+  ].map((n) => n.toLowerCase());
   const knownApptTitles = ((apptsRow ?? []) as Appointment[]).map((a) => a.title.toLowerCase());
 
   // Fuzzy substring match, but only above a minimum length — otherwise a short known name
@@ -330,6 +336,23 @@ export async function POST(request: Request) {
   const noResponse = !hasParentResponse(transcript) ? ["Parent didn't respond — call ended without a conversation"] : [];
   const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse]));
 
+  // The keyword list is word-boundary matching with no negation or context — lib/safety.ts
+  // documents "chest of drawers" and "I didn't fall" as known limits. That was tolerable
+  // when a match produced a "needs a look" line; it is not when it produces "URGENT — please
+  // call her now", because "I fell asleep in the chair" and "a bit out of breath after the
+  // stairs" then read as emergencies, and a household whose watch items exist precisely to
+  // suppress a chronic chest complaint would get a 911-shaped text every single day.
+  //
+  // So a keyword escalates only when the MODEL also found something worth reporting. On a
+  // call it read as entirely fine, a stray word is a stray word. The backstop keeps its
+  // safety role either way: the match still lands in `concerns`, so the alert goes out —
+  // just as "needs a look" rather than as an emergency.
+  const watchText = ((watchRow ?? []) as WatchItem[]).map((w) => w.description).join(" ").toLowerCase();
+  const urgentWords = scanForConcernKeywords(transcript, EMERGENCY_KEYWORDS).filter(
+    (w) => !watchText.includes(w.toLowerCase())
+  );
+  const isUrgent = extracted.urgent === true || (urgentWords.length > 0 && extracted.concerns.length > 0);
+
   const { error: finalUpdateError } = await db
     .from("calls")
     .update({
@@ -349,6 +372,8 @@ export async function POST(request: Request) {
       concerns,
       requests: extracted.requests,
       mood: extracted.mood,
+      // Stored so needsAttention reaches the same verdict the text did (0037).
+      urgent: isUrgent,
     })
     .eq("id", call.id);
   if (finalUpdateError) console.error(`Failed to record analysis for call ${call.id}`, finalUpdateError);
@@ -363,8 +388,6 @@ export async function POST(request: Request) {
   // palpitations alert opened "manju's check-in — needs a look:", exactly like a missed
   // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
   // not the only thing between that fall and the family.
-  const urgentWords = scanForConcernKeywords(transcript, EMERGENCY_KEYWORDS);
-  const isUrgent = extracted.urgent || urgentWords.length > 0;
 
   const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
 
@@ -426,9 +449,13 @@ export async function POST(request: Request) {
     if (lines.length === headerLines) {
       lines.push(
         "",
-        extracted.mood === "unknown"
-          ? "We couldn't make out what was said on this call. The transcript is on the dashboard — worth a look, or give them a ring."
-          : `${parentName} sounded ${extracted.mood} on this call, though nothing specific came up.`
+        isUrgent
+          ? // Never "nothing specific came up" under an URGENT header — the two sentences
+            // contradict each other and the reader cannot tell which to believe.
+            `We couldn't pin down what it was, but something in this call read as needing help. Please ring them.`
+          : extracted.mood === "unknown"
+            ? "We couldn't make out what was said on this call. The transcript is on the dashboard — worth a look, or give them a ring."
+            : `${parentName} sounded ${extracted.mood} on this call, though nothing specific came up.`
       );
     }
 

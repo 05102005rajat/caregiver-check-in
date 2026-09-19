@@ -24,7 +24,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
   `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
   Eight rounds of `/code-review` ran against this branch; every finding is either fixed or
   argued against in the commit that declined it.
-- **Migrations 0001–0035 applied and verified against the live database; `0036` is NOT applied.** `0031`,
+- **Migrations 0001–0037 applied and verified against the live database.** `0031`,
   `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
   checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
   both CHECK constraints bite, and RLS hides `call_slots` from anon while the service role
@@ -33,7 +33,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33** (was 27/28). Two new runtime suites:
-  `npm run security:refusal` (10/10) and `npm run security:queue` (35/35). 178 unit tests.
+  `npm run security:refusal` (10/10) and `npm run security:queue` (40/40). 199 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off**, transcripts on. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
@@ -47,10 +47,12 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ## Deploying — read before the first tick
 
-**`0036` is a hard dependency of the code on `main`.** Without it, `recordPlanned` fails on
-every parent on every tick, which marks the tick degraded, withholds the heartbeat and
-returns 500 — so `/api/health` goes red and stays red. Calls still go out (the 500 happens
-after dispatch), but the alarm is jammed on. Apply it before deploying.
+`0036` and `0037` are hard dependencies of the code on `main`; both are applied and
+verified. Without `0036`, `recordPlanned` fails on every parent on every tick, which marks
+the tick degraded, withholds the heartbeat and returns 500 — so `/api/health` goes red and
+stays red. Calls still go out (the 500 happens after dispatch), but the alarm is jammed on.
+Without `0037` (`calls.urgent`, `calls.outstanding_meds`) the webhook's insert fails
+outright, so nothing about the call is ever written down.
 
 ## Older deploy notes
 
@@ -170,6 +172,20 @@ which every path goes through, and refuses regardless of what the caller believe
 row was marked `failed` and left occupying `(parent_id, scheduled_for)`, so every later
 tick's too-late branch hit a 23505 and continued without a word. A chokepoint that refuses
 must also make the refusal into a fact somebody hears about.
+
+### 4a. A one-shot alert must report whether it actually landed
+
+`notifyFamilyContacts` used to return `void`. `expireLapsedSlots` claims the slot and links
+the `calls` row *before* notifying, so there is no second attempt — and its opt-out read
+fails *closed*: on a transient error it sends nothing and writes nothing, on the reasoning
+that "the next attempt decides". For this caller there is no next attempt. One failed read
+meant a genuinely missed check-in that nobody was ever told about, with the tick reporting
+healthy. It now returns `false` when a recipient was skipped for a reason that is not a
+decision (a failed opt-out, contacts, parent or caregiver read), and expiry degrades the
+tick on it. Both the guard and its control are in `security/queue.ts`, mutation-tested.
+
+Note the distinction: an opt-out, a dedupe hit and a Twilio delivery failure all return
+`true`. Those are decisions or recorded facts. Only "we could not find out" is `false`.
 
 ### 5. SQL NULL is not falsy
 
@@ -315,6 +331,10 @@ Two behaviours worth knowing:
 - Consent evidence — see *Open work* 4.
 - `retry_count` still means "no-answer retries" only. The stale reaper now has its own
   column (`stale_redial_at`, 0032) and bounds by age.
+- A completed call covers a *new* medication slot only within `SLOT_MERGE_MINUTES` of it and
+  only for the medication names that call was about (`materializeSlots`). Widening either
+  bound silences the evening dose of the same drug; dropping the check entirely lets a
+  mid-morning setup edit place a second real call about a dose confirmed minutes earlier.
 - `call_slots` is not surfaced anywhere in the UI. RLS already allows a caregiver to read
   their own, so a "what's scheduled today" panel is a small change if it's ever wanted.
 
@@ -323,11 +343,11 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 139 unit tests
+npm test                  # 199 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family
-npm run security:queue    # 35 checks: the call queue, driven with a controlled clock
+npm run security:queue    # 40 checks: the call queue, driven with a controlled clock
 npm run eval              # 19 summarizer cases (costs Anthropic tokens)
 npm run eval:conversation # 8 personas x3 against the real system prompt (costs tokens, slow)
 npx next build

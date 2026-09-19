@@ -108,7 +108,7 @@ async function sendAlert(
   body: string,
   fingerprint: string | undefined,
   since: string
-) {
+): Promise<boolean> {
   // Honour opt-outs. The public form and every message promise that replying STOP or
   // asking us to remove a number takes effect — a promise with no mechanism behind it is
   // worse than not making it, and for SMS it's a compliance obligation, not a courtesy.
@@ -159,8 +159,13 @@ async function sendAlert(
     }
   };
 
+  // Reported to the caller, not just skipped. For a one-shot alert (a lapsed slot, whose
+  // row is already claimed) there is no "next attempt", so this has to surface as a
+  // degraded tick instead of passing for a delivered alert.
+  let reached = true;
   if (optOutUnknown) {
     // Nothing written: no message, and no row that a later attempt would read as consent.
+    reached = false;
   } else if (await alreadySuppressed(db, parentId, phone, fingerprint, since)) {
     // Already recorded as opted out for this exact alert. The household-wide early return
     // used to stop the whole function before reaching here; per-recipient dedupe only looks
@@ -211,10 +216,10 @@ async function sendAlert(
     }
   }
 
-  if (!email) return;
+  if (!email) return reached;
   if (await alreadyNotified(db, parentId, email, fingerprint, since)) {
     log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, recipient: email });
-    return;
+    return reached;
   }
 
   try {
@@ -230,6 +235,8 @@ async function sendAlert(
       error: err instanceof Error ? err.message : String(err),
     }, "email");
   }
+
+  return reached;
 }
 
 // Windows live in lib/alerting.ts alongside the attention rule they belong with.
@@ -243,6 +250,13 @@ async function sendAlert(
  * working channel even while SMS delivery is blocked pending Twilio toll-free verification
  * (see README "Monitoring"/known limitations).
  */
+/**
+ * Returns false when a recipient was skipped for a reason that is NOT a decision — a failed
+ * opt-out read, a failed contacts or parent read. Callers that get only one attempt must
+ * treat that as a degraded tick rather than a delivered alert: expireLapsedSlots has already
+ * claimed the slot and linked the calls row, so nothing re-reads it, and "let the next
+ * attempt decide" has no next attempt there. Silent is the one outcome this must not have.
+ */
 export async function notifyFamilyContacts(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
@@ -250,7 +264,7 @@ export async function notifyFamilyContacts(
   callId: string,
   body: string,
   options: { fingerprint?: string; dedupeWindowHours?: number; severity?: AlertSeverity } = {}
-) {
+): Promise<boolean> {
   // Don't tell the same family the same thing twice in a day. A retried call, two
   // medication slots close together, or a concern resurfacing on a later call all
   // otherwise produce separate identical alerts — and once alerts read as noise, the
@@ -273,9 +287,12 @@ export async function notifyFamilyContacts(
   // evaporates with nothing logged — the shape the rest of this file was just audited for.
   if (contactsError) log.error("notify.contacts_lookup_failed", { parent_id: parentId, call_id: callId, err: contactsError });
   if (parentError) log.error("notify.parent_lookup_failed", { parent_id: parentId, call_id: callId, err: parentError });
+  let reachedEveryone = !contactsError && !parentError;
 
   for (const contact of (contacts ?? []) as FamilyContact[]) {
-    await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since);
+    if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since))) {
+      reachedEveryone = false;
+    }
   }
 
   if (parentRow?.caregiver_id) {
@@ -288,9 +305,14 @@ export async function notifyFamilyContacts(
     // here drops them from it silently, which is the shape this whole branch is about.
     if (caregiverError) {
       log.error("notify.caregiver_lookup_failed", { parent_id: parentId, call_id: callId, err: caregiverError });
+      reachedEveryone = false;
     }
     if (caregiver?.phone) {
-      await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint, since);
+      if (!(await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint, since))) {
+        reachedEveryone = false;
+      }
     }
   }
+
+  return reachedEveryone;
 }

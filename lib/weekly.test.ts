@@ -16,6 +16,8 @@ function call(daysAgo: number, overrides: Partial<Call> = {}): Call {
     called_at: at.toISOString(),
     dial_attempted_at: at.toISOString(),
     stale_redial_at: null,
+    urgent: false,
+    outstanding_meds: [],
     status: "completed",
     vapi_call_id: null,
     retry_count: 0,

@@ -107,6 +107,12 @@ export interface Call {
   summary: string | null;
   meds_confirmed: Record<string, unknown> | null;
   concerns: string[] | null;
+  /** Extractor flag (0037): may need help right now. Feeds needsAttention so the dashboard
+   *  and the text cannot disagree about whether a call was an emergency. */
+  urgent: boolean;
+  /** Doses carried into this call from earlier today (0037), accepted alongside
+   *  scheduled_meds when validating medication names the model returns. */
+  outstanding_meds: string[];
   /** Non-medical things they asked for, which Rosie promised to relay. */
   requests: string[] | null;
   /** Snapshot of the medication names actually due at call-creation time (see lib/dial.ts). */
