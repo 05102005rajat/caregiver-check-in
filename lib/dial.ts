@@ -42,7 +42,9 @@ export async function dialAndRecord(
   medsDue: Medication[],
   todaysAppointments: Appointment[],
   watchItems: WatchItem[],
-  purpose: DialPurpose = "scheduled"
+  purpose: DialPurpose = "scheduled",
+  /** Doses from earlier calls today that were never confirmed — see lib/outstanding.ts. */
+  outstandingMeds: string[] = []
 ): Promise<DialOutcome> {
   // Folds the consent ask into the opening line itself on a first call, instead of a
   // separate scripted greeting ("how are you feeling?") followed by a second, jarring
@@ -154,6 +156,10 @@ export async function dialAndRecord(
         // Things the family already knows about, so Rosie asks after them by name
         // ("how's the knee today?") instead of treating every mention as news.
         watch_items: formatWatchItems(watchItems),
+        // Earlier today's unconfirmed doses, so a morning tablet that never got taken is
+        // raised with the one person who can still do something about it, instead of only
+        // being reported to the family and never mentioned again.
+        meds_outstanding: outstandingMeds.length > 0 ? outstandingMeds.join(", ") : "none",
         // Tells the assistant whether to ask the consent question this call (spec
         // section 8: ask on the first call, and any call since where it's still unset;
         // never re-ask once consent_given_at is set).
@@ -221,7 +227,8 @@ export async function scheduleAndDial(
   todaysAppointments: Appointment[],
   scheduledFor: Date,
   watchItems: WatchItem[],
-  purpose: DialPurpose = "scheduled"
+  purpose: DialPurpose = "scheduled",
+  outstandingMeds: string[] = []
 ): Promise<DialOutcome> {
   // calls has a unique (parent_id, scheduled_for) constraint: this is the idempotency
   // guard against a cron tick (or an overlapping manual trigger) dialing twice for one slot.
@@ -254,5 +261,5 @@ export async function scheduleAndDial(
   // Returns what actually happened to the *call*, not whether the row was inserted. The
   // test-call route reports success from this value, and a refused dial reported as true
   // told a caregiver "calling now" while nothing was placed.
-  return dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems, purpose);
+  return dialAndRecord(db, callRow.id, parent, caregiverName, medsForSlot, todaysAppointments, watchItems, purpose, outstandingMeds);
 }

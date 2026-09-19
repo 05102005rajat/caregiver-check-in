@@ -2,11 +2,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { scheduleAndDial } from "@/lib/dial";
 import { appointmentsToday, formatLocalTime, localDayBoundsUtc } from "@/lib/schedule";
 import { coverageStartsAt, medsForSlot as resolveMedsForSlot, planSlotsForDay } from "@/lib/slots";
+import { outstandingMedsToday } from "@/lib/outstanding";
 import { formatMeds } from "@/lib/format";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { tooLateFingerprint } from "@/lib/insights";
 import { log } from "@/lib/log";
-import type { Appointment, CallSlot, Medication, Parent, WatchItem } from "@/types/db";
+import type { Appointment, Call, CallSlot, Medication, Parent, WatchItem } from "@/types/db";
 
 /**
  * The day's queue, as operations against it.
@@ -436,6 +437,21 @@ export async function dispatchDueSlots(
     }
 
     const medsForSlot = resolveMedsForSlot(ctx.medications, slot.med_names, new Date(slot.due_at), parent.timezone);
+    // Doses from earlier today that were never confirmed, so this call can mention them.
+    // Read per dispatch rather than per tick: an earlier call in this same tick may have
+    // just changed the answer.
+    const { data: todaysCalls, error: todaysError } = await db
+      .from("calls")
+      .select("scheduled_for, status, meds_confirmed")
+      .eq("parent_id", parent.id)
+      .gte("scheduled_for", localDayBoundsUtc(parent.timezone, now).startUtc.toISOString())
+      .lte("scheduled_for", localDayBoundsUtc(parent.timezone, now).endUtc.toISOString());
+    if (todaysError) {
+      // Not fatal: the call still goes out, it just won't mention this morning's dose.
+      log.error("cron.outstanding_meds_lookup_failed", { parent_id: parent.id, err: todaysError });
+    }
+    const outstanding = outstandingMedsToday((todaysCalls ?? []) as Call[], parent.timezone, now);
+
     const outcome = await scheduleAndDial(
       db,
       parent,
@@ -443,7 +459,9 @@ export async function dispatchDueSlots(
       medsForSlot,
       appointmentsToday(ctx.appointments, parent.timezone, now),
       new Date(slot.due_at),
-      ctx.watchItems
+      ctx.watchItems,
+      "scheduled",
+      outstanding
     );
 
     if (outcome.dialed) {

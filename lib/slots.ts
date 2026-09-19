@@ -39,6 +39,20 @@ export const SLOT_CATCHUP_MINUTES = 120;
  */
 export const SLOT_MIN_WINDOW_MINUTES = 15;
 
+/**
+ * Medication times this close together become ONE call.
+ *
+ * The live household has doses at 17:57 and 17:58, and got two separate phone calls for
+ * them — the second blocked behind the first by calls_parent_active_unique, released, and
+ * redialled five minutes later. Two robot calls in five minutes, each asking about one
+ * tablet. A person would have asked about both in the same breath.
+ *
+ * Half an hour, because that is roughly the span someone would describe as "my evening
+ * tablets" and still take together; beyond that they are genuinely separate events and
+ * deserve their own call.
+ */
+export const SLOT_MERGE_MINUTES = 30;
+
 export interface PlannedSlot {
   dueAt: Date;
   expiresAt: Date;
@@ -143,7 +157,18 @@ export function planSlotsForDay(
     else byTime.set(med.time_of_day, [med]);
   }
 
-  for (const [timeOfDay, medsAtTime] of byTime) {
+  // Times close together are one call, not several. Grouped from the earliest onward, so a
+  // run of doses at 08:00, 08:10 and 08:25 becomes a single 08:00 call rather than a chain.
+  const merged: Array<{ timeOfDay: string; meds: Medication[] }> = [];
+  for (const [timeOfDay, medsAtTime] of [...byTime.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const minutes = Number(timeOfDay.slice(0, 2)) * 60 + Number(timeOfDay.slice(3, 5));
+    const open = merged[merged.length - 1];
+    const openMinutes = open ? Number(open.timeOfDay.slice(0, 2)) * 60 + Number(open.timeOfDay.slice(3, 5)) : null;
+    if (open && openMinutes !== null && minutes - openMinutes <= SLOT_MERGE_MINUTES) open.meds.push(...medsAtTime);
+    else merged.push({ timeOfDay, meds: [...medsAtTime] });
+  }
+
+  for (const { timeOfDay, meds: medsAtTime } of merged) {
     const medNames = medsAtTime.map((m) => m.name);
     const dueAt = scheduledForToday(timeOfDay, timezone, now);
 

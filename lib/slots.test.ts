@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SLOT_CATCHUP_MINUTES, coverageStartsAt, medsForNearestSlot, medsForSlot, planSlotsForDay } from "./slots";
 import { isWithinCallingHours } from "./callwindow";
+import { scheduledForToday } from "./schedule";
 import type { Appointment, Medication } from "@/types/db";
 
 const TZ = "America/Los_Angeles";
@@ -57,6 +58,36 @@ describe("planSlotsForDay", () => {
 
   // The whole point of the redesign: "when does this stop being callable" is written down
   // once, as a column, instead of being recomputed against a constant on every tick.
+  it("merges doses close together into one call", () => {
+    // The live household has 17:57 and 17:58 and got two separate phone calls for them —
+    // the second blocked behind the first, released, and redialled five minutes later.
+    const { slots } = planSlotsForDay(
+      [med({ id: "m1", name: "Lisinopril", time_of_day: "17:57:00" }), med({ id: "m2", name: "Metformin", time_of_day: "17:58:00" })],
+      [], TZ, NOW, COVERED_SINCE
+    );
+    expect(slots).toHaveLength(1);
+    expect(slots[0].medNames.sort()).toEqual(["Lisinopril", "Metformin"]);
+    // At the earliest of the group, so nothing is rung later than it was asked for.
+    expect(slots[0].dueAt.toISOString()).toBe(scheduledForToday("17:57", TZ, NOW).toISOString());
+  });
+
+  it("chains a run of nearby doses into one call, not a cascade", () => {
+    const { slots } = planSlotsForDay(
+      [med({ id: "a", time_of_day: "08:00:00" }), med({ id: "b", time_of_day: "08:10:00" }), med({ id: "c", time_of_day: "08:25:00" })],
+      [], TZ, NOW, COVERED_SINCE
+    );
+    expect(slots).toHaveLength(1);
+  });
+
+  it("keeps genuinely separate times apart", () => {
+    // Morning and evening are different events and deserve their own call.
+    const { slots } = planSlotsForDay(
+      [med({ id: "a", time_of_day: "09:00:00" }), med({ id: "b", time_of_day: "18:00:00" })],
+      [], TZ, NOW, COVERED_SINCE
+    );
+    expect(slots).toHaveLength(2);
+  });
+
   it("expires a slot the catch-up window after it is due", () => {
     const { slots } = planSlotsForDay([med({ time_of_day: "09:00:00" })], [], TZ, NOW, COVERED_SINCE);
     const slot = slots[0];
