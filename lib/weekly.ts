@@ -39,7 +39,13 @@ export interface WeeklySummary {
   lines: WeeklyLine[];
   /** Things said on more than one day. Verbatim as the parent's own words, not a verdict. */
   worthChecking: string[];
-  disclaimer: string;
+  /**
+   * Null when no call connected this week. The sentence is about the content of calls, so
+   * printing it under a panel whose only line is a future appointment claims to be "a
+   * record of what was said" about a week in which nothing was said — which is what a brand
+   * new household saw on its very first visit.
+   */
+  disclaimer: string | null;
   /** True when there is nothing to show yet, so callers can skip the whole panel. */
   empty: boolean;
 }
@@ -219,7 +225,7 @@ export function weeklySummary(
     scheduled: scheduledDays.size,
     lines,
     worthChecking: recurring.map((c) => c.label),
-    disclaimer: WEEKLY_DISCLAIMER,
+    disclaimer: connectedDays.size > 0 ? WEEKLY_DISCLAIMER : null,
     empty: lines.length === 0,
   };
 }

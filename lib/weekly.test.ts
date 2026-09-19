@@ -161,6 +161,19 @@ describe("weeklySummary", () => {
     expect(textOf(s).some((t) => t.includes("Old") || t.includes("Far"))).toBe(false);
   });
 
+  it("drops the disclaimer when no call connected this week", () => {
+    // Found by loading the real dashboard as a brand-new household: with no calls but an
+    // appointment coming up, the panel rendered one line and then "This is a record of what
+    // was said on the calls" — about a week in which nothing was said.
+    const s = weeklySummary([], [appt(3, "Doctor")], TZ, NOW);
+    expect(s.lines.map((l) => l.text)).toEqual(["Doctor on Monday"]);
+    expect(s.disclaimer).toBeNull();
+  });
+
+  it("keeps the disclaimer as soon as a call has connected", () => {
+    expect(weeklySummary([call(1, { concerns: ["x"] })], [], TZ, NOW).disclaimer).toBe(WEEKLY_DISCLAIMER);
+  });
+
   it("is empty when there is nothing to say yet", () => {
     const s = weeklySummary([], [], TZ, NOW);
     expect(s.empty).toBe(true);

@@ -44,7 +44,7 @@ export default function WeeklySummary({ parentName, summary }: { parentName: str
         </div>
       )}
 
-      <p className="text-xs text-slate-400 mt-3">{summary.disclaimer}</p>
+      {summary.disclaimer && <p className="text-xs text-slate-400 mt-3">{summary.disclaimer}</p>}
     </div>
   );
 }
