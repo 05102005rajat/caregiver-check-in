@@ -8,6 +8,7 @@ describe("normalize", () => {
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
       meds_missed_reasons: {},
+      urgent: false,
       concerns: [],
       requests: [],
       mood: "good",
@@ -18,6 +19,7 @@ describe("normalize", () => {
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
       meds_missed_reasons: {},
+      urgent: false,
       concerns: [],
       requests: [],
       mood: "good",
@@ -32,6 +34,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       meds_missed_reasons: {},
+      urgent: false,
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -45,6 +48,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       meds_missed_reasons: {},
+      urgent: false,
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -55,6 +59,7 @@ describe("normalize", () => {
       meds_confirmed: [],
       meds_missed: [],
       meds_missed_reasons: {},
+      urgent: false,
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -146,5 +151,20 @@ describe("concerns are never dropped", () => {
 
   it("keeps an exact duplicate rather than deciding which one mattered", () => {
     expect(normalize({ concerns: ["dizzy", "dizzy"] }).concerns).toEqual(["dizzy", "dizzy"]);
+  });
+});
+
+describe("urgent", () => {
+  it("is only true when the model actually says so", () => {
+    expect(normalize({ urgent: true }).urgent).toBe(true);
+    expect(normalize({ urgent: false }).urgent).toBe(false);
+  });
+
+  it("defaults to false for anything that isn't the boolean true", () => {
+    // Never truthy-coerced: "no", "false" and 0 are all things a model has returned for a
+    // boolean, and each would raise a "call her now" alarm on an ordinary check-in.
+    for (const junk of ["yes", "true", "no", 1, 0, {}, [], null, undefined]) {
+      expect(normalize({ urgent: junk }).urgent, String(junk)).toBe(false);
+    }
   });
 });

@@ -17,6 +17,12 @@ export interface CallSummary {
   /** Things they asked for or wanted passed on — Rosie promises to relay these. */
   requests: string[];
   mood: "good" | "okay" | "low" | "concerning" | "unknown";
+  /**
+   * True only for something that may need help RIGHT NOW. Drives whether the family gets a
+   * "please call her now" text or a "needs a look" one — today a 911-level event and a
+   * skipped tablet arrived with an identical header.
+   */
+  urgent: boolean;
   appointments_acknowledged: string[];
 }
 
@@ -28,6 +34,7 @@ Return ONLY a JSON object (no markdown fences, no commentary) with these fields:
 - meds_missed_reasons: object mapping a name from meds_missed to a SHORT reason in their own terms, only where the call actually gives one — "couldn't tell which pill it was", "says she's out of them", "didn't want to". Omit a med entirely rather than guessing at a reason. This is often the most actionable thing in the whole alert: not taking a pill because you cannot identify it and not taking it because you have decided not to call for completely different responses from a family.
 - concerns: array of short strings for anything the family should actually act on (fall, new or worsening pain, confusion, loneliness, aide problem, scam call, not eating). Err toward including anything genuinely new, worsening, or unexplained — a missed concern is far worse than an extra one. But do NOT flag a long-standing complaint that the person themselves describes as unchanged and routine ("my knee aches same as always, nothing new") unless it sounds worse than usual, since alerting a family daily about their normal is how they stop reading alerts entirely.
 - requests: array of short strings for anything they asked for or wanted their family to know that isn't a medical concern — wanting a particular food, needing something from the shop, wanting someone to visit or call, help with a chore. Rosie explicitly promises on the call to pass these along, so omitting them breaks a promise the person heard her make. Keep the person's own framing ("craving pizza", not "nutritional request").
+- urgent: true ONLY if they described something that may need help right away — a fall they cannot get up from, chest pain or palpitations, trouble breathing, bleeding, a stroke-like symptom, or the assistant telling them to call 911. Not for a missed medication, low mood, loneliness, an ordinary ache, or a long-standing complaint. This decides whether their family is told to ring them immediately, so a false alarm here costs real trust, and a miss costs more.
 - mood: one of [good, okay, low, concerning]
 - appointments_acknowledged: array of appointment titles they remembered
 
@@ -110,6 +117,7 @@ export function normalize(raw: unknown): CallSummary {
     // look like a healthy call; "unknown" preserves that this needs a closer look
     // (the webhook treats it as a concern, same as "concerning").
     mood: MOODS.includes(obj.mood as CallSummary["mood"]) ? (obj.mood as CallSummary["mood"]) : "unknown",
+    urgent: obj.urgent === true,
     appointments_acknowledged: asStringArray(obj.appointments_acknowledged),
   };
 }

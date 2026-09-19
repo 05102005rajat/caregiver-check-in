@@ -1,6 +1,18 @@
 /** Fallback list when a parent has no custom concern_keywords configured. */
 export const DEFAULT_CONCERN_KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
+/**
+ * The subset that means "may need help right now" rather than "worth a look".
+ *
+ * Deliberately narrow. "pain" covers a sore knee, "confused" and "scared" describe a bad
+ * morning — escalating those to "call her now" is how a family learns to ignore the one
+ * that matters. These four are the ones you would want to be rung about.
+ *
+ * Used as a backstop beside the model's own `urgent` flag, never instead of it: a model
+ * that misses a fall must not be the only thing standing between a fall and the family.
+ */
+export const EMERGENCY_KEYWORDS = ["fall", "fell", "chest", "breath"];
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

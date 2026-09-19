@@ -6,7 +6,7 @@ import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { log } from "@/lib/log";
-import { DEFAULT_CONCERN_KEYWORDS, hasParentResponse, hasRecognisableSpeakerLabels, scanForConcernKeywords } from "@/lib/safety";
+import { DEFAULT_CONCERN_KEYWORDS, EMERGENCY_KEYWORDS, hasParentResponse, hasRecognisableSpeakerLabels, scanForConcernKeywords } from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
 import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
@@ -353,11 +353,21 @@ export async function POST(request: Request) {
   // copies of this rule had already drifted apart.
   const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood });
 
+  // Something that may need help right now reads differently from something worth a look.
+  // Today a 911-level event and a skipped tablet arrived with an identical header — the
+  // palpitations alert opened "manju's check-in — needs a look:", exactly like a missed
+  // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
+  // not the only thing between that fall and the family.
+  const urgentWords = scanForConcernKeywords(transcript, EMERGENCY_KEYWORDS);
+  const isUrgent = extracted.urgent || urgentWords.length > 0;
+
   if (hasConcern) {
     // Bulleted and scannable rather than one long paragraph: this arrives as a text on a
     // phone, and a worried family member should be able to see what's wrong at a glance
     // instead of reading a five-line summary to find the one fact that matters.
-    const lines = [`${parentName}'s check-in — needs a look:`];
+    const lines = isUrgent
+      ? [`URGENT — please call ${parentName} now.`, "", `Something ${parentName} said on today's check-in may need help straight away:`]
+      : [`${parentName}'s check-in — needs a look:`];
     if (medsMissed.length > 0) {
       // With the reason, where the call gave one. "Not taken: metformin" and "couldn't tell
       // which pill it was" were two separate bullets, and the reader had to join up cause
@@ -416,7 +426,9 @@ export async function POST(request: Request) {
       // mood is in the fingerprint because a mood-only alert has no other facts in it: without
       // it every content-free alert fingerprints identically as "concern:", so an unreadable
       // call on Monday would suppress a "sounded low" alert on Tuesday inside the window.
-      fingerprint: alertFingerprint("concern", [
+      // A separate kind for urgent, so an earlier routine alert about the same facts cannot
+      // suppress the one telling them to ring now.
+      fingerprint: alertFingerprint(isUrgent ? "urgent" : "concern", [
         ...concerns,
         ...medsMissed.map((m) => `missed:${m}`),
         ...(concerns.length === 0 && medsMissed.length === 0 ? [`mood:${extracted.mood}`] : []),
