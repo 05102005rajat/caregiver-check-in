@@ -49,6 +49,24 @@ export function consentGreeting(parentName: string, assistantName: string, careg
 }
 
 /** Opening for every call after consent is on file — no consent question. */
+/**
+ * WHERE THE OPENING LINE LIVES — and why the Vapi dashboard's "First Message" field is not
+ * it.
+ *
+ * lib/dial.ts passes `firstMessage` on EVERY call, from this file, on both branches:
+ *
+ *   consent already given -> returningGreeting below
+ *   first call            -> consentGreeting above
+ *
+ * So the dashboard field is never spoken. Keep something sensible in it as a fallback, but
+ * editing it and expecting a different opening line is a wasted afternoon.
+ *
+ * This note used to sit at the bottom of prompts/vapi-system-prompt.txt, which turned out
+ * to be a trap: that file exists to be pasted into the dashboard wholesale, and the note
+ * duly got pasted into a live system prompt, where it told Rosie about lib/dial.ts. Notes
+ * for people who read the repo belong in the repo. The prompt file is now nothing but
+ * prompt.
+ */
 export function returningGreeting(parentName: string, assistantName: string): string {
   return `Hi ${parentName}, it's ${assistantName} calling for your check-in. How are you feeling today?`;
 }
