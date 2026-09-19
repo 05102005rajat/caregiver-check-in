@@ -79,6 +79,20 @@ describe("planSlotsForDay", () => {
     expect(slots).toHaveLength(1);
   });
 
+  it("an unreachable legacy dose does not drag a good one down with it", () => {
+    // 07:45 predates the calling-hours check and can never be dialled. Merging before the
+    // window filter let it absorb the 08:05 dose, and the whole group then failed on the
+    // earlier time — so a perfectly good dose was never queued, never dialled and never
+    // reported, because of a legacy row sitting beside it.
+    const { slots, uncallable } = planSlotsForDay(
+      [med({ id: "old", name: "Legacy", time_of_day: "07:45:00" }), med({ id: "new", name: "Morning", time_of_day: "08:05:00" })],
+      [], TZ, NOW, COVERED_SINCE
+    );
+    expect(uncallable.map((u) => u.timeOfDay)).toEqual(["07:45:00"]);
+    expect(slots).toHaveLength(1);
+    expect(slots[0].medNames).toEqual(["Morning"]);
+  });
+
   it("keeps genuinely separate times apart", () => {
     // Morning and evening are different events and deserve their own call.
     const { slots } = planSlotsForDay(

@@ -143,8 +143,12 @@ async function main() {
       const { data: row3 } = await admin.from("calls").select("status,dial_attempted_at").eq("id", c3.id).single();
       check(
         "inside calling hours the dial is NOT refused (control)",
-        row3?.dial_attempted_at !== null && !(out3.dialed === false && out3.reason === "outside_calling_hours"),
-        `dial_attempted_at=${row3?.dial_attempted_at} outcome=${JSON.stringify(out3)}`
+        // Boolean(), not `!== null`: if the select returns nothing at all — a query error, a
+        // deleted row, an RLS change — row3?.dial_attempted_at is undefined, and
+        // `undefined !== null` is true, so the one check proving dialAndRecord does not
+        // refuse unconditionally would pass having read nothing.
+        Boolean(row3) && Boolean(row3?.dial_attempted_at) && !(out3.dialed === false && out3.reason === "outside_calling_hours"),
+        `row=${row3 ? "found" : "MISSING"} dial_attempted_at=${row3?.dial_attempted_at} outcome=${JSON.stringify(out3)}`
       );
       const m3 = await msgsFor(tooLateFingerprint(c3.scheduled_for));
       check("a dial that was attempted sends no too-late alert (control)", m3.length === 0, `${m3.length} messages`);

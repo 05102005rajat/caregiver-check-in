@@ -157,18 +157,13 @@ export function planSlotsForDay(
     else byTime.set(med.time_of_day, [med]);
   }
 
-  // Times close together are one call, not several. Grouped from the earliest onward, so a
-  // run of doses at 08:00, 08:10 and 08:25 becomes a single 08:00 call rather than a chain.
-  const merged: Array<{ timeOfDay: string; meds: Medication[] }> = [];
+  // Reachability is decided PER TIME OF DAY, before anything is merged. Merging first meant
+  // one grandfathered 07:45 row could absorb a perfectly good 08:05 one, and the whole group
+  // then failed the calling-hours check on the earlier time — so the 08:05 dose was never
+  // queued, never dialled, never expired and never alerted, on the strength of a legacy row
+  // sitting beside it. Under the old scheduler that dose was its own call and went out.
+  const callable: Array<{ meds: Medication[]; dueAt: Date }> = [];
   for (const [timeOfDay, medsAtTime] of [...byTime.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    const minutes = Number(timeOfDay.slice(0, 2)) * 60 + Number(timeOfDay.slice(3, 5));
-    const open = merged[merged.length - 1];
-    const openMinutes = open ? Number(open.timeOfDay.slice(0, 2)) * 60 + Number(open.timeOfDay.slice(3, 5)) : null;
-    if (open && openMinutes !== null && minutes - openMinutes <= SLOT_MERGE_MINUTES) open.meds.push(...medsAtTime);
-    else merged.push({ timeOfDay, meds: [...medsAtTime] });
-  }
-
-  for (const { timeOfDay, meds: medsAtTime } of merged) {
     const medNames = medsAtTime.map((m) => m.name);
     const dueAt = scheduledForToday(timeOfDay, timezone, now);
 
@@ -185,11 +180,28 @@ export function planSlotsForDay(
     // Too close to the window's close to be reachable. Validation rejects these on new
     // saves; this covers rows that predate that check, and keeps them out of the queue
     // rather than letting them expire unrung and alert every single evening.
-    const expiresAt = expiryFor(dueAt, timezone);
-    if (expiresAt.getTime() - dueAt.getTime() < SLOT_MIN_WINDOW_MINUTES * 60000) {
+    if (expiryFor(dueAt, timezone).getTime() - dueAt.getTime() < SLOT_MIN_WINDOW_MINUTES * 60000) {
       uncallable.push({ reason: "window_too_short", timeOfDay, medNames });
       continue;
     }
+
+    callable.push({ meds: medsAtTime, dueAt });
+  }
+
+  // Now the survivors: times close together are one call, not several. Grouped from the
+  // earliest onward, so a run of doses at 08:00, 08:10 and 08:25 becomes one 08:00 call
+  // rather than a chain.
+  const merged: Array<{ meds: Medication[]; dueAt: Date }> = [];
+  for (const entry of callable) {
+    const open = merged[merged.length - 1];
+    const gapMinutes = open ? (entry.dueAt.getTime() - open.dueAt.getTime()) / 60000 : null;
+    if (open && gapMinutes !== null && gapMinutes <= SLOT_MERGE_MINUTES) open.meds.push(...entry.meds);
+    else merged.push({ meds: [...entry.meds], dueAt: entry.dueAt });
+  }
+
+  for (const { meds: medsAtTime, dueAt } of merged) {
+    const medNames = medsAtTime.map((m) => m.name);
+    const expiresAt = expiryFor(dueAt, timezone);
 
     // Not ours to miss: the slot elapsed before this household was our responsibility
     // (during a pause, before the account existed, or inside a deliberate pre-warm hold).

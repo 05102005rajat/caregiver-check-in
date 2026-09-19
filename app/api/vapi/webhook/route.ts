@@ -375,6 +375,10 @@ export async function POST(request: Request) {
     const lines = isUrgent
       ? [`URGENT — please call ${parentName} now.`, "", `Something ${parentName} said on today's check-in may need help straight away:`]
       : [`${parentName}'s check-in — needs a look:`];
+    // Counted, not inferred from lines.length: the urgent header is three entries and the
+    // routine one is a single entry, so a length check silently stopped protecting the
+    // alert that matters most the moment the urgent header was added.
+    const headerLines = lines.length;
     if (medsMissed.length > 0) {
       // With the reason, where the call gave one. "Not taken: metformin" and "couldn't tell
       // which pill it was" were two separate bullets, and the reader had to join up cause
@@ -418,7 +422,7 @@ export async function POST(request: Request) {
     // produced a safety-severity text reading, in full, "manju's check-in — needs a look:".
     // A worried family member gets an alarm and no fact. If mood is the only reason we are
     // texting, the honest thing is to say that is the reason.
-    if (lines.length === 1) {
+    if (lines.length === headerLines) {
       lines.push(
         "",
         extracted.mood === "unknown"

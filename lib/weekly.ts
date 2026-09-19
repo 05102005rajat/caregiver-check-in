@@ -199,7 +199,7 @@ export function weeklySummary(
   if (lowMoodDays.size > 1) {
     lines.push({
       icon: "😔",
-      text: `Sounded low on ${lowMoodDays.size} of ${connectedDays.size} ${plural(connectedDays.size, "call", "calls")}`,
+      text: `Sounded low on ${lowMoodDays.size} of ${connectedDays.size} ${plural(connectedDays.size, "day", "days")}`,
       tone: "watch",
     });
   }

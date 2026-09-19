@@ -598,7 +598,13 @@ async function processParent(
     const expired = await expireLapsedSlots(db, parent, now);
     callsTriggered = dispatched.triggered;
     // "Could not do the work" and "there was no work" must not look the same to the caller.
-    degraded = !materialized || !dispatched.ok || !expired;
+    // OR, not assignment: a plain `=` here threw away the recordPlanned failure set four
+    // lines up, which is exactly the deploy hazard HANDOVER warns about. With 0036
+    // unapplied, recordPlanned fails on every parent on every tick while materialized,
+    // dispatched.ok and expired are all true — so degradedParents stays 0, the heartbeat is
+    // stamped, /api/health goes green, and last_planned_at never gets written, which in turn
+    // makes neverOurs treat every mid-day setup edit as a missed check-in and text about it.
+    degraded = degraded || !materialized || !dispatched.ok || !expired;
 
     // Skipped on an incomplete read for the same reason as dispatch: this path re-dials,
     // and an empty medication list would place a call that asks about nothing.

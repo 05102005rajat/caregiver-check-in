@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { describeChanges, needsAttention } from "@/lib/insights";
-import { weeklySummary } from "@/lib/weekly";
+import { WEEKLY_WINDOW_DAYS, weeklySummary } from "@/lib/weekly";
 import type { Appointment, Call, Message, Parent } from "@/types/db";
 import CallRow from "./CallRow";
 import PauseControl from "./PauseControl";
@@ -103,7 +103,19 @@ export default async function DashboardPage() {
     .select("*")
     .eq("parent_id", parent.id)
     .order("starts_at", { ascending: true });
-  const week = weeklySummary(calls, (apptRows ?? []) as Appointment[], parent.timezone);
+
+  // Queried by the window, NOT reused from the 20-row history list above. Three medication
+  // slots a day is ~21 rows a week, so feeding it that capped list silently truncated the
+  // week: the "N of M check-ins" denominator, the missed-medication day count and the
+  // recurrence threshold were all computed over however much happened to fit, and the panel
+  // reported a better week than actually happened.
+  const weekStart = new Date(Date.now() - WEEKLY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const { data: weekCalls } = await supabase
+    .from("calls")
+    .select("*")
+    .eq("parent_id", parent.id)
+    .gte("scheduled_for", weekStart.toISOString());
+  const week = weeklySummary((weekCalls ?? []) as Call[], (apptRows ?? []) as Appointment[], parent.timezone);
   const attention = latestCall ? needsAttention(latestCall) : false;
 
   return (
