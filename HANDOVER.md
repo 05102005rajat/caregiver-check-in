@@ -19,11 +19,9 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ## State as of this handover
 
-- Branch **`scheduler-queue-and-review-fixes`**, several commits ahead of `main` (`f6e23be`).
-  **Not merged, not deployed.** Merge with
-  `git checkout main && git merge --ff-only scheduler-queue-and-review-fixes`.
-  Eight rounds of `/code-review` ran against this branch; every finding is either fixed or
-  argued against in the commit that declined it.
+- **Merged and deployed.** The queue work is on `main` and live in production; eighteen
+  rounds of `/code-review` ran against it, and every finding is either fixed or argued
+  against in the commit that declined it.
 - **Migrations 0001–0037 applied and verified against the live database.** `0031`,
   `0032` and `0033` were applied this session and confirmed through the API — 9/9 schema
   checks, including that the unique `(parent_id, due_at)` index really rejects duplicates,
@@ -35,10 +33,14 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 - `npm run security` is **33/33** (was 27/28). Two new runtime suites:
   `npm run security:refusal` (10/10) and `npm run security:queue` (40/40). 199 unit tests.
 - Twilio toll-free verification **approved**; SMS delivery works.
-- Vapi: audio recording **off**, transcripts on. The system prompt in
+- Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
+  **true** on both, `endCallPhrases` **empty** on both. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
-  the live copy**; re-paste after every edit. `lib/vapi.ts` sets no `endCallPhrases` or
-  `endCallMessage`, so those are dashboard-only state the repo cannot protect.
+  the live copy**; re-paste after every edit. `lib/vapi.ts` sets no `endCallPhrases`,
+  `endCallMessage`, `endCallFunctionEnabled` or recording flag, so all of those are
+  dashboard-only state the repo cannot protect, on every assistant. Verify them through the
+  API (`GET https://api.vapi.ai/assistant`), not the dashboard — the dashboard renders an
+  unset field and a placeholder identically, which is how the trap below went unnoticed.
 - Production data: **one** real household (the maintainer's own parent — see Supabase for the
   name and number; deliberately not written down here, since this repo is public). A second
   test household was deleted this session via `delete_parent_household`.
@@ -73,25 +75,29 @@ suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, t
 
 ## Open work, in the order I'd do it
 
-1. **Merge and deploy the branch**, pausing the live household for the first tick as
-   described above. Watch the first tick after the live household's first slot under the new
-   queue. Expected: two `call_slots` rows, two calls a minute apart, same as before. A
-   read-only dry run of the planner against the live household produced exactly that.
-2. **Confirm an End Call tool exists in the Vapi Tools tab.** `End Call Phrases` is empty
-   (see below), so that tool is the only thing that lets Rosie hang up deliberately — and
-   the consent-refusal path in `prompts/vapi-system-prompt.txt:21` ("tell them you won't
-   ring again, say goodbye, and end the call") depends on it. If it isn't enabled, that
-   promise has no mechanism behind it.
+1. ~~**Merge and deploy the branch.**~~ **Done.** Production is on `main`. The live
+   household's day under the new queue was inspected read-only and looks exactly as the dry
+   run predicted: two `call_slots` rows, both `dispatched`, both linked to `completed` calls
+   a minute apart. The pause-for-the-first-tick dance below is spent — keep it only as the
+   procedure for the next scheduler migration.
+2. **Point an external monitor at `GET /api/health`.** It returns 503 once the heartbeat is
+   older than 15 minutes, is public (no auth, no middleware gate) and fails closed — a
+   failed heartbeat read returns 503 rather than a green light. Nothing in this repo pages
+   anyone; until something watches that URL, a dead scheduler is indistinguishable from a
+   quiet week, which on this product is the whole failure mode. `cron-job.org` drives the
+   tick, so its own alerting covers "the pinger stopped" but not "the tick is erroring".
 3. **Out-of-hours medication rows.** A row predating the calling-hours check in
    `lib/validation.ts` can never be dialled. It is now reported by `planSlotsForDay` as
    `uncallable` and logged as `cron.slot_uncallable` rather than vanishing, but it still
    needs a backfill or a dashboard warning. Deliberately *not* queued: queueing it would
    expire unrung every night and text the family daily, which is worse than the status quo.
-4. **Consent evidence is still a log line, not a durable row** — and there is now a
-   concrete instance. The live household's number has **no `sms_opt_ins` row at all**, before or after
-   the `man` deletion, yet 23 messages have been sent to it. Nothing is broken today
-   (the caregiver's own number is first-party consent), but the artifact `0020` exists to
-   produce does not exist for the live household.
+4. **Consent evidence is still a log line, not a durable row.** Re-checked against the live
+   database: the household's number has **no `sms_opt_ins` row at all**, with messages
+   already sent to it. That one number is simultaneously the caregiver, the parent *and*
+   the family contact — and the contact row carries `sms_opt_in_confirmed = true` with no
+   artifact behind it. Nothing is broken today (the caregiver's own number is first-party
+   consent), but a confirmed flag asserting something no row supports is precisely what
+   `0020` exists to prevent.
 
 ---
 
@@ -115,7 +121,34 @@ a bug rather than fixed one.**
   click from publishing an assistant that says "goodbye comma take care comma have a good
   day" to an elderly person. Always read the publish diff before confirming.
 
-Leave the field empty and end calls through the End Call Tool.
+Leave the field empty and end calls through the End Call function.
+
+**Resolved, and the near miss was real.** Checked against the Vapi API rather than the
+dashboard:
+
+- **`End Call Message` on Rosie contained `goodbye,take care,have a good day ` — the
+  placeholder list, pasted into the field that is spoken aloud, trailing space and all.**
+  The near miss above was not avoided; it landed. It had never been audible only because
+  nothing could trigger it, which means *enabling End Call is what would have made Rosie
+  say it to an elderly person*. The two settings are coupled: clear the message first, then
+  enable. Rosie's message is now empty — the transcripts show she closes naturally on her
+  own ("Take care, Manju. Goodbye for now."), and an End Call Message is spoken on top of
+  that, so anything in the field is a second farewell.
+- **No End Call tool existed and `endCallFunctionEnabled` was unset on every assistant.**
+  The only tool on Rosie is `record_consent`. Evidence rather than inference: every real
+  call ended `customer-ended-call` — the person hung up, every time. Rosie had never ended
+  a call because she could not. Worst on **`Rosie — callback`** (both inbound numbers route
+  to it), whose entire prompt is "say the first message, then end the call" — it could not
+  do the only thing it is told to do. `endCallFunctionEnabled` is now true on both.
+- **`End Call Phrases` is still empty on both, and must stay that way.** See the substring
+  argument above.
+- **Recording was off on Rosie but *unset* on `Rosie — callback`**, and Vapi's default is
+  on — so an inbound callback could have been recorded while `/privacy` says "We do not
+  retain audio recordings of the calls." Now explicitly false on both. **Set this on every
+  assistant, not just the one `VAPI_ASSISTANT_ID` points at.**
+- **The live prompt contains every line of the repo file** (0 missing). The live copy also
+  carries one stale extra: the 9-line First Message dev note that was moved out of the repo
+  into `lib/greeting.ts`. Harmless, but the model reads it — drop it on the next paste.
 
 ---
 
