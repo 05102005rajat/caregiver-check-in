@@ -133,3 +133,27 @@ describe("meds_missed_reasons", () => {
     expect(Object.values(r.meds_missed_reasons)[0].length).toBeLessThan(500);
   });
 });
+
+describe("fragment concerns", () => {
+  it("drops a one-word fragment of a longer concern", () => {
+    // A real alert went out ending with a bullet that just said "chest", beside
+    // "Reported chest palpitations and asked for it to be kept secret".
+    const r = normalize({ concerns: ["Reported chest palpitations and asked for it to be kept secret", "Did not take lisinopril", "chest"] });
+    expect(r.concerns).toEqual(["Reported chest palpitations and asked for it to be kept secret", "Did not take lisinopril"]);
+  });
+
+  it("keeps a short concern that stands on its own", () => {
+    const r = normalize({ concerns: ["fell", "not eating much"] });
+    expect(r.concerns).toEqual(["fell", "not eating much"]);
+  });
+
+  it("does not confuse a number with a longer number sharing its digits", () => {
+    // "concern 1" reads inside "concern 10" as a raw substring but is a different concern.
+    const r = normalize({ concerns: ["concern 1", "concern 10"] });
+    expect(r.concerns).toEqual(["concern 1", "concern 10"]);
+  });
+
+  it("collapses an exact duplicate to one, keeping the first", () => {
+    expect(normalize({ concerns: ["dizzy", "dizzy"] }).concerns).toEqual(["dizzy"]);
+  });
+});
