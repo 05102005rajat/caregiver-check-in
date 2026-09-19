@@ -394,10 +394,33 @@ export async function POST(request: Request) {
       lines.push("", `${parentName} asked for:`, ...extracted.requests.map((r) => `• ${r}`));
     }
 
+    // Never send a header with nothing under it.
+    //
+    // warrantsAttention fires on mood alone, and "unknown" is what normalize returns when
+    // Claude's response was unreadable — so the one case where the system understands least
+    // produced a safety-severity text reading, in full, "manju's check-in — needs a look:".
+    // A worried family member gets an alarm and no fact. If mood is the only reason we are
+    // texting, the honest thing is to say that is the reason.
+    if (lines.length === 1) {
+      lines.push(
+        "",
+        extracted.mood === "unknown"
+          ? "We couldn't make out what was said on this call. The transcript is on the dashboard — worth a look, or give them a ring."
+          : `${parentName} sounded ${extracted.mood} on this call, though nothing specific came up.`
+      );
+    }
+
     // Fingerprint the structured facts, not the prose: Claude rewords the same situation
     // differently every call, so body text would never match and nothing would dedupe.
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
-      fingerprint: alertFingerprint("concern", [...concerns, ...medsMissed.map((m) => `missed:${m}`)]),
+      // mood is in the fingerprint because a mood-only alert has no other facts in it: without
+      // it every content-free alert fingerprints identically as "concern:", so an unreadable
+      // call on Monday would suppress a "sounded low" alert on Tuesday inside the window.
+      fingerprint: alertFingerprint("concern", [
+        ...concerns,
+        ...medsMissed.map((m) => `missed:${m}`),
+        ...(concerns.length === 0 && medsMissed.length === 0 ? [`mood:${extracted.mood}`] : []),
+      ]),
       // A second fall the same day is not a duplicate to collapse; a repeat pizza request is.
       severity: "safety" as const,
     });
