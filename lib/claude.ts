@@ -80,47 +80,16 @@ export function normalize(raw: unknown): CallSummary {
   const asStringMap = (v: unknown): Record<string, string> => {
     if (!v || typeof v !== "object" || Array.isArray(v)) return {};
     const out: Record<string, string> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>).slice(0, MAX_ARRAY_ITEMS)) {
-      if (typeof k === "string" && typeof val === "string" && k.trim() && val.trim()) {
-        out[k.slice(0, MAX_ITEM_CHARS)] = val.slice(0, MAX_ITEM_CHARS);
-      }
+    // Filtered BEFORE the cap, not after: slicing first means junk keys ahead of the real
+    // ones silently push valid reasons out of the result.
+    const usable = Object.entries(v as Record<string, unknown>).filter(
+      ([k, val]) => typeof k === "string" && typeof val === "string" && k.trim() && val.trim()
+    );
+    for (const [k, val] of usable.slice(0, MAX_ARRAY_ITEMS)) {
+      out[k.slice(0, MAX_ITEM_CHARS)] = (val as string).slice(0, MAX_ITEM_CHARS);
     }
     return out;
   };
-  /**
-   * Drops a concern that is wholly contained in another one.
-   *
-   * A real alert went out ending with a bullet that just said "chest", because the model
-   * returned "Reported chest palpitations and asked for it to be kept secret" and then
-   * "chest" as a third item. A one-word fragment in a list a worried family is scanning is
-   * noise at best, and at worst it reads as a separate finding.
-   *
-   * Matched on whole words, not raw substrings. A plain `includes` also dropped
-   * "concern 1" because it reads inside "concern 10" — caught by an existing test, and the
-   * same shape would silently drop a real concern that happened to be spelled inside a
-   * longer unrelated one.
-   *
-   * Containment, not length: "fell" and "chest pain" are complete concerns that must
-   * survive, and they do, because nothing else in the list contains them.
-   */
-  const words = (t: string) => t.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const containsSequence = (haystack: string[], needle: string[]) =>
-    needle.length > 0 &&
-    haystack.some((_, i) => needle.every((w, k) => haystack[i + k] === w));
-
-  const dropFragments = (items: string[]): string[] => {
-    const tokenised = items.map(words);
-    return items.filter((_, i) =>
-      !tokenised.some(
-        (other, j) =>
-          j !== i &&
-          containsSequence(other, tokenised[i]) &&
-          // Keep the longer one; on an exact duplicate keep whichever came first.
-          (other.length > tokenised[i].length || j < i)
-      )
-    );
-  };
-
   const asStringArray = (v: unknown): string[] =>
     Array.isArray(v)
       ? v
@@ -134,7 +103,7 @@ export function normalize(raw: unknown): CallSummary {
     meds_confirmed: asStringArray(obj.meds_confirmed),
     meds_missed: asStringArray(obj.meds_missed),
     meds_missed_reasons: asStringMap(obj.meds_missed_reasons),
-    concerns: dropFragments(asStringArray(obj.concerns)),
+    concerns: asStringArray(obj.concerns),
     requests: asStringArray(obj.requests),
     // An invalid/missing mood means Claude gave no real signal — that's "we don't know,"
     // not "everything's fine." Defaulting to "okay" would let malformed output quietly

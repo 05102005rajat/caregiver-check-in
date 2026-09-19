@@ -134,26 +134,17 @@ describe("meds_missed_reasons", () => {
   });
 });
 
-describe("fragment concerns", () => {
-  it("drops a one-word fragment of a longer concern", () => {
-    // A real alert went out ending with a bullet that just said "chest", beside
-    // "Reported chest palpitations and asked for it to be kept secret".
-    const r = normalize({ concerns: ["Reported chest palpitations and asked for it to be kept secret", "Did not take lisinopril", "chest"] });
-    expect(r.concerns).toEqual(["Reported chest palpitations and asked for it to be kept secret", "Did not take lisinopril"]);
+describe("concerns are never dropped", () => {
+  it("keeps a short concern even when a longer one reuses its words", () => {
+    // A dedupe added here once removed "fell" because the words appear inside "Fell out
+    // with her neighbour" — an argument, not a fall. It silently deleted a fall report from
+    // the text sent to the family, which is the one direction this product must not fail.
+    // Nothing in normalize may drop a concern the model returned.
+    const r = normalize({ concerns: ["fell", "Fell out with her neighbour and is upset about it"] });
+    expect(r.concerns).toEqual(["fell", "Fell out with her neighbour and is upset about it"]);
   });
 
-  it("keeps a short concern that stands on its own", () => {
-    const r = normalize({ concerns: ["fell", "not eating much"] });
-    expect(r.concerns).toEqual(["fell", "not eating much"]);
-  });
-
-  it("does not confuse a number with a longer number sharing its digits", () => {
-    // "concern 1" reads inside "concern 10" as a raw substring but is a different concern.
-    const r = normalize({ concerns: ["concern 1", "concern 10"] });
-    expect(r.concerns).toEqual(["concern 1", "concern 10"]);
-  });
-
-  it("collapses an exact duplicate to one, keeping the first", () => {
-    expect(normalize({ concerns: ["dizzy", "dizzy"] }).concerns).toEqual(["dizzy"]);
+  it("keeps an exact duplicate rather than deciding which one mattered", () => {
+    expect(normalize({ concerns: ["dizzy", "dizzy"] }).concerns).toEqual(["dizzy", "dizzy"]);
   });
 });

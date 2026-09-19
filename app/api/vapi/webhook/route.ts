@@ -374,8 +374,19 @@ export async function POST(request: Request) {
         })
       );
     }
-    if (concerns.length > 0) {
-      lines.push("", "Concerns:", ...concerns.map((c) => `• ${c}`));
+    // The keyword backstop contributes BARE WORDS from a fixed list ("chest", "fell",
+    // "pain"), which is why a real alert once ended with a bullet reading just "• chest"
+    // beside a full sentence about palpitations. They are not dropped — the backstop exists
+    // to catch what the model missed, and a word it flagged is a signal even when a longer
+    // concern happens to mention it — but they are not findings in their own right either,
+    // so they get their own line instead of masquerading as one.
+    const flaggedWords = keywordMatches.filter((k) => !extracted.concerns.includes(k));
+    const narrativeConcerns = concerns.filter((c) => !flaggedWords.includes(c));
+    if (narrativeConcerns.length > 0) {
+      lines.push("", "Concerns:", ...narrativeConcerns.map((c) => `• ${c}`));
+    }
+    if (flaggedWords.length > 0) {
+      lines.push("", `Also heard on the call: ${flaggedWords.join(", ")}`);
     }
     // Rosie promised on the call to pass these on, so they go in whether or not anything
     // else was concerning.
