@@ -7,6 +7,7 @@ describe("normalize", () => {
       summary: "All good.",
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
+      meds_missed_reasons: {},
       concerns: [],
       requests: [],
       mood: "good",
@@ -16,6 +17,7 @@ describe("normalize", () => {
       summary: "All good.",
       meds_confirmed: ["Lisinopril"],
       meds_missed: [],
+      meds_missed_reasons: {},
       concerns: [],
       requests: [],
       mood: "good",
@@ -29,6 +31,7 @@ describe("normalize", () => {
       summary: "Partial only",
       meds_confirmed: [],
       meds_missed: [],
+      meds_missed_reasons: {},
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -41,6 +44,7 @@ describe("normalize", () => {
       summary: "",
       meds_confirmed: [],
       meds_missed: [],
+      meds_missed_reasons: {},
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -50,6 +54,7 @@ describe("normalize", () => {
       summary: "",
       meds_confirmed: [],
       meds_missed: [],
+      meds_missed_reasons: {},
       concerns: [],
       requests: [],
       mood: "unknown",
@@ -99,5 +104,32 @@ describe("extractJson", () => {
 
   it("throws when no JSON object is present", () => {
     expect(() => extractJson("no json here")).toThrow();
+  });
+});
+
+describe("meds_missed_reasons", () => {
+  it("carries why a dose wasn't taken", () => {
+    // "Not taken: metformin" and "couldn't tell which pill it was" were two separate
+    // bullets in the text, and joining cause to effect was left to a worried reader. The
+    // reason is the part that decides what they do: label the pill box, or have a
+    // conversation.
+    const r = normalize({ meds_missed: ["Metformin"], meds_missed_reasons: { Metformin: "couldn't tell which pill it was" } });
+    expect(r.meds_missed_reasons).toEqual({ Metformin: "couldn't tell which pill it was" });
+  });
+
+  it("drops anything that isn't a string pair", () => {
+    const r = normalize({ meds_missed_reasons: { Good: "ran out", Bad: 42, Empty: "   ", "": "x" } });
+    expect(r.meds_missed_reasons).toEqual({ Good: "ran out" });
+  });
+
+  it("defaults to an empty object for an array, a string, or null", () => {
+    for (const bad of [["a"], "nope", null, 7]) {
+      expect(normalize({ meds_missed_reasons: bad }).meds_missed_reasons).toEqual({});
+    }
+  });
+
+  it("clamps a runaway reason rather than texting it to a family", () => {
+    const r = normalize({ meds_missed_reasons: { Metformin: "x".repeat(5000) } });
+    expect(Object.values(r.meds_missed_reasons)[0].length).toBeLessThan(500);
   });
 });

@@ -8,6 +8,7 @@ function output(overrides: Partial<CallSummary> = {}): CallSummary {
     summary: "…",
     meds_confirmed: [],
     meds_missed: [],
+    meds_missed_reasons: {},
     concerns: [],
     requests: [],
     mood: "good",

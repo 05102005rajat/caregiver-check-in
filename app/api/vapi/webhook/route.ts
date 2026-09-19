@@ -329,7 +329,16 @@ export async function POST(request: Request) {
       status: "completed",
       transcript,
       summary: extracted.summary,
-      meds_confirmed: { confirmed: medsConfirmed, missed: medsMissed, appointments_acknowledged: appointmentsAcknowledged },
+      meds_confirmed: {
+        confirmed: medsConfirmed,
+        missed: medsMissed,
+        // Kept only for medications that survived the isKnownMed filter, so a hallucinated
+        // name can't smuggle a reason through with it.
+        missed_reasons: Object.fromEntries(
+          Object.entries(extracted.meds_missed_reasons).filter(([name]) => missedLower.has(name.toLowerCase()))
+        ),
+        appointments_acknowledged: appointmentsAcknowledged,
+      },
       concerns,
       requests: extracted.requests,
       mood: extracted.mood,
@@ -350,7 +359,20 @@ export async function POST(request: Request) {
     // instead of reading a five-line summary to find the one fact that matters.
     const lines = [`${parentName}'s check-in — needs a look:`];
     if (medsMissed.length > 0) {
-      lines.push("", "Not taken:", ...medsMissed.map((m) => `• ${m}`));
+      // With the reason, where the call gave one. "Not taken: metformin" and "couldn't tell
+      // which pill it was" were two separate bullets, and the reader had to join up cause
+      // and effect themselves — while the reason is the part that decides what they do
+      // about it: label the pill box, or have a conversation.
+      const reasonFor = (m: string) =>
+        Object.entries(extracted.meds_missed_reasons).find(([name]) => name.toLowerCase() === m.toLowerCase())?.[1];
+      lines.push(
+        "",
+        "Not taken:",
+        ...medsMissed.map((m) => {
+          const why = reasonFor(m);
+          return why ? `• ${m} — ${why}` : `• ${m}`;
+        })
+      );
     }
     if (concerns.length > 0) {
       lines.push("", "Concerns:", ...concerns.map((c) => `• ${c}`));
