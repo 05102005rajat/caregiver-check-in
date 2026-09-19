@@ -18,6 +18,12 @@ export interface EvalCase {
   /** Watch items the family has already flagged as known (lib/claude summarizeCall). */
   knownIssues?: string[];
   /**
+   * The medications the call was about, as the webhook always supplies them. Present so the
+   * eval grades the prompt shape production actually sends — without it the
+   * <medications_due> block is absent and the scored prompt is one that never runs.
+   */
+  medications?: Array<{ name: string; description?: string | null }>;
+  /**
    * Medications this call was actually for. Production filters Claude's medication output
    * against this snapshot before deciding to alert, so the eval has to as well — otherwise
    * a hallucinated missed medication counts as a successful alert here while production

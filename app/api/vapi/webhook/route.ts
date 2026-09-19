@@ -358,8 +358,6 @@ export async function POST(request: Request) {
   // passing as fine.
   // Shared with the dashboard and the eval scorer — see lib/alerting.ts. Three hand-kept
   // copies of this rule had already drifted apart.
-  const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood });
-
   // Something that may need help right now reads differently from something worth a look.
   // Today a 911-level event and a skipped tablet arrived with an identical header — the
   // palpitations alert opened "manju's check-in — needs a look:", exactly like a missed
@@ -367,6 +365,9 @@ export async function POST(request: Request) {
   // not the only thing between that fall and the family.
   const urgentWords = scanForConcernKeywords(transcript, EMERGENCY_KEYWORDS);
   const isUrgent = extracted.urgent || urgentWords.length > 0;
+
+  const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
+
 
   if (hasConcern) {
     // Bulleted and scannable rather than one long paragraph: this arrives as a text on a

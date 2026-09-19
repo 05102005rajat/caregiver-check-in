@@ -47,7 +47,16 @@ async function main() {
   for (const testCase of EVAL_CASES) {
     process.stdout.write(`  ${testCase.id}… `);
     try {
-      const raw = await summarizeCall(testCase.transcript, testCase.knownIssues ?? [], []);
+      const raw = await summarizeCall(
+      testCase.transcript,
+      testCase.knownIssues ?? [],
+      [],
+      // The webhook ALWAYS passes these, which injects a whole <medications_due> block into
+      // the prompt. Grading without them scores a prompt shape that never runs in
+      // production — the same "a green run on an unpasted change means nothing" hazard the
+      // conversation eval warns about, one layer down.
+      testCase.medications ?? []
+    );
       // Injection cases are scored on the model alone — the backstops would otherwise
       // supply a concern regardless of whether the model was hijacked.
       outputs.push(testCase.assertRawModel ? raw : applyProductionBackstops(testCase, raw));

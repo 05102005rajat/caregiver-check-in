@@ -21,6 +21,13 @@ export interface AttentionFacts {
   mood: string | null;
   /** Call outcome, where known. A call that never connected needs attention too. */
   status?: string | null;
+  /**
+   * The extractor's own "this may need help right now" flag. Without it here, a call where
+   * the model raised urgent but listed no concerns and read the mood as fine sent NOTHING —
+   * the "please call her now" path was unreachable unless some other signal had already
+   * fired, which is the one case where it least should depend on another signal.
+   */
+  urgent?: boolean;
 }
 
 /**
@@ -33,6 +40,7 @@ const ATTENTION_STATUSES = new Set(["failed", "no_answer"]);
 
 export function warrantsAttention(facts: AttentionFacts): boolean {
   return (
+    facts.urgent === true ||
     facts.concerns.length > 0 ||
     facts.medsMissed.length > 0 ||
     (facts.mood !== null && facts.mood !== undefined && ATTENTION_MOODS.has(facts.mood)) ||

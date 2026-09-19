@@ -140,6 +140,16 @@ async function processRetries(
         : decision === "too_late"
           ? `Heads up: ${parent.name}'s ${time} check-in didn't go out — our scheduler fell behind and it's now too late to call about it. Please check in with them directly. ${subject}`.trim()
           : `Heads up: ${parent.name} didn't answer their ${time} check-in after ${describeAttempts(rules.max_retries)}. ${subject}`.trim();
+      // Gated like the reaper's two branches: a manual test call produces an ordinary calls
+      // row with scheduled_for = now, so without this it no-answers, gets retried, and on
+      // exhaustion texts "didn't answer their 3:42pm check-in after 3 tries" about a call
+      // the caregiver started themselves. The third dial path, and the one the `manual`
+      // purpose could not reach — purpose lives on the dial, and this fires without one.
+      const retrySlot = await slotFor(db, parent.id, call.scheduled_for);
+      if (retrySlot.known && !retrySlot.found) {
+        log.info("cron.retry_miss_alert_skipped", { call_id: call.id, parent_id: parent.id, reason: "no_slot_manual_call" });
+        continue;
+      }
       await notifyFamilyContacts(db, parent.id, "notify_on_miss", call.id, body, {
         fingerprint: alertFingerprint("miss", [call.scheduled_for]),
         severity: "safety",

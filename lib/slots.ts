@@ -195,8 +195,15 @@ export function planSlotsForDay(
   for (const entry of callable) {
     const open = merged[merged.length - 1];
     const gapMinutes = open ? (entry.dueAt.getTime() - open.dueAt.getTime()) / 60000 : null;
-    if (open && gapMinutes !== null && gapMinutes <= SLOT_MERGE_MINUTES) open.meds.push(...entry.meds);
-    else merged.push({ meds: [...entry.meds], dueAt: entry.dueAt });
+    if (open && gapMinutes !== null && gapMinutes <= SLOT_MERGE_MINUTES) {
+      open.meds.push(...entry.meds);
+      // Anchored on the LATEST time in the group, not the earliest. Ringing at the earliest
+      // asks about a dose before it is due — and the extractor is told to count anything not
+      // clearly confirmed as missed, so a tablet the person has not got to yet comes back as
+      // "Not taken" and the family is texted about it. Being a few minutes late to the first
+      // dose is what the catch-up window is for; being early to the last one is a false alarm.
+      open.dueAt = entry.dueAt;
+    } else merged.push({ meds: [...entry.meds], dueAt: entry.dueAt });
   }
 
   for (const { meds: medsAtTime, dueAt } of merged) {

@@ -132,7 +132,12 @@ export function reminderSlotFor(appointment: Appointment, timezone: string): Dat
   // Too early: pull it forward to when we're first willing to ring. Only worth doing if
   // the appointment hasn't already started by then — a "reminder" after the fact is worse
   // than none, and it would occupy the slot a real missed-call alert needs.
-  const local = toZonedTime(raw, timezone);
+  // Built from the APPOINTMENT's local day, not the reminder's. For anything before 01:00
+  // local, raw (start minus an hour) lands on the PREVIOUS day, so this used to resolve to
+  // yesterday 08:00 — which is happily earlier than starts_at, so it was returned as a valid
+  // reminder instant dated a day early. It then expires on arrival into a "the reminder
+  // didn't go out" text, for any household where neverOurs has nothing to suppress it with.
+  const local = toZonedTime(startsAt, timezone);
   const pad = (n: number) => String(n).padStart(2, "0");
   const windowOpens = fromZonedTime(
     `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}T${pad(CALLING_HOURS_START)}:00:00`,

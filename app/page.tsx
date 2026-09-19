@@ -8,7 +8,7 @@ const STEPS = [
   },
   {
     title: "We call them every day",
-    body: "A short, friendly conversation at the times you choose — on their ordinary phone, no app and nothing to set up at their end.",
+    body: "A short, friendly conversation at the times you choose — on their ordinary phone, no app and nothing to set up at their end. It's an automated assistant, and it says so plainly if they ask who they're speaking to.",
   },
   {
     title: "You get the important updates",
@@ -31,8 +31,8 @@ export default function Home() {
               Know how Mom or Dad is doing — without calling every day
             </h1>
             <p className="text-slate-500 text-lg max-w-lg mx-auto">
-              A check-in call to your loved one, a short conversation, and a simple summary
-              for you when something needs your attention.
+              An automated voice assistant calls your loved one, has a short conversation,
+              and sends you a simple summary when something needs your attention.
             </p>
           </div>
           <div className="space-y-2">

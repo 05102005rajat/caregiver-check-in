@@ -239,11 +239,18 @@ describe("reminderSlotFor", () => {
     // The property the cases above are examples of. Without it, a future change to the
     // clamp could reintroduce a dead-end slot at some hour nobody wrote a case for.
     const timezone = "America/Los_Angeles";
+    let planned = 0;
     for (let hour = 0; hour < 24; hour += 1) {
       const startsAt = fromZonedTime(`2026-09-10T${String(hour).padStart(2, "0")}:30:00`, timezone);
       const slot = reminderSlotFor(appt({ starts_at: startsAt.toISOString() }), timezone);
-      if (slot) expect(isWithinCallingHours(slot, timezone)).toBe(true);
+      if (slot) {
+        planned += 1;
+        expect(isWithinCallingHours(slot, timezone)).toBe(true);
+      }
     }
+    // Without this the loop asserts nothing at all if reminderSlotFor returned null for
+    // every hour of the day — a passing test for a function that had stopped working.
+    expect(planned).toBeGreaterThan(0);
   });
 });
 

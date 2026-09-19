@@ -147,9 +147,27 @@ async function main() {
       elapsedAfter.state === "pending",
       `state=${elapsedAfter.state} — a consumed slot is a check-in that silently never happens`
     );
-    check("dispatch leaves a slot that isn't due yet alone (control)", futureAfter.state === "pending" && futureAfter.call_id === null);
+    // Deliberately re-checked with the blocker REMOVED. While a blocking call exists every
+    // dispatch is refused with already_scheduled and released to exactly this state, so the
+    // control passed even for a dispatchDueSlots that ignored due_at entirely.
+    // Compared by updated_at, not by state. With a blocking call present every dispatch is
+    // refused and released back to pending, so "still pending" describes the elapsed slot
+    // and the future one identically — the control passed even for a dispatchDueSlots that
+    // ignored due_at completely. The elapsed slot was claimed and released, so its
+    // updated_at moved; a slot that was never looked at still has the one it was created
+    // with. Re-dispatching with the blocker removed would prove the same thing by placing a
+    // real phone call, which is not a price a control should cost.
+    check(
+      "dispatch leaves a slot that isn't due yet alone (control)",
+      futureAfter.state === "pending" &&
+        futureAfter.call_id === null &&
+        futureAfter.updated_at === future.updated_at &&
+        elapsedAfter.updated_at !== elapsed.updated_at,
+      `future untouched=${futureAfter.updated_at === future.updated_at}, elapsed claimed=${elapsedAfter.updated_at !== elapsed.updated_at}`
+    );
 
     await admin.from("calls").delete().eq("id", blocker!.id);
+
 
     // ---- expire ----
     // Control first: nothing has expired yet, so this must be a no-op.
@@ -176,6 +194,8 @@ async function main() {
 
     // ---- expiring twice must not text twice ----
     const before = (msgs ?? []).length;
+    // Guarded below with before > 0: check() does not abort, so if "TELLS THE FAMILY" above
+    // failed this would compare 0 to 0 and pass without exercising dedupe at all.
     await expireLapsedSlots(admin as never, parent, realNow);
     const { data: msgsAgain } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", fp);
     check("a second expiry pass does not re-alert", (msgsAgain ?? []).length === before, `${before} -> ${(msgsAgain ?? []).length}`);
@@ -518,10 +538,13 @@ async function main() {
       .insert({ parent_id: pid, scheduled_for: servedDue, status: "completed", called_at: servedDue, dial_attempted_at: servedDue })
       .select("id")
       .single();
-    await admin.from("call_slots").insert({
+    const { error: servedSlotError } = await admin.from("call_slots").insert({
       parent_id: pid, due_at: servedDue, expires_at: new Date(realNow.getTime() - 60000).toISOString(),
       kind: "medication", med_names: ["EarlyMed"], state: "pending",
     });
+    // Checked, like every other fixture here. The assertion below is "zero messages", and a
+    // failed insert produces zero messages for the wrong reason — green having tested nothing.
+    if (servedSlotError) throw new Error(`served-slot fixture failed: ${servedSlotError.message}`);
     await expireLapsedSlots(admin as never, parent, realNow);
     const servedFp = tooLateFingerprint(servedDue);
     const { data: servedMsgs } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", servedFp);

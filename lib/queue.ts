@@ -450,7 +450,14 @@ export async function dispatchDueSlots(
       // Not fatal: the call still goes out, it just won't mention this morning's dose.
       log.error("cron.outstanding_meds_lookup_failed", { parent_id: parent.id, err: todaysError });
     }
-    const outstanding = outstandingMedsToday((todaysCalls ?? []) as Call[], parent.timezone, now);
+    // Minus anything this call is already asking about. A medication taken twice a day under
+    // one name would otherwise appear in meds_due AND meds_outstanding on the evening call —
+    // so the model can return it as both confirmed and missed, and the contradiction rule in
+    // the webhook keeps "missed", telling the family a dose that WAS taken wasn't.
+    const askingAbout = new Set(medsForSlot.map((m) => m.name.toLowerCase()));
+    const outstanding = outstandingMedsToday((todaysCalls ?? []) as Call[], parent.timezone, now).filter(
+      (name) => !askingAbout.has(name.toLowerCase())
+    );
 
     const outcome = await scheduleAndDial(
       db,

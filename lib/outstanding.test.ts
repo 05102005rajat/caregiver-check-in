@@ -9,7 +9,7 @@ function call(hourPdt: number, meds: { confirmed?: string[]; missed?: string[] }
   return {
     id: `c${hourPdt}`,
     parent_id: "p1",
-    scheduled_for: new Date(Date.UTC(2026, 8, 10 + (hourPdt >= 17 ? 0 : 0), hourPdt + 7, 0, 0)).toISOString(),
+    scheduled_for: new Date(Date.UTC(2026, 8, 10, hourPdt + 7, 0, 0)).toISOString(),
     status,
     meds_confirmed: meds,
   } as unknown as Call;

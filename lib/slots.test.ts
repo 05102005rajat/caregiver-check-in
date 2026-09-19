@@ -67,8 +67,11 @@ describe("planSlotsForDay", () => {
     );
     expect(slots).toHaveLength(1);
     expect(slots[0].medNames.sort()).toEqual(["Lisinopril", "Metformin"]);
-    // At the earliest of the group, so nothing is rung later than it was asked for.
-    expect(slots[0].dueAt.toISOString()).toBe(scheduledForToday("17:57", TZ, NOW).toISOString());
+    // At the LATEST of the group. Anchoring on the earliest asks about a dose before it is
+    // due, and the extractor counts anything unconfirmed as missed — so a tablet they have
+    // not got to yet is texted to the family as "Not taken". Late to the first dose is what
+    // the catch-up window is for; early to the last one is a false alarm.
+    expect(slots[0].dueAt.toISOString()).toBe(scheduledForToday("17:58", TZ, NOW).toISOString());
   });
 
   it("chains a run of nearby doses into one call, not a cascade", () => {
@@ -77,6 +80,21 @@ describe("planSlotsForDay", () => {
       [], TZ, NOW, COVERED_SINCE
     );
     expect(slots).toHaveLength(1);
+    // The last dose in the chain, so none of them is asked about early.
+    expect(slots[0].dueAt.toISOString()).toBe(scheduledForToday("08:25", TZ, NOW).toISOString());
+  });
+
+  it("never rings before the last dose in a merged group is actually due", () => {
+    // The property behind the two cases above: a merged call must not ask about a tablet
+    // the person has not got to yet, because unconfirmed reads as missed and the family is
+    // texted about a dose that was never late.
+    for (const [a, b] of [["08:00:00", "08:20:00"], ["12:00:00", "12:29:00"], ["17:57:00", "17:58:00"]]) {
+      const { slots } = planSlotsForDay(
+        [med({ id: "x", time_of_day: a }), med({ id: "y", time_of_day: b })], [], TZ, NOW, COVERED_SINCE
+      );
+      expect(slots).toHaveLength(1);
+      expect(slots[0].dueAt.getTime()).toBe(scheduledForToday(b.slice(0, 5), TZ, NOW).getTime());
+    }
   });
 
   it("an unreachable legacy dose does not drag a good one down with it", () => {

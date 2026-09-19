@@ -110,10 +110,24 @@ async function main() {
     await admin.from("calls").update({ status: "scheduled" }).eq("id", c1.id);
     const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
     const m1b = await msgsFor(fp1);
+    // Counted per recipient among SUCCESSFUL sends, not as a total.
+    //
+    // A raw total is wrong in both directions. It was passing as 0 === 0 whenever the alert
+    // check above failed — and once that was guarded it started failing for a legitimate
+    // reason: a send that errored the first time has status 'failed', which alreadyNotified
+    // deliberately does not treat as "they were told", so the next pass retries it and the
+    // total climbs by one. That retry is the feature. What must never happen is the same
+    // recipient being told twice.
+    const sentTwice = Object.entries(
+      m1b.filter((m) => m.status === "sent").reduce<Record<string, number>>((acc, m) => {
+        acc[m.recipient as string] = (acc[m.recipient as string] ?? 0) + 1;
+        return acc;
+      }, {})
+    ).filter(([, n]) => n > 1);
     check(
-      "re-running the same refused slot does not re-alert",
-      !out1b.dialed && m1b.length === m1.length,
-      `${m1.length} -> ${m1b.length} messages for the same fingerprint`
+      "re-running the same refused slot does not tell anyone twice",
+      m1.length > 0 && !out1b.dialed && sentTwice.length === 0,
+      `duplicated for: ${JSON.stringify(sentTwice)} (from ${m1.length} to ${m1b.length} rows)`
     );
 
     // ---- CASE 2 (CONTROL): a manual test call, refused identically, must NOT alert. ----
@@ -134,7 +148,11 @@ async function main() {
     // this one through — and it holds whether or not Vapi then accepts a non-routable
     // number, so no handset is involved either way.
     if (!inside) {
-      console.log("~ skipped in-hours control: no zone currently inside calling hours");
+      // Not a skip. This control is the only thing proving dialAndRecord does not refuse
+      // unconditionally, and printing "~ skipped" while the suite exits 0 at 8/8 is the
+      // EVAL_REPEATS= shape HANDOVER catalogues: green without having run the thing that
+      // matters. The other direction already throws at the top of this file.
+      throw new Error("no zone is currently inside calling hours — rerun later; the in-hours control cannot be skipped");
     } else {
       await admin.from("parents").update({ timezone: inside }).eq("id", pid);
       const { data: inHoursRow } = await admin.from("parents").select("*").eq("id", pid).single();
