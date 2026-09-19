@@ -48,8 +48,9 @@ export function consentGreeting(parentName: string, assistantName: string, careg
   );
 }
 
-/** Opening for every call after consent is on file — no consent question. */
 /**
+ * Opening for every call after consent is on file — no consent question.
+ *
  * WHERE THE OPENING LINE LIVES — and why the Vapi dashboard's "First Message" field is not
  * it.
  *

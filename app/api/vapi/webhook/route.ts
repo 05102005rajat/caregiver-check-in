@@ -274,7 +274,14 @@ export async function POST(request: Request) {
     // comes up"); without passing it through, ticking it merely opted out of suppression
     // while the base prompt still declined to flag an unchanged chronic complaint.
     const alwaysReport = watchItems.filter((w) => w.always_alert).map((w) => w.description);
-    extracted = await summarizeCall(transcript, knownIssues, alwaysReport);
+    // The medications this call was actually about, so the extractor can map "the blue one"
+    // back to Lisinopril instead of returning a name isKnownMed will throw away.
+    const allMeds = (medsRow ?? []) as Medication[];
+    const medsForExtraction = knownMedNames
+      .map((known) => allMeds.find((m) => m.name.toLowerCase() === known))
+      .filter((m): m is Medication => Boolean(m))
+      .map((m) => ({ name: m.name, description: m.description }));
+    extracted = await summarizeCall(transcript, knownIssues, alwaysReport, medsForExtraction);
   } catch (err) {
     log.error("webhook.summarize_failed", { call_id: call.id, parent_id: call.parent_id, err });
     const { error } = await db
