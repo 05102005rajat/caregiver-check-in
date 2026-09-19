@@ -23,6 +23,8 @@
  * and places a real outbound call — to a non-routable number, so nothing is answered, but
  * it is a real provider request and this file should not claim otherwise.
  */
+// Must precede every other import: suppresses SendGrid so probe alerts cost nothing.
+import "./no-email";
 import { createClient } from "@supabase/supabase-js";
 import { dialAndRecord } from "@/lib/dial";
 import { tooLateFingerprint } from "@/lib/insights";
@@ -77,21 +79,38 @@ async function main() {
       if (e || !data) throw new Error(`insert call: ${e?.message}`);
       return data as { id: string; scheduled_for: string };
     };
+    // Two readers on purpose, and the difference is load-bearing.
+    //
+    // `msgsFor` counts EVERY channel, and the "control" assertions below use it: "no message
+    // was sent" must mean no message on any channel, so an alert that escaped by email only
+    // still fails them. Narrowing this would weaken them.
+    //
+    // `smsFor` is for the positive assertions. security/no-email.ts suppresses SendGrid, so
+    // every alert now deterministically writes a `status:'failed', channel:'email'` row —
+    // and "at least one message exists" is satisfied by that row alone, with the SMS path
+    // removed entirely. security/queue.ts had the identical defect; this is the other half
+    // of that audit, which the first pass missed.
     const msgsFor = async (fp: string) => {
-      const { data } = await admin.from("messages").select("recipient,body,status,error").eq("parent_id", pid).eq("fingerprint", fp);
+      const { data } = await admin.from("messages").select("recipient,body,status,error,channel").eq("parent_id", pid).eq("fingerprint", fp);
       return data ?? [];
     };
+    const smsFor = async (fp: string) => (await msgsFor(fp)).filter((m) => m.channel === "sms");
+    // Delivered, not merely attempted. A text that Twilio rejected is recorded with
+    // `status:'failed'`, so counting SMS rows of any status lets "the family was told" pass
+    // over zero delivered messages during an outage — the same gap the dedupe check below
+    // closes with `sent.length > 0`, which applies just as much to the headline assertion.
+    const deliveredFor = async (fp: string) => (await smsFor(fp)).filter((m) => m.status === "sent");
 
     // ---- CASE 1: a scheduled check-in refused for the window. Family must be told. ----
     const c1 = await makeCall(5);
     const fp1 = tooLateFingerprint(c1.scheduled_for);
     const out1 = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
     const { data: row1 } = await admin.from("calls").select("status,called_at").eq("id", c1.id).single();
-    const m1 = await msgsFor(fp1);
+    const m1 = await deliveredFor(fp1);
     check("refused dial reports outside_calling_hours", !out1.dialed && out1.reason === "outside_calling_hours", JSON.stringify(out1));
     check("refused dial marks the row failed", row1?.status === "failed", JSON.stringify(row1));
     check("refused dial does NOT claim the call was placed", row1?.called_at === null, `called_at=${row1?.called_at}`);
-    check("refused scheduled check-in TELLS THE FAMILY (the fix)", m1.length > 0, `${m1.length} messages for fingerprint ${fp1}`);
+    check("refused scheduled check-in TELLS THE FAMILY (the fix)", m1.length > 0, `${m1.length} delivered texts for fingerprint ${fp1}`);
     const recipients = new Set(m1.map((m) => m.recipient));
     check(
       "both the family contact and the caregiver are told",
@@ -109,7 +128,7 @@ async function main() {
     // only the fingerprint stops the duplicate.
     await admin.from("calls").update({ status: "scheduled" }).eq("id", c1.id);
     const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
-    const m1b = await msgsFor(fp1);
+    const m1b = await smsFor(fp1);
     // Counted per recipient among SUCCESSFUL sends, not as a total.
     //
     // A raw total is wrong in both directions. It was passing as 0 === 0 whenever the alert
@@ -118,16 +137,23 @@ async function main() {
     // deliberately does not treat as "they were told", so the next pass retries it and the
     // total climbs by one. That retry is the feature. What must never happen is the same
     // recipient being told twice.
+    const sent = m1b.filter((m) => m.status === "sent");
     const sentTwice = Object.entries(
-      m1b.filter((m) => m.status === "sent").reduce<Record<string, number>>((acc, m) => {
+      sent.reduce<Record<string, number>>((acc, m) => {
         acc[m.recipient as string] = (acc[m.recipient as string] ?? 0) + 1;
         return acc;
       }, {})
     ).filter(([, n]) => n > 1);
+    // `sent.length > 0` is the anti-vacuity term, and `m1.length > 0` is NOT a substitute for
+    // it: m1 counts SMS rows of any status, and a row is recorded as 'failed' for an
+    // opt-out, a Twilio outage, or a carrier 21610. If every probe send failed, "nobody was
+    // told twice" would be satisfied by nobody being told at all — a green tick over zero
+    // successful sends, which is what this whole suite exists to rule out. Same gap the
+    // `before > 0` term closes in security/queue.ts, left open in its sibling.
     check(
       "re-running the same refused slot does not tell anyone twice",
-      m1.length > 0 && !out1b.dialed && sentTwice.length === 0,
-      `duplicated for: ${JSON.stringify(sentTwice)} (from ${m1.length} to ${m1b.length} rows)`
+      sent.length > 0 && !out1b.dialed && sentTwice.length === 0,
+      `${sent.length} successful sends; duplicated for: ${JSON.stringify(sentTwice)} (from ${m1.length} to ${m1b.length} rows)`
     );
 
     // ---- CASE 2 (CONTROL): a manual test call, refused identically, must NOT alert. ----

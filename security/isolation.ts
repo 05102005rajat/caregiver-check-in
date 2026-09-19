@@ -19,6 +19,8 @@
  *
  * Every assertion is phrased as an attack: B tries to reach A's data and must fail.
  */
+// Must precede every other import: suppresses SendGrid so probe alerts cost nothing.
+import "./no-email";
 import { createClient } from "@supabase/supabase-js";
 
 const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;

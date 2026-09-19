@@ -19,7 +19,15 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
 
 ## State as of this handover
 
-- **Merged and deployed.** The queue work is on `main` and live in production; eighteen
+- **There is uncommitted work in the tree.** The queue work is merged and deployed, but the
+  Vapi configuration audit (`lib/vapi-config.ts`, `lib/vapi-audit.ts`,
+  `lib/admin-incidents.ts`, their tests, `security/no-email.ts`, and edits to
+  `app/admin/page.tsx`, `next.config.ts`, `README.md`, `.env.local.example` and the three
+  security harnesses) is **not committed and not deployed** — deliberately, at the
+  maintainer's instruction. Seven rounds of `/code-review` ran against it; every finding is
+  fixed. Nothing in it touches the calling path: it is read-only monitoring plus harness
+  fixes.
+- The queue work is on `main` and live in production; eighteen
   rounds of `/code-review` ran against it, and every finding is either fixed or argued
   against in the commit that declined it.
 - **Migrations 0001–0037 applied and verified against the live database.** `0031`,
@@ -30,17 +38,23 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
   - Not verifiable through PostgREST: whether `calls_transcript_retention_idx` was actually
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
-- `npm run security` is **33/33** (was 27/28). Two new runtime suites:
-  `npm run security:refusal` (10/10) and `npm run security:queue` (40/40). 199 unit tests.
+- `npm run security` is **33/33**, `npm run security:refusal` **10/10**,
+  `npm run security:queue` **41/41**, and **297 unit tests**.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
   **true** on both, `endCallPhrases` **empty** on both. The system prompt in
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
   the live copy**; re-paste after every edit. `lib/vapi.ts` sets no `endCallPhrases`,
-  `endCallMessage`, `endCallFunctionEnabled` or recording flag, so all of those are
-  dashboard-only state the repo cannot protect, on every assistant. Verify them through the
-  API (`GET https://api.vapi.ai/assistant`), not the dashboard — the dashboard renders an
-  unset field and a placeholder identically, which is how the trap below went unnoticed.
+  `endCallMessage` or `endCallFunctionEnabled` — those are dashboard-only state the repo
+  cannot protect. Recording is the subtler one: `triggerVapiCall` **does** send
+  `artifactPlan: { recordingEnabled: false, transcriptPlan: { enabled: true } }` on every
+  outbound call, so the daily check-in is protected by the repo. The live bug was the
+  **callback assistant**, which inbound calls reach without ever going through that
+  function, so nothing sent it a per-call override — and Vapi treats *unset* as on. An
+  assistant-level default is therefore load-bearing for every path that `triggerVapiCall`
+  does not own. Verify them through the API (`GET https://api.vapi.ai/assistant`), not the
+  dashboard — the dashboard renders an unset field and a placeholder identically, which is
+  how the trap below went unnoticed.
 - Production data: **one** real household (the maintainer's own parent — see Supabase for the
   name and number; deliberately not written down here, since this repo is public). A second
   test household was deleted this session via `delete_parent_household`.
@@ -73,6 +87,47 @@ suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, t
 
 ---
 
+## The /admin Vapi audit — what it is and why it exists
+
+Four settings on the voice assistant are dashboard-only state that no code in this repo can
+enforce, and **the Vapi dashboard renders an unset field and a grey placeholder
+identically.** That is not theoretical: `End Call Message` held the placeholder farewell
+list, pasted into the field that is spoken aloud, and read as empty to anyone looking at the
+page. `recordingEnabled` was unset on the assistant inbound calls reach, which Vapi treats as
+recording ON, against a `/privacy` page promising no audio is retained. Both were invisible
+until someone read the raw JSON.
+
+`/admin` now reads `GET /assistant/{id}` on every load and reports six things per assistant:
+prompt drift against `prompts/vapi-system-prompt.txt`, recording explicitly off vs unset vs
+on, End Call Phrases empty, End Call Message empty (or sane), the End Call function enabled,
+and the `record_consent` tool. Findings go in the existing incident banner via
+`lib/admin-incidents.ts`. **Deliberately not on `/api/health`:** a 503 there means the
+scheduler is stale and pages whoever is on call, and overloading the one alarm that has to
+stay trustworthy is how it gets ignored.
+
+Three rules the module holds itself to, each learned the hard way:
+
+- **Never a tick when it could not look.** A failed fetch, a missing key or an unreadable
+  prompt file produces `unknown` on every row, never `ok`. A monitor that looks green when
+  it failed to look converts an outage into a reassurance.
+- **Expectations are per assistant.** The callback assistant is *supposed* to speak a
+  farewell and *must not* carry `record_consent`; its prompt is not in this repo. Judging it
+  by the check-in assistant's rules produces a permanently red banner, which nobody reads —
+  the same failure mode as alerting a family about their normal.
+- **"Not expected" is not "not looked at".** The consent-tool exemption runs one way: an
+  assistant that never asks for consent but carries the tool that records it is flagged,
+  because it could write a consent row for a call in which nobody was asked anything.
+
+`VAPI_CALLBACK_ASSISTANT_ID` is a new variable (documented in `README.md` and
+`.env.local.example`). Until it is set, `/admin` shows a red incident — correct, because the
+unaudited assistant is the one that was found misconfigured in production.
+
+Not covered, deliberately: the assistant payload carries tool **ids**, not names, and this
+panel does not fetch `GET /tool`, so `record_consent` reads `unknown` rather than `ok`.
+`toolNamesById` is the seam if that is ever worth a second request.
+
+---
+
 ## Open work, in the order I'd do it
 
 1. ~~**Merge and deploy the branch.**~~ **Done.** Production is on `main`. The live
@@ -86,12 +141,18 @@ suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, t
    anyone; until something watches that URL, a dead scheduler is indistinguishable from a
    quiet week, which on this product is the whole failure mode. `cron-job.org` drives the
    tick, so its own alerting covers "the pinger stopped" but not "the tick is erroring".
-3. **Out-of-hours medication rows.** A row predating the calling-hours check in
+3. **Commit and deploy the Vapi audit.** It is finished and reviewed but deliberately
+   uncommitted. Before deploying, set `VAPI_CALLBACK_ASSISTANT_ID` in Vercel, or `/admin`
+   will show a red incident from the first load. Also re-paste
+   `prompts/vapi-system-prompt.txt` into the Vapi dashboard: the live copy currently carries
+   five leftover lines of a developer note that was moved into `lib/greeting.ts`, and the
+   audit reports it as drift — correctly.
+4. **Out-of-hours medication rows.** A row predating the calling-hours check in
    `lib/validation.ts` can never be dialled. It is now reported by `planSlotsForDay` as
    `uncallable` and logged as `cron.slot_uncallable` rather than vanishing, but it still
    needs a backfill or a dashboard warning. Deliberately *not* queued: queueing it would
    expire unrung every night and text the family daily, which is worse than the status quo.
-4. **Consent evidence is still a log line, not a durable row.** Re-checked against the live
+5. **Consent evidence is still a log line, not a durable row.** Re-checked against the live
    database: the household's number has **no `sms_opt_ins` row at all**, with messages
    already sent to it. That one number is simultaneously the caregiver, the parent *and*
    the family contact — and the contact row carries `sms_opt_in_confirmed = true` with no
@@ -132,8 +193,10 @@ dashboard:
   nothing could trigger it, which means *enabling End Call is what would have made Rosie
   say it to an elderly person*. The two settings are coupled: clear the message first, then
   enable. Rosie's message is now empty — the transcripts show she closes naturally on her
-  own ("Take care, Manju. Goodbye for now."), and an End Call Message is spoken on top of
-  that, so anything in the field is a second farewell.
+  own — the pattern is "Take care, <name>. Goodbye for now." — and an End Call Message is
+  spoken on top of that, so anything in the field is a second farewell. (Names and numbers
+  from real transcripts do not belong in this file; the repo is public, and `0367473` had to
+  strip one once already.)
 - **No End Call tool existed and `endCallFunctionEnabled` was unset on every assistant.**
   The only tool on Rosie is `record_consent`. Evidence rather than inference: every real
   call ended `customer-ended-call` — the person hung up, every time. Rosie had never ended
@@ -220,6 +283,41 @@ tick on it. Both the guard and its control are in `security/queue.ts`, mutation-
 Note the distinction: an opt-out, a dedupe hit and a Twilio delivery failure all return
 `true`. Those are decisions or recorded facts. Only "we could not find out" is `false`.
 
+### 4b. A fix is a change, and a change can defang the test that was watching it
+
+Seven review rounds in one session, and the majority of what they found was **not in the
+original code — it was in the previous round's fix.** The chain is worth reading in order,
+because none of the individual steps looked careless:
+
+1. The security harnesses were billing SendGrid on every run, so email was suppressed.
+2. Suppression made a `status:'failed', channel:'email'` row appear on *every* alert, which
+   silently satisfied `security/queue.ts`'s headline "TELLS THE FAMILY" assertion. It then
+   passed with the SMS path deleted outright.
+3. Narrowing that count to `channel = 'sms'` removed the row that had been keeping a
+   neighbouring dedupe comparison non-zero, making a *different* vacuous pass reachable.
+4. Hardening that dedupe assertion twice — a channel filter, then a `before > 0` term, each
+   with a confident comment — distracted from the fact that it tested nothing at all:
+   `expireLapsedSlots` selects `state = 'pending'`, the first pass had already claimed the
+   slot to `'expired'`, so the second call never reached `notifyFamilyContacts`. It passed
+   with the fingerprint dedupe deleted.
+5. Fixing the channel filter in one harness while writing a comment saying "both counts now
+   filter" left the identical defect in its sibling — three rounds running, each one finding
+   another instance after the audit had been declared complete.
+
+**Rules, stated so the next session does not repeat it:**
+
+- After changing anything a test depends on, **re-derive that the test can still fail.**
+  Break it deliberately and watch it go red. A passing suite after a fix proves nothing about
+  whether the fix is covered.
+- When you fix one instance of a defect, **grep for the class before writing that it is
+  fixed.** Better, remove the ability to get it wrong: both harnesses now funnel every
+  positive "the family was told" count through a single helper requiring
+  `channel = 'sms'` AND `status = 'sent'`, rather than repeating a filter at each call site.
+- **Delivered is not attempted.** A `failed` row is a Twilio outage, not a family that was
+  told. Anti-vacuity guards must count successes, not rows.
+- A comment claiming an audit is complete is a claim like any other, and **the ones that
+  turned out to be false were all mine, written in the same commit as the fix.**
+
 ### 5. SQL NULL is not falsy
 
 `.not("delivery_status", "in", "(undelivered,failed)")` is `NOT (NULL IN (...))` = NULL =
@@ -260,7 +358,33 @@ Three rules learned the hard way:
 - **Pause the live household around any cron tick**, restoring in a `finally`. A tick places
   real phone calls to a real elderly person.
 - **Use non-routable `+1202555xxxx` numbers.** Twilio accepts and never delivers, so the
-  notify path runs for real without reaching a handset.
+  notify path runs for real without reaching a handset — **but every attempt is still a
+  billed segment.** 303 of the 325 messages this account has ever sent went to probe
+  numbers: all `undelivered`, all charged. That is the price of the fidelity, and it is
+  worth paying; just know a full suite run is not free.
+- **Probe households must not reach SendGrid at all.** `notifyFamilyContacts` alerts the
+  account holder on *both* channels, and there is no free-to-attempt email address the way
+  `+1202555xxxx` is a free-to-attempt *number* — SendGrid accepts an `@example.invalid`
+  address, bills a credit, then blocks it as invalid. 107 of those in one day of review
+  rounds exhausted the account's credits and took the **live** email channel down with it:
+  real caregiver alerts started returning 401 while the suites went on passing. The product
+  did not spend that budget; the verification code did. `security/no-email.ts` now unsets
+  `SENDGRID_API_KEY` in-process, so `requireEnv` throws before any HTTP request; `sendAlert`
+  already catches that and records the `status: 'failed'` row, so no product code changed.
+  **Assertions did change.** A `failed` email row is now written on every alert, which
+  silently satisfied any harness assertion that counted `messages` without filtering —
+  including the headline "TELLS THE FAMILY" check in both `security/queue.ts` and
+  `security/refusal.ts`, which passed green with the SMS path removed entirely. Three review
+  rounds each found another instance after I had already written that the audit was
+  complete, so every POSITIVE count now goes through one helper per harness —
+  `deliveredSms` and `deliveredFor` — requiring `channel = 'sms'` **and** `status = 'sent'`.
+  Delivered, not attempted: two `failed` SMS rows are a Twilio outage, not a family that was
+  told. Negative `=== 0` controls stay unfiltered on purpose. It is also not free: `alreadyNotified` matches on `status = 'sent'`, so a `failed` row can
+  never suppress a later one, which makes **email de-duplication untestable by construction**
+  in all three suites — `security/refusal.ts`'s "does not tell anyone twice" check counts
+  `sent` rows only and no longer sees the email channel. SMS dedupe is untouched and is what
+  that check actually exercises. This was already the case while credits were exhausted; the
+  change makes it permanent, so it is written down rather than left to be rediscovered.
 
 **Take `now` as an argument.** This is what made the scheduler testable at all. `lib/queue.ts`
 and `lib/slots.ts` accept the current time rather than calling `new Date()`, so
@@ -305,8 +429,27 @@ their tests when reintroduced.
   its own expiry — so a control asserting "expiry leaves unexpired slots alone" failed for a
   reason unrelated to the code under test
 
+**And again, seven more times, in the session that added the /admin audit.** Every one was
+in verification code, and every one was found by mutation rather than by reading:
+
+- `security/queue.ts`'s "a second expiry pass does not re-alert" **passed with the
+  fingerprint dedupe deleted**, because the second pass found no pending slot and never
+  reached notify. It had been "hardened" twice in earlier rounds without anyone checking it
+  could fail.
+- Four separate "the family was told" counts were satisfied by a guaranteed-failed email
+  row, and then by two failed SMS rows once the channel was filtered but the status was not.
+- A test asserting an unreachable assistant keeps its labels covered the missing-key path
+  and not the fetch-error path — the mutation it was written for survived.
+- A `not.toContain("not the consent path")` assertion pointed at a string the repo had
+  stopped emitting, so no implementation could fail it.
+- A "does not leak the API key" control rejected with an error that never contained the key.
+- A fixture spread the *audit result* into `raw` instead of the payload, so the test passed
+  because every check failed, not because the one under test did.
+- The `.trim()` in the prompt-unavailable guard had no test distinguishing it from `=== ""`.
+
 Verification code is the one place a bug produces **no symptom**. Give it more suspicion
-than product code, not less.
+than product code, not less. **And mutation-test the guard the same hour you write it** —
+five of the seven above were guards added earlier in the same session, believed covered.
 
 **And the same applies to the edits themselves.** Several fixes in this branch were applied
 with `str.replace()` and no assertion that the pattern matched. One of them — a revert that
@@ -360,8 +503,17 @@ Two behaviours worth knowing:
 
 ## Known design debt (deliberate, not forgotten)
 
-- Out-of-hours medication rows — see *Open work* 3.
-- Consent evidence — see *Open work* 4.
+- Out-of-hours medication rows — see *Open work* 4.
+- Consent evidence — see *Open work* 5.
+- The `/admin` audit reports `record_consent` as **unknown**, permanently. The assistant
+  payload carries tool ids and no names, and the panel deliberately does not fetch
+  `GET /tool`. `auditAssistant` accepts a `toolNamesById` map (and is tested with one) if
+  that second request is ever judged worthwhile.
+- The audit's two HTTP calls share `/admin`'s `Promise.all`, so their latency overlaps the
+  database reads rather than adding to them — but `await Promise.all` still gates the render
+  on the slowest member, so a Vapi outage delays the scheduler banner by up to the 8s
+  timeout. A `<Suspense>` boundary around the panel is the real fix and was deliberately not
+  taken.
 - `retry_count` still means "no-answer retries" only. The stale reaper now has its own
   column (`stale_redial_at`, 0032) and bounds by age.
 - A completed call covers a *new* medication slot only within `SLOT_MERGE_MINUTES` of it and
@@ -376,18 +528,24 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 199 unit tests
+npm test                  # 297 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family
-npm run security:queue    # 40 checks: the call queue, driven with a controlled clock
+npm run security:queue    # 41 checks: the call queue, driven with a controlled clock
 npm run eval              # 19 summarizer cases (costs Anthropic tokens)
 npm run eval:conversation # 8 personas x3 against the real system prompt (costs tokens, slow)
 npx next build
 ```
 
 The three `security*` suites each create and clean up their own throwaway household against
-the real Supabase project. None of them run a cron tick, so none can call a real person.
+the real Supabase project. None of them run a cron tick, so none can call a real person, and
+none can reach SendGrid (`security/no-email.ts`). They do place billed Twilio segments — see
+the note under *How to verify*.
+
+There is no command for the Vapi audit: it runs on every `/admin` load, read-only. To see it
+from a terminal, call `auditVapiAssistants()` from a scratch script with `.env.local`
+sourced. It issues `GET` requests only — never PATCH a live assistant from a script.
 
 `npm run eval:conversation` scores `prompts/vapi-system-prompt.txt`, **not** what is live in
 Vapi. A green run on an unpasted change means nothing.

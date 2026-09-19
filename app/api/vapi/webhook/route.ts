@@ -385,7 +385,7 @@ export async function POST(request: Request) {
   // copies of this rule had already drifted apart.
   // Something that may need help right now reads differently from something worth a look.
   // Today a 911-level event and a skipped tablet arrived with an identical header — the
-  // palpitations alert opened "manju's check-in — needs a look:", exactly like a missed
+  // palpitations alert opened "<name>'s check-in — needs a look:", exactly like a missed
   // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
   // not the only thing between that fall and the family.
 
@@ -443,7 +443,7 @@ export async function POST(request: Request) {
     //
     // warrantsAttention fires on mood alone, and "unknown" is what normalize returns when
     // Claude's response was unreadable — so the one case where the system understands least
-    // produced a safety-severity text reading, in full, "manju's check-in — needs a look:".
+    // produced a safety-severity text reading, in full, "<name>'s check-in — needs a look:".
     // A worried family member gets an alarm and no fact. If mood is the only reason we are
     // texting, the honest thing is to say that is the reason.
     if (lines.length === headerLines) {

@@ -1,5 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { auditVapiAssistants } from "@/lib/vapi-audit";
+import { buildIncidents } from "@/lib/admin-incidents";
+import { type AssistantAudit, type CheckState } from "@/lib/vapi-config";
 import type { Call, Message, Parent } from "@/types/db";
 
 export const dynamic = "force-dynamic";
@@ -43,12 +46,28 @@ export default async function AdminPage() {
   const db = createAdminClient();
   const since = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000).toISOString();
 
-  const [{ data: parentsRows }, { data: callRows }, { data: messageRows }, { data: heartbeatRow }] = await Promise.all([
-    db.from("parents").select("*"),
-    db.from("calls").select("*").gte("scheduled_for", since).order("scheduled_for", { ascending: false }),
-    db.from("messages").select("*").gte("sent_at", since).order("sent_at", { ascending: false }),
-    db.from("cron_heartbeat").select("last_tick_at").eq("id", true).maybeSingle(),
-  ]);
+  // The Vapi audit runs alongside the database reads rather than after them, so its latency
+  // overlaps theirs instead of being added to them.
+  //
+  // Stated honestly, because an earlier version of this comment claimed more than it
+  // delivers: this does NOT stop a slow Vapi delaying the page. `await Promise.all` still
+  // gates the whole render on its slowest member, so during a Vapi outage an operator waits
+  // out the 8s timeout before seeing whether the scheduler ran. Overlapping ~100ms of
+  // Supabase reads saves ~100ms. Actually decoupling them needs a <Suspense> boundary around
+  // the panel, which is a deliberate follow-up, not something this comment should pretend is
+  // already done.
+  //
+  // Still inside the handler and still AFTER the allowlist gate above: this reads the Vapi
+  // API key and reports the voice assistant's configuration, and that gate is the only
+  // thing between it and an anonymous request.
+  const [{ data: parentsRows }, { data: callRows }, { data: messageRows }, { data: heartbeatRow }, vapi] =
+    await Promise.all([
+      db.from("parents").select("*"),
+      db.from("calls").select("*").gte("scheduled_for", since).order("scheduled_for", { ascending: false }),
+      db.from("messages").select("*").gte("sent_at", since).order("sent_at", { ascending: false }),
+      db.from("cron_heartbeat").select("last_tick_at").eq("id", true).maybeSingle(),
+      auditVapiAssistants(),
+    ]);
 
   const parents = (parentsRows ?? []) as Parent[];
   const calls = (callRows ?? []) as Call[];
@@ -57,7 +76,6 @@ export default async function AdminPage() {
   const minutesSinceTick = heartbeatRow?.last_tick_at
     ? (Date.now() - new Date(heartbeatRow.last_tick_at as string).getTime()) / 60000
     : null;
-  const cronStale = minutesSinceTick === null || minutesSinceTick > HEARTBEAT_STALE_MINUTES;
 
   const byStatus = (status: string) => calls.filter((c) => c.status === status).length;
   const stuck = calls.filter(
@@ -65,15 +83,17 @@ export default async function AdminPage() {
   );
   const failedMessages = messages.filter((m) => m.status === "failed");
 
-  const incidents: string[] = [];
-  if (cronStale) {
-    incidents.push(
-      `Scheduler hasn't run in ${minutesSinceTick === null ? "an unknown amount of time" : `${Math.round(minutesSinceTick)} min`}`
-    );
-  }
-  if (stuck.length > 0) incidents.push(`${stuck.length} call(s) stuck in progress over ${STUCK_CALL_MINUTES} min`);
-  if (failedMessages.length > 0) incidents.push(`${failedMessages.length} notification(s) failed to send`);
-  if (byStatus("failed") > 0) incidents.push(`${byStatus("failed")} call(s) failed outright`);
+  // Assembled in lib/admin-incidents.ts so it can be tested. Inline here, nothing could
+  // reach the one line that decides whether this page breaks silence at all.
+  const incidents = buildIncidents({
+    minutesSinceTick,
+    staleAfterMinutes: HEARTBEAT_STALE_MINUTES,
+    stuckCalls: stuck.length,
+    stuckAfterMinutes: STUCK_CALL_MINUTES,
+    failedMessages: failedMessages.length,
+    failedCalls: byStatus("failed"),
+    vapi,
+  });
 
   return (
     <Shell>
@@ -134,6 +154,23 @@ export default async function AdminPage() {
         })}
       </div>
 
+      <h2 className="text-sm font-medium text-slate-700 mb-2">Voice assistant configuration</h2>
+      <p className="text-xs text-slate-400 mb-2">
+        Read live from Vapi on every load. These settings live only in the Vapi dashboard, which renders an unset
+        field and a grey placeholder identically — so read this, not that.
+      </p>
+      <div className="space-y-2 mb-6">
+        {vapi.audits.length === 0 && (
+          // Otherwise the heading and "read live from Vapi on every load" sit above nothing,
+          // claiming a read that never happened. The banner carries the reason; this keeps
+          // the panel's own claim honest.
+          <p className="text-xs text-slate-400">No assistant ids configured — nothing was read. See the incidents above.</p>
+        )}
+        {vapi.audits.map((audit) => (
+          <AuditCard key={audit.id} audit={audit} />
+        ))}
+      </div>
+
       {failedMessages.length > 0 && (
         <>
           <h2 className="text-sm font-medium text-slate-700 mb-2">Failed notifications</h2>
@@ -151,6 +188,38 @@ export default async function AdminPage() {
       )}
     </Shell>
   );
+}
+
+function AuditCard({ audit }: { audit: AssistantAudit }) {
+  const tone = !audit.verified
+    ? "border-amber-200 bg-amber-50"
+    : audit.checks.some((c) => c.state === "bad")
+      ? "border-red-200 bg-red-50"
+      : "border-slate-200 bg-white";
+  return (
+    <div className={`border rounded-xl p-3 ${tone}`}>
+      <p className="text-sm font-medium text-slate-900">
+        {audit.label}
+        {audit.name && <span className="text-slate-400 font-normal"> · {audit.name}</span>}
+      </p>
+      <ul className="mt-2 space-y-1">
+        {audit.checks.map((c) => (
+          <li key={c.key} className="text-xs flex gap-2">
+            <span className="shrink-0">{mark(c.state)}</span>
+            <span className={c.state === "bad" ? "text-red-800" : c.state === "unknown" ? "text-amber-800" : "text-slate-600"}>
+              {c.label} — {c.detail}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** "unknown" is never a tick. A monitor that looks green when it failed to look is worse
+ *  than no monitor: it turns an outage into a reassurance. */
+function mark(state: CheckState): string {
+  return state === "ok" ? "\u2713" : state === "bad" ? "\u26a0" : "?";
 }
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: "bad" }) {

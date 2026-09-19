@@ -28,8 +28,9 @@ describe("scanForConcernKeywords", () => {
 
 describe("hasParentResponse", () => {
   it("is false for the real transcript of a call the parent hung up on", () => {
-    // Verbatim shape of a production call where the parent answered and immediately hung up.
-    expect(hasParentResponse("AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?\n")).toBe(false);
+    // Shape of a production call where the parent answered and immediately hung up. Name
+    // replaced: this repo is public and the one live household is a real person.
+    expect(hasParentResponse("AI: Hi Nora, it's Rosie calling for your check-in. How are you feeling today?\n")).toBe(false);
   });
 
   it("is true as soon as the parent says anything, even one word", () => {

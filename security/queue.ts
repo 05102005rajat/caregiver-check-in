@@ -15,6 +15,8 @@
  * Numbers are non-routable +1202555 (HANDOVER): Twilio accepts and never delivers, so the
  * notify path runs for real without reaching a handset.
  */
+// Must precede every other import: suppresses SendGrid so probe alerts cost nothing.
+import "./no-email";
 import { createClient } from "@supabase/supabase-js";
 import { cancelPendingSlots, dispatchDueSlots, expireLapsedSlots, materializeSlots } from "@/lib/queue";
 import { SLOT_CATCHUP_MINUTES } from "@/lib/slots";
@@ -43,6 +45,34 @@ function check(name: string, ok: boolean, detail = "") {
 
 const hhmm = (d: Date, tz: string) =>
   new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(d);
+
+/**
+ * Messages a family member was actually SENT a text for, under this fingerprint.
+ *
+ * Every positive "the family was told" assertion in this file must go through this helper,
+ * and it exists as a helper rather than a filter repeated at each call site because the
+ * ad-hoc version was got wrong three review rounds running:
+ *
+ *   - unfiltered by channel, the `status:'failed', channel:'email'` row that
+ *     security/no-email.ts now guarantees on every alert satisfies the count on its own, so
+ *     the assertion passes with the SMS path deleted outright;
+ *   - unfiltered by status, two `failed` SMS rows satisfy it, so it passes over zero
+ *     delivered texts — a Twilio outage reads as "the family was told".
+ *
+ * Both are the same mistake: counting attempts as if they were deliveries. The negative
+ * `=== 0` controls deliberately do NOT use this — unfiltered is the stricter direction
+ * there, because an alert that escapes on any channel, in any state, must fail them.
+ */
+async function deliveredSms(parentId: string, fingerprint: string): Promise<Array<{ recipient: string; body: string }>> {
+  const { data } = await admin
+    .from("messages")
+    .select("recipient,body")
+    .eq("parent_id", parentId)
+    .eq("fingerprint", fingerprint)
+    .eq("channel", "sms")
+    .eq("status", "sent");
+  return (data ?? []) as Array<{ recipient: string; body: string }>;
+}
 
 async function slotsOf(parentId: string): Promise<CallSlot[]> {
   const { data } = await admin.from("call_slots").select("*").eq("parent_id", parentId).order("due_at");
@@ -181,24 +211,71 @@ async function main() {
     slots = await slotsOf(pid);
     const expiredSlot = slots.find((s) => s.id === elapsed.id)!;
     const fp = tooLateFingerprint(elapsed.due_at);
-    const { data: msgs } = await admin.from("messages").select("recipient,body").eq("parent_id", pid).eq("fingerprint", fp);
+    // `channel = sms` is load-bearing. security/no-email.ts suppresses SendGrid, so every
+    // alert now deterministically writes a `status:'failed', channel:'email'` row for the
+    // caregiver — and an unfiltered count is satisfied by that row alone. The headline
+    // assertion of this whole suite would then pass with the SMS path entirely removed,
+    // which is the "test that cannot fail" shape HANDOVER catalogues, introduced by a change
+    // made to stop the suites billing the email account.
+    const msgs = await deliveredSms(pid, fp);
     check("a lapsed slot is marked expired", expiredSlot.state === "expired", `state=${expiredSlot.state}`);
     check("a lapsed slot gets a calls row so the miss is visible", expiredSlot.call_id !== null);
-    check("a lapsed slot TELLS THE FAMILY", (msgs ?? []).length > 0, `${(msgs ?? []).length} messages`);
-    if (msgs?.[0]) console.log(`    body: ${msgs[0].body}`);
+    check("a lapsed slot TELLS THE FAMILY", msgs.length > 0, `${msgs.length} delivered texts`);
+    // Backstopped the way security/refusal.ts backstops its equivalent: "somebody got a
+    // text" is not the promise. Both the family contact who asked for misses and the account
+    // holder have to be told.
+    const missRecipients = new Set(msgs.map((m) => m.recipient));
+    check(
+      "both the family contact and the caregiver are told about the miss",
+      missRecipients.has(CONTACT_PHONE) && missRecipients.has(CG_PHONE),
+      `recipients: ${JSON.stringify([...missRecipients])}`
+    );
+    if (msgs[0]) console.log(`    body: ${msgs[0].body}`);
     check(
       "the miss names the medication that was scheduled",
-      Boolean(msgs?.[0]?.body?.includes("EarlyMed")),
-      msgs?.[0]?.body ?? "(no message)"
+      Boolean(msgs[0]?.body?.includes("EarlyMed")),
+      msgs[0]?.body ?? "(no message)"
     );
 
     // ---- expiring twice must not text twice ----
-    const before = (msgs ?? []).length;
-    // Guarded below with before > 0: check() does not abort, so if "TELLS THE FAMILY" above
-    // failed this would compare 0 to 0 and pass without exercising dedupe at all.
+    const before = msgs.length;
+    // The slot has to be put BACK to pending first, and this is the whole test.
+    //
+    // expireLapsedSlots selects `.eq("state", "pending")`, and the first pass claimed this
+    // slot to 'expired'. So simply calling it again found nothing, never reached
+    // notifyFamilyContacts, and compared an unchanged count to itself — it passed with the
+    // fingerprint dedupe deleted outright. It pinned the expiry claim, which is worth
+    // pinning, while its name and both of its comments claimed it pinned dedupe.
+    //
+    // Resetting to pending with expires_at still in the past makes the second pass genuinely
+    // re-enter notify for the same fingerprint, which is the only way alreadyNotified is
+    // exercised at all. security/refusal.ts CASE 1b does the equivalent on calls.status.
+    const { data: reopened, error: reopenError } = await admin
+      .from("call_slots")
+      .update({ state: "pending" })
+      .eq("id", elapsed.id)
+      .eq("state", "expired")
+      .select("id");
+    // Asserted, not assumed: a reset that matched zero rows leaves the old vacuous test
+    // behind, looking identical.
+    if (reopenError || (reopened ?? []).length !== 1) {
+      throw new Error(`dedupe fixture failed: could not reopen the expired slot (${reopenError?.message ?? "0 rows"})`);
+    }
     await expireLapsedSlots(admin as never, parent, realNow);
-    const { data: msgsAgain } = await admin.from("messages").select("id").eq("parent_id", pid).eq("fingerprint", fp);
-    check("a second expiry pass does not re-alert", (msgsAgain ?? []).length === before, `${before} -> ${(msgsAgain ?? []).length}`);
+    // Same `channel = sms` filter as the count it is compared against. Without it this
+    // compares an SMS-only `before` to an SMS+email `after` and fails for a reason unrelated
+    // to dedupe: `alreadyNotified` matches `status = 'sent'`, so the deterministically
+    // `failed` email rows never suppress each other and legitimately grow by one per pass.
+    // That is the documented cost of suppressing SendGrid in these suites — see
+    // security/no-email.ts — not a dedupe regression.
+    const msgsAgain = await deliveredSms(pid, fp);
+    check(
+      // `before > 0` is the anti-vacuity term: check() does not abort, so if the alert above
+      // failed this would compare 0 to 0 and print a tick for dedupe it never exercised.
+      "a second expiry pass does not re-alert",
+      before > 0 && msgsAgain.length === before,
+      `${before} -> ${msgsAgain.length}`
+    );
 
     // ---- a failed source read must never delete the day ----
     // Materialisation reconciles, so a plan built from an empty medications list deletes
@@ -237,15 +314,11 @@ async function main() {
     );
     // And it must then be reported, not just survive.
     await expireLapsedSlots(admin as never, parent, realNow);
-    const { data: lapsedMsgs } = await admin
-      .from("messages")
-      .select("id")
-      .eq("parent_id", pid)
-      .eq("fingerprint", tooLateFingerprint(lapsedDue));
+    const lapsedMsgs = await deliveredSms(pid, tooLateFingerprint(lapsedDue));
     check(
       "that lapsed slot is then reported to the family",
-      (lapsedMsgs ?? []).length > 0,
-      `${(lapsedMsgs ?? []).length} messages`
+      lapsedMsgs.length > 0,
+      `${lapsedMsgs.length} delivered texts`
     );
 
     // Control: an empty plan really does clear a still-live pending slot, so the check
@@ -365,15 +438,11 @@ async function main() {
     );
     // And expiry must then still be able to report it.
     await expireLapsedSlots(admin as never, parent, realNow);
-    const { data: unreportedMsgs } = await admin
-      .from("messages")
-      .select("id")
-      .eq("parent_id", pid)
-      .eq("fingerprint", tooLateFingerprint(unreportedDue));
+    const unreportedMsgs = await deliveredSms(pid, tooLateFingerprint(unreportedDue));
     check(
       "that slot is still reportable after the cancel",
-      (unreportedMsgs ?? []).length > 0,
-      `${(unreportedMsgs ?? []).length} messages`
+      unreportedMsgs.length > 0,
+      `${unreportedMsgs.length} delivered texts`
     );
     // That cancel took the day's live slots with it, which the checks below need back.
     await materializeSlots(admin as never, parent, ctx, realNow);

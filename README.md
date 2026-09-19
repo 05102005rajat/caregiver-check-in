@@ -170,6 +170,15 @@ Other properties worth knowing:
 - **Structured JSON logging** carrying `parent_id`/`call_id` through scheduler → dial →
   webhook → notification, so "why didn't Mom get her call?" is answerable by filtering
   logs rather than reading them.
+- **The voice assistant's own configuration is audited**, because it is the one part of the
+  system this repo cannot enforce. Four settings live only in the Vapi dashboard, which
+  renders an unset field and a grey placeholder identically — a real incident here was a
+  placeholder farewell list pasted into the field that is *spoken aloud*, and recording left
+  unset (which Vapi treats as ON) on the assistant inbound calls reach, against a privacy
+  page promising no audio is kept. `/admin` reads the live assistants on every load and
+  reports prompt drift, recording, End Call settings and the consent tool. It never reports
+  a check as passing when it could not read it, and its findings go to the operator banner —
+  never to `/api/health`, where a 503 has to keep meaning "the scheduler is stale".
 
 ---
 
@@ -263,6 +272,7 @@ deployment there), so ping it every 5 minutes from an external scheduler with
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Settings → API |
 | `VAPI_API_KEY`, `VAPI_ASSISTANT_ID`, `VAPI_PHONE_NUMBER_ID` | Vapi dashboard |
+| `VAPI_CALLBACK_ASSISTANT_ID` | Vapi dashboard — the assistant your phone numbers route *inbound* calls to. `/admin` audits its settings and shows a red incident until this is set. |
 | `VAPI_WEBHOOK_SECRET` | Random string; must match the header on Vapi's Server URL |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET`, `TWILIO_FROM_NUMBER` | Twilio Console (API key, not the classic auth token) |
 | `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL` | SendGrid; sender must be verified |
@@ -286,6 +296,10 @@ Current and accurate:
 - **Monitoring is pull-based** — `/api/health`, the dashboard banner, and `/admin` all
   require someone to look. Nothing pages you. Point an external uptime monitor at
   `/api/health` before this serves families who won't think to check.
+- **The Vapi audit cannot confirm the consent tool.** The assistant payload carries tool
+  ids and no names, and the panel deliberately makes no second request to resolve them, so
+  that one row reads *unknown* rather than *ok*. Everything it cannot confirm it says so
+  about, rather than guessing.
 - **One parent per caregiver**, enforced by a unique constraint.
 - **No long-term trends or digests** — change detection compares against a short rolling
   baseline, not months of history.
