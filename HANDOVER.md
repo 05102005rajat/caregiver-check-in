@@ -39,8 +39,9 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
   `prompts/vapi-system-prompt.txt` is pasted into the Vapi dashboard — **the repo is not
   the live copy**; re-paste after every edit. `lib/vapi.ts` sets no `endCallPhrases` or
   `endCallMessage`, so those are dashboard-only state the repo cannot protect.
-- Production data: **one** household, `manju`, on `+19494660665`. The `man` test household
-  was deleted this session via `delete_parent_household`.
+- Production data: **one** real household (the maintainer's own parent — see Supabase for the
+  name and number; deliberately not written down here, since this repo is public). A second
+  test household was deleted this session via `delete_parent_household`.
 
 ---
 
@@ -71,7 +72,7 @@ suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, t
 ## Open work, in the order I'd do it
 
 1. **Merge and deploy the branch**, pausing the live household for the first tick as
-   described above. Watch the first tick after 17:57 PDT — `manju`'s first slot under the new
+   described above. Watch the first tick after the live household's first slot under the new
    queue. Expected: two `call_slots` rows, two calls a minute apart, same as before. A
    read-only dry run of the planner against the live household produced exactly that.
 2. **Confirm an End Call tool exists in the Vapi Tools tab.** `End Call Phrases` is empty
@@ -85,7 +86,7 @@ suppress the replay. Pause, let one tick run, confirm `call_slots` looks sane, t
    needs a backfill or a dashboard warning. Deliberately *not* queued: queueing it would
    expire unrung every night and text the family daily, which is worse than the status quo.
 4. **Consent evidence is still a log line, not a durable row** — and there is now a
-   concrete instance. `+19494660665` has **no `sms_opt_ins` row at all**, before or after
+   concrete instance. The live household's number has **no `sms_opt_ins` row at all**, before or after
    the `man` deletion, yet 23 messages have been sent to it. Nothing is broken today
    (the caregiver's own number is first-party consent), but the artifact `0020` exists to
    produce does not exist for the live household.
