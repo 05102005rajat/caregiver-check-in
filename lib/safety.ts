@@ -91,3 +91,30 @@ function parentTurnsOnly(transcript: string): string {
 export function hasParentResponse(transcript: string): boolean {
   return SPEAKER_LINE.test(transcript);
 }
+
+/**
+ * Rosie's own "I don't have your details" line — the abort the system prompt tells her to
+ * speak when the call was set up wrong.
+ *
+ * When she says this, the call never became a check-in. Everything after it is Rosie
+ * apologising and the person reacting to being hung up on, and reading that as evidence
+ * about the parent is how a household got texted "Manju's responses seemed confused or
+ * disconnected" about a call our own bug had ended. A fabricated observation about an
+ * elderly person's mental state, sent to their family, is the worst output this system can
+ * produce — worse than saying nothing, because the family acts on it.
+ *
+ * Detected structurally rather than by asking the model, for the same reason as
+ * hasParentResponse: it is our own sentence, we know it exactly, and "was this a real
+ * conversation" must not depend on a judgement call. Matched on the distinctive middle of
+ * the line so light rewording of the apology around it does not silently stop matching.
+ */
+const ROSIE_ABORT = /\b(?:i\s+)?(?:don'?t|do not)\s+have\s+your\s+details\b/i;
+
+export function rosieAbortedForMissingDetails(transcript: string): boolean {
+  // Only in HER turns. The same words quoted back by the person ("you said you don't have
+  // my details?") are part of a real conversation, not an abort.
+  return transcript
+    .split("\n")
+    .filter((line) => /^\s*(?:ai|assistant|bot|rosie)\s*:/i.test(line))
+    .some((line) => ROSIE_ABORT.test(line));
+}

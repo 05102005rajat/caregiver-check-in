@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { scanForConcernKeywords, hasParentResponse } from "./safety";
+import { hasParentResponse, rosieAbortedForMissingDetails, scanForConcernKeywords } from "./safety";
 
 const KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
@@ -68,5 +68,53 @@ describe("scanForConcernKeywords — parent turns only", () => {
   it("falls back to scanning everything when speaker labels are unrecognizable", () => {
     // Over-reporting beats missing a real emergency if Vapi ever changes transcript shape.
     expect(scanForConcernKeywords("she mentioned chest pain", ["chest"])).toEqual(["chest"]);
+  });
+});
+
+describe("rosieAbortedForMissingDetails", () => {
+  // Verbatim from the production call that caused this. Rosie spoke her upstream-failure
+  // line even though parent_name was sent correctly, and the family was then texted that
+  // their mother "seemed confused or disconnected".
+  const REAL = [
+    "AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?",
+    "User: Sure.",
+    "AI: I'm sorry. Something has gone wrong on my end, and I don't have your details. I won't keep you. Goodbye.",
+    "User: I mean, the.",
+    "AI: I'm sorry.",
+    "User: Like, we did for 57 and 558, right? Yeah.",
+  ].join("\n");
+
+  it("detects the abort in the real production transcript", () => {
+    expect(rosieAbortedForMissingDetails(REAL)).toBe(true);
+  });
+
+  it("is false for an ordinary check-in (control)", () => {
+    const ok = [
+      "AI: Hi Nora, it's Rosie calling for your check-in. How are you feeling today?",
+      "User: Good thanks, took my Metformin already.",
+      "AI: Lovely. Take care, Nora.",
+    ].join("\n");
+    expect(rosieAbortedForMissingDetails(ok)).toBe(false);
+  });
+
+  it("ignores the words when the PERSON says them, not Rosie", () => {
+    // A real conversation about the phrase is still a real conversation. Only her own turn
+    // means the call was aborted.
+    const quoted = [
+      "AI: Hi Nora, it's Rosie calling for your check-in.",
+      "User: Last time you said you don't have your details, what happened there?",
+      "AI: I'm sorry about that. How are you feeling today?",
+    ].join("\n");
+    expect(rosieAbortedForMissingDetails(quoted)).toBe(false);
+  });
+
+  it("matches the apostrophe-free and reworded-apology forms", () => {
+    expect(rosieAbortedForMissingDetails("AI: Sorry, I dont have your details.")).toBe(true);
+    expect(rosieAbortedForMissingDetails("AI: My records are empty — I do not have your details today.")).toBe(true);
+  });
+
+  it("does not fire on an empty or content-free transcript", () => {
+    expect(rosieAbortedForMissingDetails("")).toBe(false);
+    expect(rosieAbortedForMissingDetails("AI: Hello?")).toBe(false);
   });
 });

@@ -6,7 +6,14 @@ import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { log } from "@/lib/log";
-import { DEFAULT_CONCERN_KEYWORDS, EMERGENCY_KEYWORDS, hasParentResponse, hasRecognisableSpeakerLabels, scanForConcernKeywords } from "@/lib/safety";
+import {
+  DEFAULT_CONCERN_KEYWORDS,
+  EMERGENCY_KEYWORDS,
+  hasParentResponse,
+  hasRecognisableSpeakerLabels,
+  rosieAbortedForMissingDetails,
+  scanForConcernKeywords,
+} from "@/lib/safety";
 import { medsAtLocalTime } from "@/lib/schedule";
 import { isAlreadyProcessed } from "@/lib/webhook-utils";
 import type { Appointment, Call, EscalationRules, Medication, Parent, WatchItem } from "@/types/db";
@@ -15,6 +22,9 @@ export const dynamic = "force-dynamic";
 
 // Vapi endedReason values that mean the call never actually connected to a person.
 const NO_ANSWER_REASONS = new Set(["customer-did-not-answer", "customer-busy", "voicemail", "no-answer"]);
+
+/** Stored and rendered wherever a concern is. Names our fault as ours. */
+const SYSTEM_FAULT_CONCERN = "The check-in did not happen — the call ended on a fault at our end, before any conversation";
 
 // Only validates the fields this route actually reads — Vapi's full event payload has
 // many more fields we don't touch, so this isn't a complete schema of their API.
@@ -334,7 +344,27 @@ export async function POST(request: Request) {
   // See lib/safety.hasParentResponse — the eval set showed the model only catches this
   // about half the time, and "nobody heard from Mom" must never depend on a coin flip.
   const noResponse = !hasParentResponse(transcript) ? ["Parent didn't respond — call ended without a conversation"] : [];
-  const concerns = Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse]));
+
+  // Rosie said her own "I don't have your details" line, so this call never became a
+  // check-in and nothing in the transcript is evidence about the parent. Everything after
+  // that line is her apologising and the person reacting to being hung up on — which is
+  // exactly what got read as "responses seemed confused or disconnected" and texted to a
+  // family about their mother.
+  //
+  // The call is still reported, and deliberately so: a check-in that silently never
+  // happened is the one failure this product must never have. What changes is WHAT is
+  // reported — a fault on our side, in our own words, instead of a fabricated observation
+  // about an elderly person's mental state. The model's concerns, the keyword scan and its
+  // mood are all dropped, because all three read a conversation that did not take place.
+  const rosieAborted = rosieAbortedForMissingDetails(transcript);
+  // Medications are dropped too: she never asked, so "not taken" is a statement about a
+  // question nobody was given the chance to answer. Defined here, above the row write,
+  // because this is what gets PERSISTED — the weekly summary counts stored missed doses and
+  // would otherwise report "Metformin not confirmed on 3 days" from calls that never asked.
+  const reportedMedsMissed = rosieAborted ? [] : medsMissed;
+  const concerns = rosieAborted
+    ? [SYSTEM_FAULT_CONCERN]
+    : Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse]));
 
   // The keyword list is word-boundary matching with no negation or context — lib/safety.ts
   // documents "chest of drawers" and "I didn't fall" as known limits. That was tolerable
@@ -358,14 +388,20 @@ export async function POST(request: Request) {
     .update({
       status: "completed",
       transcript,
-      summary: extracted.summary,
+      // The model's prose narrates a conversation that did not take place, and it is what
+      // the dashboard renders under the parent's name. Replaced, not kept.
+      summary: rosieAborted
+        ? "The check-in did not happen: the call ended on a fault at our end before any conversation took place. Nothing here reflects how they are."
+        : extracted.summary,
       meds_confirmed: {
         confirmed: medsConfirmed,
-        missed: medsMissed,
+        missed: reportedMedsMissed,
         // Kept only for medications that survived the isKnownMed filter, so a hallucinated
         // name can't smuggle a reason through with it.
         missed_reasons: Object.fromEntries(
-          Object.entries(extracted.meds_missed_reasons).filter(([name]) => missedLower.has(name.toLowerCase()))
+          Object.entries(extracted.meds_missed_reasons).filter(
+            ([name]) => !rosieAborted && missedLower.has(name.toLowerCase())
+          )
         ),
         appointments_acknowledged: appointmentsAcknowledged,
       },
@@ -389,21 +425,32 @@ export async function POST(request: Request) {
   // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
   // not the only thing between that fall and the family.
 
-  const hasConcern = warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
+  const hasConcern = rosieAborted
+    ? true
+    : warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
 
 
   if (hasConcern) {
     // Bulleted and scannable rather than one long paragraph: this arrives as a text on a
     // phone, and a worried family member should be able to see what's wrong at a glance
     // instead of reading a five-line summary to find the one fact that matters.
-    const lines = isUrgent
-      ? [`URGENT — please call ${parentName} now.`, "", `Something ${parentName} said on today's check-in may need help straight away:`]
-      : [`${parentName}'s check-in — needs a look:`];
+    // An aborted call gets its own header, and the second line is the whole point of this
+    // branch: the family must not be left to infer that something is wrong with their
+    // parent from a message our own bug caused.
+    const lines = rosieAborted
+      ? [
+          `${parentName}'s check-in didn't happen.`,
+          "",
+          `The call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`,
+        ]
+      : isUrgent
+        ? [`URGENT — please call ${parentName} now.`, "", `Something ${parentName} said on today's check-in may need help straight away:`]
+        : [`${parentName}'s check-in — needs a look:`];
     // Counted, not inferred from lines.length: the urgent header is three entries and the
     // routine one is a single entry, so a length check silently stopped protecting the
     // alert that matters most the moment the urgent header was added.
     const headerLines = lines.length;
-    if (medsMissed.length > 0) {
+    if (reportedMedsMissed.length > 0) {
       // With the reason, where the call gave one. "Not taken: metformin" and "couldn't tell
       // which pill it was" were two separate bullets, and the reader had to join up cause
       // and effect themselves — while the reason is the part that decides what they do
@@ -413,7 +460,7 @@ export async function POST(request: Request) {
       lines.push(
         "",
         "Not taken:",
-        ...medsMissed.map((m) => {
+        ...reportedMedsMissed.map((m) => {
           const why = reasonFor(m);
           return why ? `• ${m} — ${why}` : `• ${m}`;
         })
@@ -469,8 +516,8 @@ export async function POST(request: Request) {
       // suppress the one telling them to ring now.
       fingerprint: alertFingerprint(isUrgent ? "urgent" : "concern", [
         ...concerns,
-        ...medsMissed.map((m) => `missed:${m}`),
-        ...(concerns.length === 0 && medsMissed.length === 0 ? [`mood:${extracted.mood}`] : []),
+        ...reportedMedsMissed.map((m) => `missed:${m}`),
+        ...(concerns.length === 0 && reportedMedsMissed.length === 0 ? [`mood:${extracted.mood}`] : []),
       ]),
       // A second fall the same day is not a duplicate to collapse; a repeat pizza request is.
       severity: "safety" as const,
