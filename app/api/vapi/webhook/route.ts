@@ -407,7 +407,11 @@ export async function POST(request: Request) {
       },
       concerns,
       requests: extracted.requests,
-      mood: extracted.mood,
+      // The fifth thing the model inferred from a conversation that did not happen, and the
+      // one I missed first time round: mood is rendered on the dashboard under her name and
+      // counted by the weekly summary as "sounded low on N days". "unknown" is the truth —
+      // the call never got far enough for anyone to know.
+      mood: rosieAborted ? "unknown" : extracted.mood,
       // Stored so needsAttention reaches the same verdict the text did (0037).
       urgent: isUrgent,
     })
@@ -428,6 +432,7 @@ export async function POST(request: Request) {
   const hasConcern = rosieAborted
     ? true
     : warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
+
 
 
   if (hasConcern) {
