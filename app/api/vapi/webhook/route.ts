@@ -5,6 +5,7 @@ import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
+import { SYSTEM_FAULT_CONCERN, reportableFacts } from "@/lib/reportable";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
@@ -23,8 +24,6 @@ export const dynamic = "force-dynamic";
 // Vapi endedReason values that mean the call never actually connected to a person.
 const NO_ANSWER_REASONS = new Set(["customer-did-not-answer", "customer-busy", "voicemail", "no-answer"]);
 
-/** Stored and rendered wherever a concern is. Names our fault as ours. */
-const SYSTEM_FAULT_CONCERN = "The check-in did not happen — the call ended on a fault at our end, before any conversation";
 
 // Only validates the fields this route actually reads — Vapi's full event payload has
 // many more fields we don't touch, so this isn't a complete schema of their API.
@@ -300,13 +299,25 @@ export async function POST(request: Request) {
     extracted = await summarizeCall(transcript, knownIssues, alwaysReport, medsForExtraction);
   } catch (err) {
     log.error("webhook.summarize_failed", { call_id: call.id, parent_id: call.parent_id, err });
+    // Extraction failed, so `report` does not exist yet — but the abort rule still applies,
+    // and this branch has its own keyword backstop that would otherwise scan Rosie's apology
+    // and text the family a bare word from a call that never happened. Both failures at once
+    // is rare; "rare" is how every defect in this family has reached production.
+    const abortedFallback = rosieAbortedForMissingDetails(transcript);
+    const fallbackConcerns = abortedFallback ? [SYSTEM_FAULT_CONCERN] : keywordMatches;
     const { error } = await db
       .from("calls")
-      .update({ status: "completed", transcript, concerns: keywordMatches })
+      .update({ status: "completed", transcript, concerns: fallbackConcerns, mood: "unknown" })
       .eq("id", call.id);
     if (error) console.error(`Failed to record Claude-failure fallback for call ${call.id}`, error);
 
-    if (keywordMatches.length > 0) {
+    if (abortedFallback) {
+      const body = `${parentName}'s check-in didn't happen.\n\nThe call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`;
+      await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
+        fingerprint: alertFingerprint("abort", [call.id]),
+        severity: "safety" as const,
+      });
+    } else if (keywordMatches.length > 0) {
       const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
       await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
         fingerprint: alertFingerprint("keyword", keywordMatches),
@@ -356,15 +367,28 @@ export async function POST(request: Request) {
   // reported — a fault on our side, in our own words, instead of a fabricated observation
   // about an elderly person's mental state. The model's concerns, the keyword scan and its
   // mood are all dropped, because all three read a conversation that did not take place.
-  const rosieAborted = rosieAbortedForMissingDetails(transcript);
-  // Medications are dropped too: she never asked, so "not taken" is a statement about a
-  // question nobody was given the chance to answer. Defined here, above the row write,
-  // because this is what gets PERSISTED — the weekly summary counts stored missed doses and
-  // would otherwise report "Metformin not confirmed on 3 days" from calls that never asked.
-  const reportedMedsMissed = rosieAborted ? [] : medsMissed;
-  const concerns = rosieAborted
-    ? [SYSTEM_FAULT_CONCERN]
-    : Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse]));
+  // One decision for the whole handler — see lib/reportable.ts for why this is not a
+  // ternary at each call site. Everything below reads `report`, so a field that must not
+  // survive an aborted call cannot be forgotten at one of six places.
+  const report = reportableFacts({
+    extracted: {
+      summary: extracted.summary,
+      concerns: extracted.concerns,
+      requests: extracted.requests,
+      medsConfirmed,
+      medsMissed,
+      missedReasons: Object.fromEntries(
+        Object.entries(extracted.meds_missed_reasons).filter(([name]) => missedLower.has(name.toLowerCase()))
+      ),
+      appointmentsAcknowledged,
+      mood: extracted.mood,
+      urgent: false, // recomputed below; isUrgent needs the watch-item scan
+    },
+    keywordMatches,
+    noResponse,
+    aborted: rosieAbortedForMissingDetails(transcript),
+  });
+  const concerns = report.concerns;
 
   // The keyword list is word-boundary matching with no negation or context — lib/safety.ts
   // documents "chest of drawers" and "I didn't fall" as known limits. That was tolerable
@@ -381,7 +405,10 @@ export async function POST(request: Request) {
   const urgentWords = scanForConcernKeywords(transcript, EMERGENCY_KEYWORDS).filter(
     (w) => !watchText.includes(w.toLowerCase())
   );
-  const isUrgent = extracted.urgent === true || (urgentWords.length > 0 && extracted.concerns.length > 0);
+  // Zeroed for an aborted call along with everything else the model inferred: a 911-shaped
+  // claim about a conversation that did not happen is the most dangerous one on the list.
+  const isUrgent =
+    !report.aborted && (extracted.urgent === true || (urgentWords.length > 0 && extracted.concerns.length > 0));
 
   const { error: finalUpdateError } = await db
     .from("calls")
@@ -390,28 +417,22 @@ export async function POST(request: Request) {
       transcript,
       // The model's prose narrates a conversation that did not take place, and it is what
       // the dashboard renders under the parent's name. Replaced, not kept.
-      summary: rosieAborted
-        ? "The check-in did not happen: the call ended on a fault at our end before any conversation took place. Nothing here reflects how they are."
-        : extracted.summary,
+      summary: report.summary,
       meds_confirmed: {
-        confirmed: medsConfirmed,
-        missed: reportedMedsMissed,
+        confirmed: report.medsConfirmed,
+        missed: report.medsMissed,
         // Kept only for medications that survived the isKnownMed filter, so a hallucinated
         // name can't smuggle a reason through with it.
-        missed_reasons: Object.fromEntries(
-          Object.entries(extracted.meds_missed_reasons).filter(
-            ([name]) => !rosieAborted && missedLower.has(name.toLowerCase())
-          )
-        ),
-        appointments_acknowledged: appointmentsAcknowledged,
+        missed_reasons: report.missedReasons,
+        appointments_acknowledged: report.appointmentsAcknowledged,
       },
       concerns,
-      requests: extracted.requests,
+      requests: report.requests,
       // The fifth thing the model inferred from a conversation that did not happen, and the
       // one I missed first time round: mood is rendered on the dashboard under her name and
       // counted by the weekly summary as "sounded low on N days". "unknown" is the truth —
       // the call never got far enough for anyone to know.
-      mood: rosieAborted ? "unknown" : extracted.mood,
+      mood: report.mood,
       // Stored so needsAttention reaches the same verdict the text did (0037).
       urgent: isUrgent,
     })
@@ -429,9 +450,8 @@ export async function POST(request: Request) {
   // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
   // not the only thing between that fall and the family.
 
-  const hasConcern = rosieAborted
-    ? true
-    : warrantsAttention({ concerns, medsMissed, mood: extracted.mood, urgent: isUrgent });
+  const hasConcern =
+    report.aborted || warrantsAttention({ concerns, medsMissed: report.medsMissed, mood: report.mood, urgent: isUrgent });
 
 
 
@@ -442,7 +462,7 @@ export async function POST(request: Request) {
     // An aborted call gets its own header, and the second line is the whole point of this
     // branch: the family must not be left to infer that something is wrong with their
     // parent from a message our own bug caused.
-    const lines = rosieAborted
+    const lines = report.aborted
       ? [
           `${parentName}'s check-in didn't happen.`,
           "",
@@ -455,17 +475,17 @@ export async function POST(request: Request) {
     // routine one is a single entry, so a length check silently stopped protecting the
     // alert that matters most the moment the urgent header was added.
     const headerLines = lines.length;
-    if (reportedMedsMissed.length > 0) {
+    if (report.medsMissed.length > 0) {
       // With the reason, where the call gave one. "Not taken: metformin" and "couldn't tell
       // which pill it was" were two separate bullets, and the reader had to join up cause
       // and effect themselves — while the reason is the part that decides what they do
       // about it: label the pill box, or have a conversation.
       const reasonFor = (m: string) =>
-        Object.entries(extracted.meds_missed_reasons).find(([name]) => name.toLowerCase() === m.toLowerCase())?.[1];
+        Object.entries(report.missedReasons).find(([name]) => name.toLowerCase() === m.toLowerCase())?.[1];
       lines.push(
         "",
         "Not taken:",
-        ...reportedMedsMissed.map((m) => {
+        ...report.medsMissed.map((m) => {
           const why = reasonFor(m);
           return why ? `• ${m} — ${why}` : `• ${m}`;
         })
@@ -477,7 +497,7 @@ export async function POST(request: Request) {
     // to catch what the model missed, and a word it flagged is a signal even when a longer
     // concern happens to mention it — but they are not findings in their own right either,
     // so they get their own line instead of masquerading as one.
-    const flaggedWords = keywordMatches.filter((k) => !extracted.concerns.includes(k));
+    const flaggedWords = report.keywordMatches.filter((k) => !extracted.concerns.includes(k));
     const narrativeConcerns = concerns.filter((c) => !flaggedWords.includes(c));
     if (narrativeConcerns.length > 0) {
       lines.push("", "Concerns:", ...narrativeConcerns.map((c) => `• ${c}`));
@@ -487,8 +507,8 @@ export async function POST(request: Request) {
     }
     // Rosie promised on the call to pass these on, so they go in whether or not anything
     // else was concerning.
-    if (extracted.requests.length > 0) {
-      lines.push("", `${parentName} asked for:`, ...extracted.requests.map((r) => `• ${r}`));
+    if (report.requests.length > 0) {
+      lines.push("", `${parentName} asked for:`, ...report.requests.map((r) => `• ${r}`));
     }
 
     // Never send a header with nothing under it.
@@ -521,19 +541,19 @@ export async function POST(request: Request) {
       // suppress the one telling them to ring now.
       fingerprint: alertFingerprint(isUrgent ? "urgent" : "concern", [
         ...concerns,
-        ...reportedMedsMissed.map((m) => `missed:${m}`),
-        ...(concerns.length === 0 && reportedMedsMissed.length === 0 ? [`mood:${extracted.mood}`] : []),
+        ...report.medsMissed.map((m) => `missed:${m}`),
+        ...(concerns.length === 0 && report.medsMissed.length === 0 ? [`mood:${report.mood}`] : []),
       ]),
       // A second fall the same day is not a duplicate to collapse; a repeat pizza request is.
       severity: "safety" as const,
     });
-  } else if (extracted.requests.length > 0) {
+  } else if (report.requests.length > 0) {
     // Nothing is wrong, but they asked for something and Rosie said she'd pass it on.
     // Staying silent here would quietly break a promise the person heard her make — and
     // "Mum would like a visit" is exactly what a family wants to hear, even on a good day.
-    const lines = [`${parentName} is doing fine, and asked for:`, "", ...extracted.requests.map((r) => `• ${r}`)];
+    const lines = [`${parentName} is doing fine, and asked for:`, "", ...report.requests.map((r) => `• ${r}`)];
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
-      fingerprint: alertFingerprint("request", extracted.requests),
+      fingerprint: alertFingerprint("request", report.requests),
       severity: "routine" as const,
     });
   }
