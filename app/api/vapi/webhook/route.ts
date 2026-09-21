@@ -5,13 +5,14 @@ import { summarizeCall } from "@/lib/claude";
 import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
-import { SYSTEM_FAULT_CONCERN, reportableFacts } from "@/lib/reportable";
+import { SYSTEM_FAULT_CONCERN, VOICEMAIL_CONCERN, reportableFacts } from "@/lib/reportable";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
   EMERGENCY_KEYWORDS,
   hasParentResponse,
   hasRecognisableSpeakerLabels,
+  reachedVoicemail,
   rosieAbortedForMissingDetails,
   scanForConcernKeywords,
 } from "@/lib/safety";
@@ -303,8 +304,13 @@ export async function POST(request: Request) {
     // and this branch has its own keyword backstop that would otherwise scan Rosie's apology
     // and text the family a bare word from a call that never happened. Both failures at once
     // is rare; "rare" is how every defect in this family has reached production.
-    const abortedFallback = rosieAbortedForMissingDetails(transcript);
-    const fallbackConcerns = abortedFallback ? [SYSTEM_FAULT_CONCERN] : keywordMatches;
+    const voicemailFallback = reachedVoicemail(transcript);
+    const abortedFallback = voicemailFallback || rosieAbortedForMissingDetails(transcript);
+    const fallbackConcerns = voicemailFallback
+      ? [VOICEMAIL_CONCERN]
+      : abortedFallback
+        ? [SYSTEM_FAULT_CONCERN]
+        : keywordMatches;
     const { error } = await db
       .from("calls")
       .update({ status: "completed", transcript, concerns: fallbackConcerns, mood: "unknown" })
@@ -312,15 +318,29 @@ export async function POST(request: Request) {
     if (error) console.error(`Failed to record Claude-failure fallback for call ${call.id}`, error);
 
     if (abortedFallback) {
-      const body = `${parentName}'s check-in didn't happen.\n\nThe call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`;
+      const body = voicemailFallback
+        ? `${parentName}'s check-in didn't happen.\n\nThe call reached an answering machine rather than ${parentName}, so nothing was asked or answered.`
+        : `${parentName}'s check-in didn't happen.\n\nThe call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`;
       await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
         fingerprint: alertFingerprint("abort", [call.id]),
         severity: "safety" as const,
       });
-    } else if (keywordMatches.length > 0) {
-      const body = `Heads up: we couldn't fully process ${parentName}'s check-in call, but noticed possible concern words (${keywordMatches.join(", ")}). Please check in with them directly.`;
+    } else {
+      // ALWAYS tell someone, keywords or not. This branch used to send only when the crude
+      // keyword list happened to hit, so an extraction outage turned "she said her knee is
+      // much worse and she hasn't eaten" into no text, no summary, and a dashboard row that
+      // looks like an ordinary quiet day. On a product whose promise is that silence means
+      // nothing is wrong, an unprocessed call is the one thing silence must never cover.
+      //
+      // The honest message is short: the call happened, we cannot tell you what was said.
+      // That is actionable — they can ring — in a way that saying nothing is not. Rare by
+      // design, and fingerprinted per call so a retry cannot double it.
+      const body =
+        keywordMatches.length > 0
+          ? `We couldn't process ${parentName}'s check-in today, so we can't tell you what was said — but we did hear: ${keywordMatches.join(", ")}. Worth giving them a ring.`
+          : `${parentName}'s check-in happened, but we couldn't process it today, so we can't tell you what was said. Worth giving them a ring.`;
       await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, body, {
-        fingerprint: alertFingerprint("keyword", keywordMatches),
+        fingerprint: alertFingerprint("unprocessed", [call.id]),
         severity: "safety" as const,
       });
     }
@@ -386,7 +406,15 @@ export async function POST(request: Request) {
     },
     keywordMatches,
     noResponse,
-    aborted: rosieAbortedForMissingDetails(transcript),
+    // Two ways a call never becomes a conversation, both observed in production within a
+    // day of each other, both of which had the extractor reporting verdicts on questions
+    // nobody was asked. Voicemail is checked first only because Rosie's abort line cannot
+    // appear without her having spoken to something.
+    notAConversation: reachedVoicemail(transcript)
+      ? "voicemail"
+      : rosieAbortedForMissingDetails(transcript)
+        ? "assistant-abort"
+        : null,
   });
   const concerns = report.concerns;
 
@@ -408,7 +436,7 @@ export async function POST(request: Request) {
   // Zeroed for an aborted call along with everything else the model inferred: a 911-shaped
   // claim about a conversation that did not happen is the most dangerous one on the list.
   const isUrgent =
-    !report.aborted && (extracted.urgent === true || (urgentWords.length > 0 && extracted.concerns.length > 0));
+    !report.notAConversation && (extracted.urgent === true || (urgentWords.length > 0 && extracted.concerns.length > 0));
 
   const { error: finalUpdateError } = await db
     .from("calls")
@@ -451,7 +479,7 @@ export async function POST(request: Request) {
   // not the only thing between that fall and the family.
 
   const hasConcern =
-    report.aborted || warrantsAttention({ concerns, medsMissed: report.medsMissed, mood: report.mood, urgent: isUrgent });
+    report.notAConversation !== null || warrantsAttention({ concerns, medsMissed: report.medsMissed, mood: report.mood, urgent: isUrgent });
 
 
 
@@ -462,11 +490,13 @@ export async function POST(request: Request) {
     // An aborted call gets its own header, and the second line is the whole point of this
     // branch: the family must not be left to infer that something is wrong with their
     // parent from a message our own bug caused.
-    const lines = report.aborted
+    const lines = report.notAConversation
       ? [
           `${parentName}'s check-in didn't happen.`,
           "",
-          `The call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`,
+          report.notAConversation === "voicemail"
+            ? `The call reached an answering machine rather than ${parentName}, so nothing was asked or answered.`
+            : `The call ended on a fault at our end before any conversation — this is not something ${parentName} said or did.`,
         ]
       : isUrgent
         ? [`URGENT — please call ${parentName} now.`, "", `Something ${parentName} said on today's check-in may need help straight away:`]

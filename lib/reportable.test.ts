@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { SYSTEM_FAULT_CONCERN, SYSTEM_FAULT_SUMMARY, reportableFacts, type ExtractionFacts } from "./reportable";
+import {
+  SYSTEM_FAULT_CONCERN,
+  SYSTEM_FAULT_SUMMARY,
+  VOICEMAIL_CONCERN,
+  VOICEMAIL_SUMMARY,
+  reportableFacts,
+  type ExtractionFacts,
+} from "./reportable";
 
 /**
  * A model output where EVERY field carries something. That is the point: the abort case has
@@ -23,14 +30,14 @@ const input = (over: Partial<Parameters<typeof reportableFacts>[0]> = {}) => ({
   extracted: rich,
   keywordMatches: ["pain"],
   noResponse: [],
-  aborted: false,
+  notAConversation: null,
   ...over,
 });
 
 describe("a normal call passes everything through", () => {
   it("keeps every field the model produced", () => {
     const r = reportableFacts(input());
-    expect(r.aborted).toBe(false);
+    expect(r.notAConversation).toBeNull();
     expect(r.summary).toBe(rich.summary);
     expect(r.requests).toEqual(["Wants a burger"]);
     expect(r.medsConfirmed).toEqual(["Lisinopril"]);
@@ -52,7 +59,7 @@ describe("a normal call passes everything through", () => {
 });
 
 describe("an aborted call reports our fault and nothing else", () => {
-  const r = reportableFacts(input({ aborted: true }));
+  const r = reportableFacts(input({ notAConversation: "assistant-abort" }));
 
   it("replaces the summary, which is rendered under the parent's name", () => {
     expect(r.summary).toBe(SYSTEM_FAULT_SUMMARY);
@@ -95,8 +102,8 @@ describe("an aborted call reports our fault and nothing else", () => {
     // The catch-all. Every previous fix in this family closed the fields someone thought of
     // and left one behind, so this asserts over the whole object rather than a list someone
     // has to remember to extend.
-    const { aborted, summary, concerns, mood, ...inferred } = r;
-    expect(aborted).toBe(true);
+    const { notAConversation, summary, concerns, mood, ...inferred } = r;
+    expect(notAConversation).toBe("assistant-abort");
     expect(summary).toBe(SYSTEM_FAULT_SUMMARY);
     expect(concerns).toEqual([SYSTEM_FAULT_CONCERN]);
     expect(mood).toBe("unknown");
@@ -114,12 +121,43 @@ describe("an aborted call reports our fault and nothing else", () => {
   });
 });
 
+describe("a voicemail reports the machine, and nothing else", () => {
+  const r = reportableFacts(input({ notAConversation: "voicemail" }));
+
+  it("gets the same total suppression as an abort", () => {
+    // Identical treatment, different wording. A second reason must not become a second,
+    // half-finished implementation of the first — which is precisely how this family of bugs
+    // kept reappearing.
+    const { notAConversation, summary, concerns, mood, ...inferred } = r;
+    expect(notAConversation).toBe("voicemail");
+    expect(mood).toBe("unknown");
+    expect(summary).toBe(VOICEMAIL_SUMMARY);
+    expect(concerns).toEqual([VOICEMAIL_CONCERN]);
+    for (const [field, value] of Object.entries(inferred)) {
+      const empty = Array.isArray(value) ? value.length === 0 : typeof value === "object" ? Object.keys(value!).length === 0 : value === false;
+      expect(empty, `${field} survived a voicemail carrying ${JSON.stringify(value)}`).toBe(true);
+    }
+  });
+
+  it("does not report medications as missed", () => {
+    // The production text: "Not taken: Lisinopril, Metformin", from a call that reached an
+    // answering machine. Nobody was asked.
+    expect(r.medsMissed).toEqual([]);
+  });
+
+  it("tells the family a machine answered, not that our software broke", () => {
+    // They call for different responses: one is ours to fix, the other means try them again.
+    expect(r.summary).not.toEqual(SYSTEM_FAULT_SUMMARY);
+    expect(r.concerns).not.toEqual([SYSTEM_FAULT_CONCERN]);
+  });
+});
+
 describe("the two paths are genuinely different (control)", () => {
   it("the same input produces different output depending only on `aborted`", () => {
     // Without this, every assertion above is satisfied by a function that always returns the
     // fault — which would suppress real concerns about a real conversation.
-    const normal = reportableFacts(input({ aborted: false }));
-    const aborted = reportableFacts(input({ aborted: true }));
+    const normal = reportableFacts(input({ notAConversation: null }));
+    const aborted = reportableFacts(input({ notAConversation: "assistant-abort" }));
     expect(normal.concerns).not.toEqual(aborted.concerns);
     expect(normal.summary).not.toEqual(aborted.summary);
     expect(normal.medsMissed.length).toBeGreaterThan(0);

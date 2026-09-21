@@ -82,6 +82,8 @@ export default async function AdminPage() {
     (c) => c.status === "in_progress" && c.called_at && (Date.now() - new Date(c.called_at).getTime()) / 60000 > STUCK_CALL_MINUTES
   );
   const failedMessages = messages.filter((m) => m.status === "failed");
+  // Connected, transcribed, but never summarised: the shape an extraction outage leaves.
+  const unprocessed = calls.filter((c) => c.status === "completed" && c.transcript && !c.summary);
 
   // Assembled in lib/admin-incidents.ts so it can be tested. Inline here, nothing could
   // reach the one line that decides whether this page breaks silence at all.
@@ -92,6 +94,7 @@ export default async function AdminPage() {
     stuckAfterMinutes: STUCK_CALL_MINUTES,
     failedMessages: failedMessages.length,
     failedCalls: byStatus("failed"),
+    unprocessedCalls: unprocessed.length,
     vapi,
   });
 

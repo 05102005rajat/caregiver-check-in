@@ -10,6 +10,7 @@ const healthy = (over: Partial<IncidentInput> = {}): IncidentInput => ({
   stuckAfterMinutes: 10,
   failedMessages: 0,
   failedCalls: 0,
+  unprocessedCalls: 0,
   vapi: { audits: [], incidentNotes: [] },
   ...over,
 });
@@ -61,6 +62,14 @@ describe("buildIncidents", () => {
     it("does not report a heartbeat inside the window (control)", () => {
       expect(buildIncidents(healthy({ minutesSinceTick: 14.9 }))).toEqual([]);
     });
+  });
+
+  it("reports a call that connected but could not be processed", () => {
+    // An extraction outage leaves rows that look ordinary. Without this the console says
+    // "No active incidents" while every check-in that day went unsummarised.
+    const lines = buildIncidents(healthy({ unprocessedCalls: 2 }));
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("could not be processed");
   });
 
   it("reports stuck calls, failed notifications and failed calls", () => {

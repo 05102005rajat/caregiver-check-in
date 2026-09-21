@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasParentResponse, rosieAbortedForMissingDetails, scanForConcernKeywords } from "./safety";
+import { hasParentResponse, reachedVoicemail, rosieAbortedForMissingDetails, scanForConcernKeywords } from "./safety";
 
 const KEYWORDS = ["fall", "fell", "dizzy", "pain", "chest", "breath", "confused", "scared"];
 
@@ -116,5 +116,37 @@ describe("rosieAbortedForMissingDetails", () => {
   it("does not fire on an empty or content-free transcript", () => {
     expect(rosieAbortedForMissingDetails("")).toBe(false);
     expect(rosieAbortedForMissingDetails("AI: Hello?")).toBe(false);
+  });
+});
+
+describe("reachedVoicemail", () => {
+  it("detects the real production greeting Vapi did not flag", () => {
+    // This one reached the family as "Not taken: Lisinopril, Metformin".
+    const real = [
+      "AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?",
+      "User: Please record your message. When you have finished recording, you may hang up.",
+      "AI: Goodby",
+    ].join("\n");
+    expect(reachedVoicemail(real)).toBe(true);
+  });
+
+  it("detects the common greeting shapes", () => {
+    expect(reachedVoicemail("User: Please leave your message after the beep.")).toBe(true);
+    expect(reachedVoicemail("User: You have reached the voicemail of Nora.")).toBe(true);
+    expect(reachedVoicemail("User: Nora is not available right now.")).toBe(true);
+  });
+
+  it("is false for a real conversation (control)", () => {
+    const ok = ["AI: Hi Nora, how are you today?", "User: I'm alright, took my tablets."].join("\n");
+    expect(reachedVoicemail(ok)).toBe(false);
+  });
+
+  it("does not fire when a PERSON talks about leaving a message", () => {
+    // The reason "leave a message" alone is not in the pattern: people say it about others.
+    expect(reachedVoicemail("User: Could you leave a message for my daughter?")).toBe(false);
+  });
+
+  it("does not fire on Rosie's own words", () => {
+    expect(reachedVoicemail("AI: Shall I leave your message after the beep?")).toBe(false);
   });
 });

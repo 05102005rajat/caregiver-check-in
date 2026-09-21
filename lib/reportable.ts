@@ -23,6 +23,19 @@ import type { CallSummary } from "@/lib/claude";
  * failure this product must not have — but reported as our fault, in our words.
  */
 
+/**
+ * Why the call never became a conversation. Both reasons get identical treatment — nothing
+ * inferred from the transcript survives — and differ only in what the family is told, because
+ * "our software broke" and "an answering machine picked up" call for different responses from
+ * them. Adding a third reason means adding it here, and the type makes the callers follow.
+ */
+export type NotAConversation = "assistant-abort" | "voicemail";
+
+export const VOICEMAIL_CONCERN = "The check-in did not happen — the call reached an answering machine";
+
+export const VOICEMAIL_SUMMARY =
+  "The check-in did not happen: the call reached an answering machine rather than a person, so nothing was asked or answered. Nothing here reflects how they are.";
+
 /** Stored and rendered wherever a concern is. Names our fault as ours. */
 export const SYSTEM_FAULT_CONCERN =
   "The check-in did not happen — the call ended on a fault at our end, before any conversation";
@@ -49,12 +62,15 @@ export interface ReportInput {
   keywordMatches: string[];
   /** Structural backstop from lib/safety.hasParentResponse. */
   noResponse: string[];
-  /** lib/safety.rosieAbortedForMissingDetails — she said the call was set up wrong. */
-  aborted: boolean;
+  /**
+   * Set when the call never became a conversation — see NotAConversation. null for a real
+   * one. A boolean was not enough the moment a second reason appeared.
+   */
+  notAConversation: NotAConversation | null;
 }
 
 export interface ReportableFacts {
-  aborted: boolean;
+  notAConversation: NotAConversation | null;
   summary: string;
   /** Narrative findings, already merged with the keyword and no-response backstops. */
   concerns: string[];
@@ -68,12 +84,12 @@ export interface ReportableFacts {
   urgent: boolean;
 }
 
-export function reportableFacts({ extracted, keywordMatches, noResponse, aborted }: ReportInput): ReportableFacts {
-  if (aborted) {
+export function reportableFacts({ extracted, keywordMatches, noResponse, notAConversation }: ReportInput): ReportableFacts {
+  if (notAConversation) {
     return {
-      aborted: true,
-      summary: SYSTEM_FAULT_SUMMARY,
-      concerns: [SYSTEM_FAULT_CONCERN],
+      notAConversation,
+      summary: notAConversation === "voicemail" ? VOICEMAIL_SUMMARY : SYSTEM_FAULT_SUMMARY,
+      concerns: [notAConversation === "voicemail" ? VOICEMAIL_CONCERN : SYSTEM_FAULT_CONCERN],
       // Every one of these is an inference from a conversation that did not take place:
       //   keywordMatches — scanned over Rosie's apology and the person reacting to being cut
       //     off. "pain" matched there would arrive as "Also heard on the call: pain",
@@ -95,7 +111,7 @@ export function reportableFacts({ extracted, keywordMatches, noResponse, aborted
   }
 
   return {
-    aborted: false,
+    notAConversation: null,
     summary: extracted.summary,
     concerns: Array.from(new Set([...extracted.concerns, ...keywordMatches, ...noResponse])),
     keywordMatches,

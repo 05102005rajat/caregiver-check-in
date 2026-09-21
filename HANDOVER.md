@@ -39,7 +39,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33**, `npm run security:refusal` **10/10**,
-  `npm run security:queue` **41/41**, and **314 unit tests**.
+  `npm run security:queue` **41/41**, and **323 unit tests**.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
   **true** on both, `endCallPhrases` **empty** on both. The system prompt in
@@ -528,7 +528,7 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 314 unit tests
+npm test                  # 323 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family

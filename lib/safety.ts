@@ -118,3 +118,27 @@ export function rosieAbortedForMissingDetails(transcript: string): boolean {
     .filter((line) => /^\s*(?:ai|assistant|bot|rosie)\s*:/i.test(line))
     .some((line) => ROSIE_ABORT.test(line));
 }
+
+/**
+ * An answering machine picked up, and Vapi did not notice.
+ *
+ * `NO_ANSWER_REASONS` in the webhook catches the ones Vapi labels `voicemail`, but it labels
+ * by call outcome and misses machines whose greeting it transcribes as the person speaking.
+ * Observed in production: the "User" turn was "Please record your message. When you have
+ * finished recording, you may hang up." The call was recorded as completed, both medications
+ * were reported as not taken, and the family was texted "Not taken: Lisinopril, Metformin"
+ * about a question nobody had been asked.
+ *
+ * Matched only in the OTHER side's turns, and only on phrases a machine says and a person
+ * does not. "Leave a message" alone is deliberately excluded: a person can say that about
+ * their daughter. Each of these is a recorded greeting or nothing.
+ */
+const VOICEMAIL_GREETING =
+  /\b(?:please\s+record\s+your\s+message|after\s+the\s+(?:beep|tone)|at\s+the\s+tone|you\s+have\s+reached\s+the\s+voicemail|is\s+not\s+available\s+right\s+now|leave\s+your\s+message\s+after)\b/i;
+
+export function reachedVoicemail(transcript: string): boolean {
+  return transcript
+    .split("\n")
+    .filter((line) => !/^\s*(?:ai|assistant|bot|rosie)\s*:/i.test(line))
+    .some((line) => VOICEMAIL_GREETING.test(line));
+}

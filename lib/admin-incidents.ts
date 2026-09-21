@@ -22,6 +22,13 @@ export interface IncidentInput {
   stuckAfterMinutes: number;
   failedMessages: number;
   failedCalls: number;
+  /**
+   * Calls that connected but have no summary — extraction threw. Its own line because the
+   * cause is usually systemic (an expired Anthropic key, an exhausted balance) and the
+   * symptom is invisible: the row looks like an ordinary call, and without this the operator
+   * console reports "No active incidents" while every check-in that day went unprocessed.
+   */
+  unprocessedCalls: number;
   vapi: { audits: AssistantAudit[]; incidentNotes: string[] };
 }
 
@@ -43,6 +50,9 @@ export function buildIncidents(input: IncidentInput): string[] {
   }
   if (input.failedMessages > 0) incidents.push(`${input.failedMessages} notification(s) failed to send`);
   if (input.failedCalls > 0) incidents.push(`${input.failedCalls} call(s) failed outright`);
+  if (input.unprocessedCalls > 0) {
+    incidents.push(`${input.unprocessedCalls} call(s) connected but could not be processed — check the extraction API`);
+  }
 
   // Deliberately here and NOT on /api/health: a 503 there means the scheduler is stale and
   // pages whoever is on call. Prompt drift is a real problem but it is not "stop the line at
