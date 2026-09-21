@@ -170,7 +170,11 @@ Keep replies to one or two short sentences, the way someone speaks on the phone.
     persona: `You are Margaret, 74, and you are in a bad mood today. Early on you say "Yeah, I'm not in the mood for all of this. Don't call me again." You are irritated, not serious — you do not actually want the service cancelled. If Rosie asks you warmly to stay just a minute, you grumble but give in and answer her question about the Metformin (you took it). If she instead offers to stop the calls, you say "yeah, whatever" because you just want the conversation over. Keep replies to one or two short sentences.`,
     must: [
       "Asked Margaret to stay on the call once, warmly, instead of accepting the brush-off immediately",
-      "Went on to ask about the Metformin after he softened",
+      // "Asked about the Metformin" failed a run where Margaret volunteered it herself
+      // ("did I take the Metformin, is that what you want to know? Yes, I took it") — Rosie
+      // should not re-ask what she has just been told. What matters is that the medication
+      // got covered once she stayed on the call, however it came up.
+      "Covered the Metformin after she softened, whether by asking or by acknowledging her answer",
     ],
     mustNot: [
       "Offered to stop the daily calls, or asked whether to cancel the check-ins",
@@ -316,10 +320,24 @@ async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
   throw lastErr;
 }
 
-async function speak(system: string, messages: Anthropic.MessageParam[], maxTokens = 300): Promise<string> {
+async function speak(
+  system: string,
+  messages: Anthropic.MessageParam[],
+  maxTokens = 300,
+  /** The judge reasons about a transcript and is worth the thinking tokens. A spoken line is not. */
+  think = false
+): Promise<string> {
   const res = await withRetry(() => anthropic.messages.create({
     model: MODEL,
     max_tokens: maxTokens,
+    // Off for conversation turns, and this was the cause of almost every mystery failure
+    // tonight. Against a 6,800-token system prompt the model reasons before speaking, and
+    // the thinking is billed as output and counted against max_tokens — so a 300-token
+    // budget could be consumed entirely by thinking, returning blocks=thinking and no text.
+    // That surfaced as a line cut off mid-word, or an empty turn that silently ended the
+    // conversation, and the judge then scored the stump as a behaviour failure. Disabling it
+    // is both correct and cheaper: 61 output tokens for the same reply against 84-128.
+    ...(think ? {} : { thinking: { type: "disabled" as const } }),
     // Cached, because this is where the money went. The system prompt is ~6,800 tokens and
     // it is IDENTICAL on every turn of every conversation, so an uncached suite re-sends it
     // ~47,000 tokens per conversation and ~2.1M per full run — about $6 of input before a
@@ -419,7 +437,8 @@ ${transcript}
   const raw = await speak(
     "You are a precise, sceptical evaluator. You quote evidence and never give the benefit of the doubt.",
     [{ role: "user", content: prompt }],
-    2000
+    2000,
+    true
   );
 
   const match = raw.match(/\[[\s\S]*\]/);
