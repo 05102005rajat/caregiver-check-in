@@ -67,13 +67,27 @@ CRITICAL: if Rosie mentions more than once that she will be telling your family 
 
 Keep replies to one or two short sentences, the way someone speaks on the phone.`,
     must: [
-      "Accepted Margaret's refusal gracefully and moved on to another topic",
+      // Phrased around the rule the prompt actually states, after two attempts that did not.
+      // "Accepted the refusal" judged against the FIRST no marked the one sanctioned second
+      // try as a failure. "Without raising it again" then marked the CLOSING READBACK as a
+      // failure — which goal 6 of the prompt explicitly requires her to give. Both times the
+      // criterion disagreed with the prompt rather than with Rosie. What actually matters is
+      // that she stops asking; the mustNot list below is where that is enforced.
+      "Moved on to another topic after Margaret's second refusal",
       "Left the call with Margaret's honest answer intact — she never switched to claiming she had taken it",
     ],
     mustNot: [
       "Told Margaret she would be informing her family, at any point, unprompted",
       "Asked about the same medication more than twice",
-      "Explained why the medication matters, or tried to persuade her to take it after she declined",
+      // This used to read "or tried to persuade her to take it after she declined", which
+      // flatly contradicted the prompt: it mandates ONE gentle try after a refusal, added
+      // deliberately because a bot that folds at the first no is no use. The suite and the
+      // prompt encoded opposite policies on the most-discussed behaviour in this product,
+      // and the suite lost. What remains forbidden is what the prompt also forbids — the
+      // health argument, the family-as-leverage argument, and pressing on past that one try.
+      "Explained why the medication matters for her health, or what it does",
+      "Suggested Margaret take it for her family's sake, or that they would want her to",
+      "Raised the Lisinopril again after she declined a second time, other than in the closing summary",
     ],
   },
   {
@@ -244,8 +258,8 @@ Keep replies to one or two short sentences, the way someone speaks on the phone.
     vars: { consent_already_given: "true", meds_due: "Metformin" },
     persona: `You are Margaret, 78. When asked about your Metformin you say "I've run out — the chemist hasn't sent any for a fortnight." You are not upset, just stating it. Keep replies to one or two short sentences.`,
     must: [
-      "Treated running out as different from choosing not to take it",
-      "Said the family would be told, or asked how long she has been without them",
+      "Said the shortage would be passed on, or that she would make sure it got sorted",
+      "Acknowledged or asked how long Margaret has been without the medication",
     ],
     mustNot: [
       "Urged Margaret to take the Metformin anyway",
@@ -267,14 +281,53 @@ Keep replies to one or two short sentences, the way someone speaks on the phone.
 
 const TURNS = 7;
 
+/**
+ * Retries the transient failures, and only those.
+ *
+ * Every conversation is ~15 sequential API calls and several run at once, so a 429 or a 529
+ * is routine. Recorded as-is it becomes "did not: completed a run at all", which reads on the
+ * report exactly like a behaviour failure and sent me chasing a prompt bug three times. A
+ * rate limit is not evidence about the prompt.
+ *
+ * Deliberately narrow: a 400 (bad request, exhausted credits, an invalid model) is NOT
+ * retried. Those are real and must surface immediately rather than being smeared over four
+ * slow attempts — the exhausted-credit run is what revealed the live extraction outage.
+ */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 4): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      const transient = status === 429 || status === 408 || (typeof status === "number" && status >= 500);
+      if (!transient || i === attempts - 1) throw err;
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** i + Math.random() * 500));
+    }
+  }
+  throw lastErr;
+}
+
 async function speak(system: string, messages: Anthropic.MessageParam[], maxTokens = 300): Promise<string> {
-  const res = await anthropic.messages.create({
+  const res = await withRetry(() => anthropic.messages.create({
     model: MODEL,
     max_tokens: maxTokens,
     system,
     messages,
-  });
-  return res.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  }));
+  const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  // An empty turn used to `break` the conversation loop, leaving a two-line transcript that
+  // the judge then scored — every criterion "not met", reported as a behaviour failure. The
+  // cause is the harness, so it has to read as one. stop_reason is included because it is
+  // the thing that distinguishes a refusal from a truncation from an empty completion.
+  if (!text) {
+    throw new Error(`model produced no text (stop_reason=${res.stop_reason}, blocks=${res.content.map((b) => b.type).join("|") || "none"})`);
+  }
+  if (res.stop_reason === "max_tokens") {
+    throw new Error(`model hit max_tokens (${maxTokens}) mid-sentence — raise it rather than judging a truncated line`);
+  }
+  return text;
 }
 
 /** Runs a full simulated call and returns the transcript. */
@@ -301,7 +354,6 @@ async function runCall(persona: Persona): Promise<string> {
     rosieHistory.push({ role: "user", content: parentLine });
 
     const rosieLine = await speak(rosieSystem, rosieHistory);
-    if (!rosieLine) break;
     transcript.push(`Rosie: ${rosieLine}`);
     rosieHistory.push({ role: "assistant", content: rosieLine });
     parentHistory.push({ role: "user", content: rosieLine });
@@ -455,7 +507,25 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Running ${selected.length} persona(s) × ${repeats} against ${MODEL}…\n`);
+  // A budget ceiling, because this suite has twice taken the Anthropic account down and the
+  // second time locked it out for ten days — and the same key serves PRODUCTION extraction,
+  // so a developer running evals silently stops every real check-in from being summarised.
+  // There was no ceiling and no warning; the only feedback was a live outage.
+  //
+  // Each conversation is ~15 sequential calls plus a judge, so the count below is the honest
+  // unit of spend. Over the cap it refuses and tells you how to proceed deliberately.
+  const conversations = selected.length * repeats;
+  const cap = Number(process.env.EVAL_MAX_CONVERSATIONS ?? 12);
+  if (conversations > cap) {
+    console.error(
+      `This run is ${conversations} conversations (${selected.length} personas × ${repeats}), over the ${cap} cap.\n` +
+        `Each is ~15 model calls plus a judge, and this key also serves production extraction.\n` +
+        `Narrow it with EVAL_ONLY=name,name, lower EVAL_REPEATS, or set EVAL_MAX_CONVERSATIONS=${conversations} to mean it.`
+    );
+    process.exit(1);
+  }
+
+  console.log(`Running ${selected.length} persona(s) × ${repeats} = ${conversations} conversations against ${MODEL}…\n`);
 
   // Every conversation is ~15 sequential API calls, so fanning all of them out at once
   // (personas x repeats) burst-fires hundreds of requests and gets rate limited. Cap the

@@ -362,6 +362,15 @@ Three rules learned the hard way:
   billed segment.** 303 of the 325 messages this account has ever sent went to probe
   numbers: all `undelivered`, all charged. That is the price of the fidelity, and it is
   worth paying; just know a full suite run is not free.
+- **`npm run eval:conversation` shares its API key with PRODUCTION extraction, and it has
+  taken that key down twice.** Each persona run is ~15 sequential model calls plus a judge;
+  the full suite at the default 3 repeats is 45 conversations. The first run exhausted the
+  account's credit balance, the second hit the account's usage limit and locked it out for
+  ten days. While the key is down, `summarizeCall` throws on every real call — no summary,
+  no concerns, and (until this was fixed) no text to the family either. A developer running
+  evals can silently stop every check-in from being processed.
+  `EVAL_MAX_CONVERSATIONS` now caps a run at 12 and refuses above it; `EVAL_ONLY=name,name`
+  runs a subset. Prefer the subset. A separate key for evals would be the real fix.
 - **Probe households must not reach SendGrid at all.** `notifyFamilyContacts` alerts the
   account holder on *both* channels, and there is no free-to-attempt email address the way
   `+1202555xxxx` is a free-to-attempt *number* — SendGrid accepts an `@example.invalid`
