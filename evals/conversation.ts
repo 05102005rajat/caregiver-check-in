@@ -282,6 +282,13 @@ Keep replies to one or two short sentences, the way someone speaks on the phone.
 const TURNS = 7;
 
 /**
+ * Token totals for the run, printed at the end. This suite spent $20 of a shared key with no
+ * one able to see it happening — including, for two runs, me. A number on the screen is the
+ * cheapest possible guard against the third time.
+ */
+const spend = { uncached: 0, written: 0, read: 0, output: 0 };
+
+/**
  * Retries the transient failures, and only those.
  *
  * Every conversation is ~15 sequential API calls and several run at once, so a 429 or a 529
@@ -313,9 +320,22 @@ async function speak(system: string, messages: Anthropic.MessageParam[], maxToke
   const res = await withRetry(() => anthropic.messages.create({
     model: MODEL,
     max_tokens: maxTokens,
-    system,
+    // Cached, because this is where the money went. The system prompt is ~6,800 tokens and
+    // it is IDENTICAL on every turn of every conversation, so an uncached suite re-sends it
+    // ~47,000 tokens per conversation and ~2.1M per full run — about $6 of input before a
+    // single reply or judgement is paid for. Two full runs took the account down.
+    //
+    // A cache write costs 1.25x and a read 0.1x, so turn one pays a little more and the
+    // other six pay a tenth. The entry lives five minutes, which spans a whole conversation
+    // and usually the next few, so later runs mostly read too.
+    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
     messages,
   }));
+  const u = res.usage as { cache_creation_input_tokens?: number; cache_read_input_tokens?: number; input_tokens: number };
+  spend.uncached += u.input_tokens ?? 0;
+  spend.written += u.cache_creation_input_tokens ?? 0;
+  spend.read += u.cache_read_input_tokens ?? 0;
+  spend.output += res.usage.output_tokens ?? 0;
   const text = res.content.filter((b) => b.type === "text").map((b) => b.text).join("").trim();
   // An empty turn used to `break` the conversation loop, leaving a two-line transcript that
   // the judge then scored — every criterion "not met", reported as a behaviour failure. The
@@ -515,7 +535,7 @@ async function main() {
   // Each conversation is ~15 sequential calls plus a judge, so the count below is the honest
   // unit of spend. Over the cap it refuses and tells you how to proceed deliberately.
   const conversations = selected.length * repeats;
-  const cap = Number(process.env.EVAL_MAX_CONVERSATIONS ?? 12);
+  const cap = Number(process.env.EVAL_MAX_CONVERSATIONS ?? 6);
   if (conversations > cap) {
     console.error(
       `This run is ${conversations} conversations (${selected.length} personas × ${repeats}), over the ${cap} cap.\n` +
@@ -567,6 +587,14 @@ async function main() {
   }
 
   console.log("\n─────────────────────────────────────────");
+  // Sonnet list pricing, good enough to see an order of magnitude. Printed every run so the
+  // cost of this suite is never again something you discover from a lockout email.
+  const usd = (spend.uncached * 3 + spend.written * 3.75 + spend.read * 0.3 + spend.output * 15) / 1e6;
+  const saved = ((spend.read * 3 - spend.read * 0.3) / 1e6).toFixed(2);
+  console.log(
+    `tokens: ${spend.uncached.toLocaleString()} in, ${spend.read.toLocaleString()} cached-read, ` +
+      `${spend.written.toLocaleString()} cache-write, ${spend.output.toLocaleString()} out — ~$${usd.toFixed(2)} (caching saved ~$${saved})`
+  );
   if (broken === 0 && shaky === 0) {
     console.log(`All ${PERSONAS.length} personas passed ${repeats}/${repeats}.`);
   } else {

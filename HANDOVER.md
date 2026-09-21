@@ -369,8 +369,14 @@ Three rules learned the hard way:
   ten days. While the key is down, `summarizeCall` throws on every real call — no summary,
   no concerns, and (until this was fixed) no text to the family either. A developer running
   evals can silently stop every check-in from being processed.
-  `EVAL_MAX_CONVERSATIONS` now caps a run at 12 and refuses above it; `EVAL_ONLY=name,name`
-  runs a subset. Prefer the subset. A separate key for evals would be the real fix.
+  Where the money went: the ~6,800-token system prompt was re-sent on every turn — ~47,000
+  input tokens per conversation, ~2.1M per full run, about $6 of input before a single reply
+  or judgement. It is now cached (`cache_control: ephemeral`), which roughly halves a run,
+  and every run prints its own token count and dollar estimate so the cost is visible while
+  it happens rather than in a lockout email. `EVAL_MAX_CONVERSATIONS` caps a run at 6 and
+  refuses above it; `EVAL_ONLY=name,name` runs a subset. Prefer the subset. A separate key
+  for evals is still the real fix — production extraction should not share a budget with a
+  test suite.
 - **Probe households must not reach SendGrid at all.** `notifyFamilyContacts` alerts the
   account holder on *both* channels, and there is no free-to-attempt email address the way
   `+1202555xxxx` is a free-to-attempt *number* — SendGrid accepts an `@example.invalid`
