@@ -76,7 +76,7 @@ describe("rosieAbortedForMissingDetails", () => {
   // line even though parent_name was sent correctly, and the family was then texted that
   // their mother "seemed confused or disconnected".
   const REAL = [
-    "AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?",
+    "AI: Hi Nora, it's Rosie calling for your check-in. How are you feeling today?",
     "User: Sure.",
     "AI: I'm sorry. Something has gone wrong on my end, and I don't have your details. I won't keep you. Goodbye.",
     "User: I mean, the.",
@@ -123,7 +123,7 @@ describe("reachedVoicemail", () => {
   it("detects the real production greeting Vapi did not flag", () => {
     // This one reached the family as "Not taken: Lisinopril, Metformin".
     const real = [
-      "AI: Hi Manju, it's Rosie calling for your check-in. How are you feeling today?",
+      "AI: Hi Nora, it's Rosie calling for your check-in. How are you feeling today?",
       "User: Please record your message. When you have finished recording, you may hang up.",
       "AI: Goodby",
     ].join("\n");

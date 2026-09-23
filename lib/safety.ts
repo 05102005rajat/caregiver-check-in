@@ -98,7 +98,7 @@ export function hasParentResponse(transcript: string): boolean {
  *
  * When she says this, the call never became a check-in. Everything after it is Rosie
  * apologising and the person reacting to being hung up on, and reading that as evidence
- * about the parent is how a household got texted "Manju's responses seemed confused or
+ * about the parent is how a household got texted "<name>'s responses seemed confused or
  * disconnected" about a call our own bug had ended. A fabricated observation about an
  * elderly person's mental state, sent to their family, is the worst output this system can
  * produce — worse than saying nothing, because the family acts on it.
