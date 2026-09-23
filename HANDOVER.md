@@ -195,8 +195,13 @@ dashboard:
   enable. Rosie's message is now empty — the transcripts show she closes naturally on her
   own — the pattern is "Take care, <name>. Goodbye for now." — and an End Call Message is
   spoken on top of that, so anything in the field is a second farewell. (Names and numbers
-  from real transcripts do not belong in this file; the repo is public, and `0367473` had to
-  strip one once already.)
+  from real transcripts do not belong in ANY file here; the repo is public, `0367473` had to
+  strip one once already, and it came back the moment someone — me — pasted a "verbatim
+  production transcript" into `lib/safety.test.ts` as a fixture. Verbatim is the trap: the
+  realism worth having is the shape of the exchange, never the name. Use `Nora`. And check
+  `git log` as well as `git grep` before making the repo public — commit messages are
+  published too, several already quote alert bodies containing the name, and those cannot be
+  scrubbed without rewriting history.)
 - **No End Call tool existed and `endCallFunctionEnabled` was unset on every assistant.**
   The only tool on Rosie is `record_consent`. Evidence rather than inference: every real
   call ended `customer-ended-call` — the person hung up, every time. Rosie had never ended
