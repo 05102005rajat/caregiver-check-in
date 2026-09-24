@@ -138,6 +138,9 @@ async function sendAlert(
     log.info("notify.suppressed_opt_out", { parent_id: parentId, call_id: callId, recipient: phone });
   }
 
+  // Whether the text actually went. Email is a FALLBACK, not a second copy — see below.
+  let smsDelivered = false;
+
   const common = { parent_id: parentId, call_id: callId, contact_id: contactId, fingerprint, body };
   // `recipient` is denormalized on purpose: contact_id goes null if that contact is
   // later removed from the setup form (ON DELETE SET NULL), and "who did we actually
@@ -194,6 +197,7 @@ async function sendAlert(
   } else {
     try {
       const sid = await sendSms(phone, body);
+      smsDelivered = true;
       await recordMessage({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" }, "sms");
       log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
     } catch (err) {
@@ -214,6 +218,23 @@ async function sendAlert(
         error: err instanceof Error ? err.message : String(err),
       }, "sms");
     }
+  }
+
+  // Email only when the text did NOT go out.
+  //
+  // Both channels used to fire for every alert, so one check-in arrived twice — a text and
+  // an identical email — which is noise on a product whose entire premise is that a
+  // notification means something. Email existed because SMS was blocked pending Twilio
+  // toll-free verification; that came through, so the duplicate is now just the scaffolding
+  // left standing.
+  //
+  // It stays as a fallback, because the cases where the text does not arrive are exactly
+  // the cases that matter: a Twilio failure, or a recipient who opted out of texts.
+  // Opting out of SMS is not opting out of being told their parent fell — the opt-out
+  // branch above deliberately records and continues for that reason.
+  if (smsDelivered) {
+    log.info("notify.email_skipped_sms_sent", { parent_id: parentId, call_id: callId, recipient: phone });
+    return reached;
   }
 
   if (!email) return reached;
