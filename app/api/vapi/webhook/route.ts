@@ -6,7 +6,7 @@ import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { SYSTEM_FAULT_CONCERN, VOICEMAIL_CONCERN, reportableFacts } from "@/lib/reportable";
-import { allClearMessage } from "@/lib/allclear";
+import { allClearMessage, unaccountedMedications } from "@/lib/allclear";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
@@ -493,8 +493,7 @@ export async function POST(request: Request) {
   // a dose carried forward from an earlier call, raised on this one. If the answer to that
   // is mangled past isKnownMed it lands in neither list and is not in scheduled_meds, so
   // scoping to the snapshot alone left the gap open in the case the guard was written for.
-  const accountedFor = [...report.medsConfirmed, ...report.medsMissed];
-  const unaccountedMeds = knownMedNames.filter((known) => !accountedFor.some((got) => fuzzyIncludes([known], got)));
+  const unaccountedMeds = unaccountedMedications(knownMedNames, [...report.medsConfirmed, ...report.medsMissed]);
   if (unaccountedMeds.length > 0) {
     log.warn("webhook.meds_unaccounted", { call_id: call.id, parent_id: call.parent_id, meds: unaccountedMeds });
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allClearMessage } from "./allclear";
+import { allClearMessage, unaccountedMedications } from "./allclear";
 
 const at = new Date("2026-09-24T15:10:00Z"); // 08:10 in Los Angeles
 const base = { parentName: "Nora", at, timezone: "America/Los_Angeles" };
@@ -49,5 +49,42 @@ describe("allClearMessage", () => {
     for (const overclaim of ["everything is fine", "nothing is wrong", "healthy", "well"]) {
       expect(msg.toLowerCase()).not.toContain(overclaim);
     }
+  });
+});
+
+describe("unaccountedMedications", () => {
+  it("accounts for a dose the model spelled differently", () => {
+    // The reason exact equality was wrong: medsConfirmed holds the model's string.
+    expect(unaccountedMedications(["Metformin"], ["metformin 500mg"])).toEqual([]);
+  });
+
+  it("does not let one confirmed dose account for a second, similarly named one", () => {
+    // The reason fuzzy-many-to-many was worse. Only the D3 was confirmed; the plain
+    // Vitamin D was never mentioned and must not be rounded up into "All good".
+    expect(unaccountedMedications(["Vitamin D", "Vitamin D3"], ["vitamin d3"])).toEqual(["vitamin d"]);
+    expect(unaccountedMedications(["Metformin", "Metformin ER"], ["metformin er"])).toEqual(["metformin"]);
+  });
+
+  it("is satisfied when both are actually confirmed", () => {
+    expect(unaccountedMedications(["Vitamin D", "Vitamin D3"], ["vitamin d", "vitamin d3"])).toEqual([]);
+  });
+
+  it("reports a dose nobody mentioned at all", () => {
+    expect(unaccountedMedications(["Aspirin"], [])).toEqual(["aspirin"]);
+  });
+
+  it("counts a dose that was missed as accounted for — we know the answer", () => {
+    // The caller passes confirmed AND missed. "Not taken" is an answer; it routes to the
+    // concern path, not to silence.
+    expect(unaccountedMedications(["Aspirin"], ["Aspirin"])).toEqual([]);
+  });
+
+  it("says nothing is outstanding when no dose was due", () => {
+    expect(unaccountedMedications([], ["something the model invented"])).toEqual([]);
+  });
+
+  it("does not match on a fragment shorter than the threshold", () => {
+    // A three-letter name must not match everything, the same guard isKnownMed carries.
+    expect(unaccountedMedications(["Zinc"], ["zin"])).toEqual(["zinc"]);
   });
 });
