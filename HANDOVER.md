@@ -357,6 +357,17 @@ npx next dev -p 3111                      # real .env.local: real Supabase, Vapi
 
 Three rules learned the hard way:
 
+- **Verify with a synthetic transcript, not a real call.** POST an `end-of-call-report` to
+  `/api/vapi/webhook` with the `x-webhook-secret` header and a hand-written transcript. That
+  drives extraction, the alert rules, dedupe, the all-clear and the voicemail/abort paths for
+  **$0**. A real dial costs ~$0.30 of Vapi credit, rings an elderly person, and tests the one
+  part of the stack we do not own. Reach for it only when the thing under test IS the dial.
+- **Never delete `calls` rows for a household with a live slot.** A slot sits `dispatched`
+  pointing at its call; delete the call and the stranded-slot reaper correctly concludes a
+  check-in vanished and RE-DIALS. That happened: a cleanup with a blunt
+  `delete ... where parent_id = X` filter produced two unwanted real calls to the maintainer's
+  own parent and $0.65 of credit. Scope test cleanup to the rows you created
+  (`vapi_call_id like 'test-%'`), and pause the household first if you must touch more.
 - **Never probe production records.** Earlier an exploit run against the real parent row
   wiped its medications and contacts. Create a throwaway household via `save_parent_setup`,
   drive it, delete it in a `finally`. `security/isolation.ts` is the pattern.

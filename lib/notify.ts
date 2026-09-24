@@ -138,8 +138,9 @@ async function sendAlert(
     log.info("notify.suppressed_opt_out", { parent_id: parentId, call_id: callId, recipient: phone });
   }
 
-  // Whether the text actually went. Email is a FALLBACK, not a second copy — see below.
-  let smsDelivered = false;
+  // Whether the SMS channel is DONE with this recipient — either a text just went, or one
+  // for this same alert went earlier. Email is a fallback for neither case; see below.
+  let smsSettled = false;
 
   const common = { parent_id: parentId, call_id: callId, contact_id: contactId, fingerprint, body };
   // `recipient` is denormalized on purpose: contact_id goes null if that contact is
@@ -181,6 +182,12 @@ async function sendAlert(
     // Deliberately records nothing: a duplicate is the absence of a new message, not a new
     // event, and inserting a row for it would be a second `sent`-shaped fact about a text
     // that was never sent.
+    // They were ALREADY TOLD, by text, about this exact alert. Not emailing them is the
+    // entire point of the dedupe, and leaving this false was a real regression: the email
+    // fallback below would then fire, because no email row exists for the first alert to
+    // dedupe against. A suppressed text would have arrived as an email saying the same
+    // thing — the duplicate this file was just changed to remove, on the other channel.
+    smsSettled = true;
     log.info("notify.suppressed_duplicate", { parent_id: parentId, call_id: callId, fingerprint, recipient: phone });
   } else if (suppressed) {
     // Recorded rather than silently skipped, so the caregiver can see this person wasn't
@@ -197,7 +204,7 @@ async function sendAlert(
   } else {
     try {
       const sid = await sendSms(phone, body);
-      smsDelivered = true;
+      smsSettled = true;
       await recordMessage({ ...common, recipient: phone, twilio_sid: sid, status: "sent", channel: "sms" }, "sms");
       log.info("notify.sent", { parent_id: parentId, call_id: callId, channel: "sms", recipient: phone, twilio_sid: sid });
     } catch (err) {
@@ -228,11 +235,16 @@ async function sendAlert(
   // toll-free verification; that came through, so the duplicate is now just the scaffolding
   // left standing.
   //
-  // It stays as a fallback, because the cases where the text does not arrive are exactly
-  // the cases that matter: a Twilio failure, or a recipient who opted out of texts.
-  // Opting out of SMS is not opting out of being told their parent fell — the opt-out
-  // branch above deliberately records and continues for that reason.
-  if (smsDelivered) {
+  // It stays as a fallback for the cases where the text never went: a Twilio failure, or a
+  // recipient who opted out of texts. Opting out of SMS is not opting out of being told
+  // their parent fell — the opt-out branch above deliberately records and continues.
+  //
+  // Stated precisely, because the comment used to claim more: `smsSettled` means Twilio
+  // ACCEPTED the request, not that the carrier delivered it. A disconnected number or a
+  // landline returns a SID and an `undelivered` callback minutes later, and nothing
+  // re-enters this function when that lands — so that case gets no email. Covering it means
+  // reacting to the delivery callback, which this does not do.
+  if (smsSettled) {
     log.info("notify.email_skipped_sms_sent", { parent_id: parentId, call_id: callId, recipient: phone });
     return reached;
   }
@@ -284,7 +296,20 @@ export async function notifyFamilyContacts(
   flag: NotifyFlag,
   callId: string,
   body: string,
-  options: { fingerprint?: string; dedupeWindowHours?: number; severity?: AlertSeverity } = {}
+  options: {
+    fingerprint?: string;
+    dedupeWindowHours?: number;
+    severity?: AlertSeverity;
+    /**
+     * Skip the family contacts and tell only the account holder.
+     *
+     * For the daily all-clear. A sibling who ticked "tell me about concerns" asked to hear
+     * when something is wrong; a cheerful ping every morning is not that, and the surest way
+     * to make a family mute this number is to send them something they did not ask for, 365
+     * times a year. The person who set the service up is the one who wants to know it ran.
+     */
+    caregiverOnly?: boolean;
+  } = {}
 ): Promise<boolean> {
   // Don't tell the same family the same thing twice in a day. A retried call, two
   // medication slots close together, or a concern resurfacing on a later call all
@@ -292,7 +317,7 @@ export async function notifyFamilyContacts(
   // one that actually matters gets ignored too. Fingerprint is built from the
   // structured facts by the caller, not the prose, so a reworded Claude summary of the
   // same underlying situation still counts as a duplicate.
-  const { fingerprint, severity = "routine" } = options;
+  const { fingerprint, severity = "routine", caregiverOnly = false } = options;
   const dedupeWindowHours = options.dedupeWindowHours ?? DEDUPE_WINDOW_HOURS[severity];
   // Evaluated per recipient, down in sendAlert, rather than once for the whole household
   // here — see alreadyNotified for why suppressing everyone on one recipient's success is
@@ -308,9 +333,11 @@ export async function notifyFamilyContacts(
   // evaporates with nothing logged — the shape the rest of this file was just audited for.
   if (contactsError) log.error("notify.contacts_lookup_failed", { parent_id: parentId, call_id: callId, err: contactsError });
   if (parentError) log.error("notify.parent_lookup_failed", { parent_id: parentId, call_id: callId, err: parentError });
-  let reachedEveryone = !contactsError && !parentError;
+  // With caregiverOnly the contacts list is deliberately unused, so a failed read of it says
+  // nothing about whether this alert reached everyone it was meant to.
+  let reachedEveryone = (caregiverOnly || !contactsError) && !parentError;
 
-  for (const contact of (contacts ?? []) as FamilyContact[]) {
+  for (const contact of caregiverOnly ? [] : ((contacts ?? []) as FamilyContact[])) {
     if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since))) {
       reachedEveryone = false;
     }

@@ -6,6 +6,7 @@ import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { SYSTEM_FAULT_CONCERN, VOICEMAIL_CONCERN, reportableFacts } from "@/lib/reportable";
+import { allClearMessage } from "@/lib/allclear";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
@@ -478,6 +479,14 @@ export async function POST(request: Request) {
   // metformin. Model flag OR the narrow keyword subset, so a model that misses a fall is
   // not the only thing between that fall and the family.
 
+  // What this call was for, minus everything it accounted for either way. Anything left is a
+  // dose nobody can say yes or no about, and it must not be rounded up to "all good".
+  const accountedFor = new Set([...report.medsConfirmed, ...report.medsMissed].map((m) => m.toLowerCase()));
+  const unaccountedMeds = (call.scheduled_meds ?? []).filter((m: string) => !accountedFor.has(m.toLowerCase()));
+  if (unaccountedMeds.length > 0) {
+    log.warn("webhook.meds_unaccounted", { call_id: call.id, parent_id: call.parent_id, meds: unaccountedMeds });
+  }
+
   const hasConcern =
     report.notAConversation !== null || warrantsAttention({ concerns, medsMissed: report.medsMissed, mood: report.mood, urgent: isUrgent });
 
@@ -586,6 +595,43 @@ export async function POST(request: Request) {
       fingerprint: alertFingerprint("request", report.requests),
       severity: "routine" as const,
     });
+  } else if (report.notAConversation === null && unaccountedMeds.length === 0) {
+    // Nothing wrong and nothing asked for — the daily all-clear. See lib/allclear.ts for why
+    // this exists at all, given the product started from "a clean check-in sends nothing".
+    //
+    // Guarded on `notAConversation === null`, and that guard is the whole safety of this
+    // branch: an aborted call or an answering machine must NEVER produce "all good", because
+    // the one thing worse than a family not knowing is a family being told everything is fine
+    // by a system that never spoke to anyone. Those cases are handled above and say so.
+    //
+    // Caregiver only. A sibling who ticked "tell me about concerns" did not ask for a daily
+    // ping, and sending one is how a family mutes the number the emergency will come from.
+    //
+    // `unaccountedMeds` is the other half of the guard, and it is not hypothetical. A
+    // medication name the model mangles badly enough to fail isKnownMed is dropped from
+    // BOTH confirmed and missed — the code already logs that it does this. With nothing in
+    // medsMissed, warrantsAttention is false, and without this check a genuinely skipped
+    // dose would arrive as "All good.": the exact inversion lib/allclear.ts says it must
+    // never produce. Silence is the lesser failure, so it stays silent and logs loudly.
+    await notifyFamilyContacts(
+      db,
+      call.parent_id,
+      "notify_on_concern",
+      call.id,
+      allClearMessage({
+        parentName,
+        at: call.called_at ? new Date(call.called_at) : new Date(call.scheduled_for),
+        timezone: parent.timezone,
+        medsConfirmed: report.medsConfirmed,
+      }),
+      {
+        // Per call, not per content: two clean check-ins in one day are two facts worth
+        // having, and fingerprinting on the text would collapse them into one.
+        fingerprint: alertFingerprint("all-clear", [call.id]),
+        severity: "routine" as const,
+        caregiverOnly: true,
+      }
+    );
   }
   // Healthy call, nothing asked for: log silently, no text. No news is good news.
 

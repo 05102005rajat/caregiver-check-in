@@ -238,7 +238,7 @@ async function main() {
     );
 
     // ---- expiring twice must not text twice ----
-    const before = msgs.length;
+    const before = missRecipients.size;
     // The slot has to be put BACK to pending first, and this is the whole test.
     //
     // expireLapsedSlots selects `.eq("state", "pending")`, and the first pass claimed this
@@ -257,13 +257,29 @@ async function main() {
     // what a +1202555 probe number produces once Twilio's status callback lands. The test
     // was therefore asserting the opposite of the product's intent and passing only when
     // that callback happened to be slow. Establish the precondition instead of racing it.
-    const { error: deliveredError } = await admin
-      .from("messages")
-      .update({ delivery_status: "delivered" })
-      .eq("parent_id", pid)
-      .eq("fingerprint", fp)
-      .eq("channel", "sms");
-    if (deliveredError) throw new Error(`dedupe fixture failed: ${deliveredError.message}`);
+    // The "already told" rows are SEEDED, not inherited from pass 1, and that is what makes
+    // this deterministic. alreadyNotified ignores a text whose delivery_status is
+    // 'undelivered' — correctly: a text the carrier dropped is not one they received. Probe
+    // numbers are non-routable, so Twilio's async callback marks exactly that, at a moment
+    // nothing here controls. Depending on it gave a check that passed or failed on timing,
+    // and "re-run until green" is how a safety check stops meaning anything.
+    //
+    // Replacing them with rows Twilio has never heard of removes the race entirely. What is
+    // under test is the suppression, and the suppression reads these rows.
+    await admin.from("messages").delete().eq("parent_id", pid).eq("fingerprint", fp);
+    const { error: seedError } = await admin.from("messages").insert(
+      [...missRecipients].map((recipient) => ({
+        parent_id: pid,
+        call_id: expiredSlot.call_id,
+        recipient,
+        fingerprint: fp,
+        body: "seeded: already told about this slot",
+        status: "sent",
+        channel: "sms",
+        delivery_status: "delivered",
+      }))
+    );
+    if (seedError) throw new Error(`dedupe fixture failed: could not seed prior alerts (${seedError.message})`);
 
     const { data: reopened, error: reopenError } = await admin
       .from("call_slots")
@@ -303,25 +319,13 @@ async function main() {
     // after that is the product working, not failing. If the callback beat us, this fixture
     // could not establish what it needed, and saying so is the honest outcome. Reporting it
     // as a dedupe failure is how a safety check becomes something people re-run until green.
-    const { data: afterRows } = await admin
-      .from("messages")
-      .select("delivery_status")
-      .eq("parent_id", pid)
-      .eq("fingerprint", fp)
-      .eq("channel", "sms")
-      .lte("sent_at", new Date(realNow.getTime() + 60_000).toISOString());
-    const raced = (afterRows ?? []).some((r) => r.delivery_status === "undelivered" || r.delivery_status === "failed");
-    if (raced && toldTwice.length > 0) {
-      console.log("~ dedupe check skipped: Twilio marked the probe texts undelivered, so re-sending was correct");
-    } else {
-      check(
-        // `before > 0` is the anti-vacuity term: check() does not abort, so if the alert
-        // above failed this would compare 0 to 0 and tick for dedupe it never exercised.
-        "a second expiry pass does not re-alert",
-        before > 0 && toldTwice.length === 0,
-        `${before} -> ${msgsAgain.length} delivered; told twice: ${JSON.stringify(toldTwice)}`
-      );
-    }
+    check(
+      // `before > 0` is the anti-vacuity term: check() does not abort, so if the alert above
+      // failed this would compare 0 to 0 and tick for dedupe it never exercised.
+      "a second expiry pass does not re-alert",
+      before > 0 && toldTwice.length === 0,
+      `${before} seeded -> ${msgsAgain.length} delivered; told twice: ${JSON.stringify(toldTwice)}`
+    );
 
     // ---- a failed source read must never delete the day ----
     // Materialisation reconciles, so a plan built from an empty medications list deletes

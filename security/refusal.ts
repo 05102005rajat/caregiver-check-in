@@ -132,13 +132,20 @@ async function main() {
     // message they received — so it re-sends, correctly. Probe numbers are non-routable, so
     // Twilio's async callback marks exactly that, and without establishing the precondition
     // this asserts the opposite of the product's intent.
-    const { error: deliveredError } = await admin
-      .from("messages")
-      .update({ delivery_status: "delivered" })
-      .eq("parent_id", pid)
-      .eq("fingerprint", fp1)
-      .eq("channel", "sms");
-    if (deliveredError) throw new Error(`dedupe fixture failed: ${deliveredError.message}`);
+    // SEEDED, not inherited — see the identical note in security/queue.ts. alreadyNotified
+    // ignores a text marked 'undelivered', which is what Twilio's async callback does to a
+    // non-routable probe number, at a moment nothing here controls. Rows Twilio has never
+    // heard of remove the race; the suppression under test reads these rows either way.
+    const priorRecipients = [...new Set(m1.map((m) => m.recipient as string))];
+    await admin.from("messages").delete().eq("parent_id", pid).eq("fingerprint", fp1);
+    const { error: seedError } = await admin.from("messages").insert(
+      priorRecipients.map((recipient) => ({
+        parent_id: pid, call_id: c1.id, recipient, fingerprint: fp1,
+        body: "seeded: already told about this refusal",
+        status: "sent", channel: "sms", delivery_status: "delivered",
+      }))
+    );
+    if (seedError) throw new Error(`dedupe fixture failed: could not seed prior alerts (${seedError.message})`);
 
     await admin.from("calls").update({ status: "scheduled" }).eq("id", c1.id);
     const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
@@ -166,14 +173,10 @@ async function main() {
     // `before > 0` term closes in security/queue.ts, left open in its sibling.
     // If Twilio's callback beat the update, a re-send was correct and this fixture could
     // not establish what it needed. Say that, rather than reporting a dedupe failure.
-    const raced = m1b.some((m) => m.delivery_status === "undelivered" || m.delivery_status === "failed");
-    if (raced && sentTwice.length > 0) {
-      console.log("~ dedupe check skipped: Twilio marked the probe texts undelivered, so re-sending was correct");
-    } else
     check(
       "re-running the same refused slot does not tell anyone twice",
-      sent.length > 0 && !out1b.dialed && sentTwice.length === 0,
-      `${sent.length} successful sends; duplicated for: ${JSON.stringify(sentTwice)} (from ${m1.length} to ${m1b.length} rows)`
+      priorRecipients.length > 0 && !out1b.dialed && sentTwice.length === 0,
+      `${priorRecipients.length} seeded; ${sent.length} sent after; duplicated for: ${JSON.stringify(sentTwice)}`
     );
 
     // ---- CASE 2 (CONTROL): a manual test call, refused identically, must NOT alert. ----
