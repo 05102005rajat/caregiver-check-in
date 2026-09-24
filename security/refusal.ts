@@ -91,7 +91,7 @@ async function main() {
     // removed entirely. security/queue.ts had the identical defect; this is the other half
     // of that audit, which the first pass missed.
     const msgsFor = async (fp: string) => {
-      const { data } = await admin.from("messages").select("recipient,body,status,error,channel").eq("parent_id", pid).eq("fingerprint", fp);
+      const { data } = await admin.from("messages").select("recipient,body,status,error,channel,delivery_status").eq("parent_id", pid).eq("fingerprint", fp);
       return data ?? [];
     };
     const smsFor = async (fp: string) => (await msgsFor(fp)).filter((m) => m.channel === "sms");
@@ -126,6 +126,20 @@ async function main() {
     // short-circuits, not that dedupe works, which is the "nine tests that could not fail"
     // shape. Resetting it makes the second pass reach notifyFamilyContacts for real, so
     // only the fingerprint stops the duplicate.
+    // Mark the first pass's texts delivered before testing dedupe, for the same reason
+    // security/queue.ts does: alreadyNotified deliberately ignores a text whose
+    // delivery_status is 'undelivered', because a message the carrier dropped is not a
+    // message they received — so it re-sends, correctly. Probe numbers are non-routable, so
+    // Twilio's async callback marks exactly that, and without establishing the precondition
+    // this asserts the opposite of the product's intent.
+    const { error: deliveredError } = await admin
+      .from("messages")
+      .update({ delivery_status: "delivered" })
+      .eq("parent_id", pid)
+      .eq("fingerprint", fp1)
+      .eq("channel", "sms");
+    if (deliveredError) throw new Error(`dedupe fixture failed: ${deliveredError.message}`);
+
     await admin.from("calls").update({ status: "scheduled" }).eq("id", c1.id);
     const out1b = await dialAndRecord(admin as never, c1.id, parent, "Probe Caregiver", [], [], [], "scheduled");
     const m1b = await smsFor(fp1);
@@ -150,6 +164,12 @@ async function main() {
     // told twice" would be satisfied by nobody being told at all — a green tick over zero
     // successful sends, which is what this whole suite exists to rule out. Same gap the
     // `before > 0` term closes in security/queue.ts, left open in its sibling.
+    // If Twilio's callback beat the update, a re-send was correct and this fixture could
+    // not establish what it needed. Say that, rather than reporting a dedupe failure.
+    const raced = m1b.some((m) => m.delivery_status === "undelivered" || m.delivery_status === "failed");
+    if (raced && sentTwice.length > 0) {
+      console.log("~ dedupe check skipped: Twilio marked the probe texts undelivered, so re-sending was correct");
+    } else
     check(
       "re-running the same refused slot does not tell anyone twice",
       sent.length > 0 && !out1b.dialed && sentTwice.length === 0,
