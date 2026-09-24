@@ -1,15 +1,31 @@
 # Caregiver Check-In
 
-An AI assistant phones an aging parent every day, confirms their medications and
-appointments, and tells the family **only when something actually needs attention**.
-
-The product thesis is the last part. A system that reports everything is as useless to a
-caregiver as one that reports nothing — the moment alerts read as noise, people stop
-reading them, and then the one that matters gets ignored too. So a clean check-in sends
-no notification at all, and the dashboard leads with *what changed* rather than a wall of
-transcripts.
+**A voice AI system that phones an aging parent daily, confirms their medications, and texts the family only when something needs attention. Ran in daily production for a real household through September 2026.**
 
 The parent needs nothing but a phone. No app, no device, no wearable.
+
+[**Demo video (90 sec)**](#) <!-- TODO: record and link -->
+
+### Why this exists
+
+Alert fatigue kills care products. A system that reports everything trains families to stop reading, and then the alert that matters gets ignored. So a clean check-in sends no notification at all. Silence is the product: a caregiver who hears nothing should be able to conclude nothing is wrong.
+
+That single property is what makes every bug in here worse than it looks. A suppressed alert, a false "doing okay," or a call that silently never happens all read to the user as "everything is fine."
+
+### What's in this repo
+
+| | |
+|---|---|
+| **Production** | Deployed on Vercel and run daily for one household — the developer's own parent. Twilio toll-free verification approved, SMS delivery working. |
+| **Safety** | Three independent concern-detection layers: LLM extraction, a deterministic keyword backstop, and structural checks that do not ask the model at all. The model answers "what did they say"; application code decides what to do about it. |
+| **Eval suite** | 19 scored transcript cases covering falls, chest pain, prompt injection, medication refusal, watch-item suppression, and the dangerous false-positive direction. 100% concern recall, 0% false alarm rate, 100% medication accuracy. Plus 15 simulated conversations scored against the live system prompt. |
+| **Isolation** | 33 adversarial RLS checks, 10 prompt-refusal checks, 41 queue-integrity assertions, 323 unit tests. |
+| **Consent** | California all-party consent gating on the first call. Separate SMS opt-in per family contact, with carrier opt-out (STOP) honored. |
+| **Reliability** | Every duplicate-execution risk is database-enforced: `unique (parent_id, due_at)` on the slot queue, partial-index uniqueness on active calls, optimistic-concurrency claims on retries. 37 incremental migrations. |
+
+### Built with
+
+Next.js 16, Supabase (Postgres + RLS), Vapi (voice), Twilio (SMS), SendGrid (email), Anthropic Claude (extraction), Vercel.
 
 ---
 
