@@ -481,8 +481,20 @@ export async function POST(request: Request) {
 
   // What this call was for, minus everything it accounted for either way. Anything left is a
   // dose nobody can say yes or no about, and it must not be rounded up to "all good".
-  const accountedFor = new Set([...report.medsConfirmed, ...report.medsMissed].map((m) => m.toLowerCase()));
-  const unaccountedMeds = (call.scheduled_meds ?? []).filter((m: string) => !accountedFor.has(m.toLowerCase()));
+  //
+  // Matched with the SAME fuzzy comparison that admitted these names in the first place.
+  // Exact equality was wrong in a way that quietly disabled the whole all-clear: the strings
+  // in medsConfirmed are Claude's ("metformin 500mg"), admitted by isKnownMed precisely
+  // because the model does not return the scheduled spelling ("Metformin"). An exact set
+  // lookup therefore missed on a perfectly accounted-for call, every time, suppressing the
+  // all-clear and logging a false warning with it.
+  //
+  // `knownMedNames` rather than `scheduled_meds`, because it also covers outstanding_meds —
+  // a dose carried forward from an earlier call, raised on this one. If the answer to that
+  // is mangled past isKnownMed it lands in neither list and is not in scheduled_meds, so
+  // scoping to the snapshot alone left the gap open in the case the guard was written for.
+  const accountedFor = [...report.medsConfirmed, ...report.medsMissed];
+  const unaccountedMeds = knownMedNames.filter((known) => !accountedFor.some((got) => fuzzyIncludes([known], got)));
   if (unaccountedMeds.length > 0) {
     log.warn("webhook.meds_unaccounted", { call_id: call.id, parent_id: call.parent_id, meds: unaccountedMeds });
   }
@@ -630,6 +642,9 @@ export async function POST(request: Request) {
         fingerprint: alertFingerprint("all-clear", [call.id]),
         severity: "routine" as const,
         caregiverOnly: true,
+        // No email fallback. A caregiver who replied STOP would otherwise receive this every
+        // single day by email instead, with nothing to turn it off.
+        smsOnly: true,
       }
     );
   }

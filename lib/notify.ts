@@ -309,6 +309,17 @@ export async function notifyFamilyContacts(
      * times a year. The person who set the service up is the one who wants to know it ran.
      */
     caregiverOnly?: boolean;
+    /**
+     * Never fall back to email for this alert, even when the text does not go.
+     *
+     * For the daily all-clear. The opt-out branch deliberately emails someone who replied
+     * STOP, because opting out of texts is not opting out of hearing their parent fell — and
+     * that reasoning does not survive a cheerful daily ping. Without this, replying STOP
+     * converts the all-clear into an unsolicited daily EMAIL with nothing to turn it off,
+     * which is exactly the "how a family mutes the channel the emergency will come from"
+     * failure the note above is arguing against.
+     */
+    smsOnly?: boolean;
   } = {}
 ): Promise<boolean> {
   // Don't tell the same family the same thing twice in a day. A retried call, two
@@ -317,7 +328,7 @@ export async function notifyFamilyContacts(
   // one that actually matters gets ignored too. Fingerprint is built from the
   // structured facts by the caller, not the prose, so a reworded Claude summary of the
   // same underlying situation still counts as a duplicate.
-  const { fingerprint, severity = "routine", caregiverOnly = false } = options;
+  const { fingerprint, severity = "routine", caregiverOnly = false, smsOnly = false } = options;
   const dedupeWindowHours = options.dedupeWindowHours ?? DEDUPE_WINDOW_HOURS[severity];
   // Evaluated per recipient, down in sendAlert, rather than once for the whole household
   // here — see alreadyNotified for why suppressing everyone on one recipient's success is
@@ -325,7 +336,12 @@ export async function notifyFamilyContacts(
   const since = new Date(Date.now() - dedupeWindowHours * 60 * 60 * 1000).toISOString();
 
   const [{ data: contacts, error: contactsError }, { data: parentRow, error: parentError }] = await Promise.all([
-    db.from("family_contacts").select("*").eq("parent_id", parentId).eq(flag, true),
+    // Skipped under caregiverOnly. Querying anyway cost a round-trip per all-clear and, worse,
+    // logged notify.contacts_lookup_failed at error level for a read whose outcome this
+    // function has already decided is irrelevant — noise in the one log stream meant to matter.
+    caregiverOnly
+      ? Promise.resolve({ data: [] as FamilyContact[], error: null })
+      : db.from("family_contacts").select("*").eq("parent_id", parentId).eq(flag, true),
     db.from("parents").select("caregiver_id").eq("id", parentId).single(),
   ]);
   // These two gate everything below them. A failed contacts read notifies no family
@@ -338,7 +354,7 @@ export async function notifyFamilyContacts(
   let reachedEveryone = (caregiverOnly || !contactsError) && !parentError;
 
   for (const contact of caregiverOnly ? [] : ((contacts ?? []) as FamilyContact[])) {
-    if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, contact.email, body, fingerprint, since))) {
+    if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, smsOnly ? null : contact.email, body, fingerprint, since))) {
       reachedEveryone = false;
     }
   }
@@ -356,7 +372,7 @@ export async function notifyFamilyContacts(
       reachedEveryone = false;
     }
     if (caregiver?.phone) {
-      if (!(await sendAlert(db, parentId, callId, null, caregiver.phone, caregiver.email ?? null, body, fingerprint, since))) {
+      if (!(await sendAlert(db, parentId, callId, null, caregiver.phone, smsOnly ? null : (caregiver.email ?? null), body, fingerprint, since))) {
         reachedEveryone = false;
       }
     }
