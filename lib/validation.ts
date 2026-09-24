@@ -1,4 +1,14 @@
 import { z } from "zod";
+
+/** True only for a timezone Intl actually understands. */
+function isRealTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
 import { CALLING_HOURS_END, CALLING_HOURS_START } from "@/lib/callwindow";
 import { SLOT_MIN_WINDOW_MINUTES } from "@/lib/slots";
 
@@ -41,7 +51,17 @@ export const setupFormSchema = z.object({
   parent: z.object({
     name: shortNonEmptyText(100),
     phone: phoneSchema,
-    timezone: z.string().trim().min(1).max(100),
+    // A real IANA zone, not just a non-empty string. Everything downstream — the calling
+    // window, the local-day boundary, every rendered time — passes this to Intl, which
+    // throws a RangeError on an unknown zone. The form is a select, so a person cannot send
+    // a bad one, but the API accepts JSON directly: one typo would be stored and then crash
+    // the scheduler for that household on every tick, with no call and no alert.
+    timezone: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .refine(isRealTimezone, { message: "Unknown timezone" }),
     assistant_name: shortNonEmptyText(50),
   }),
   medications: z

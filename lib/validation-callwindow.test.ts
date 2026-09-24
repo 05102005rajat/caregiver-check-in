@@ -42,3 +42,37 @@ describe("medication time must be a time we will actually call", () => {
     if (!r.success) expect(r.error.issues[0].message).toContain("20:45");
   });
 });
+
+describe("timezone", () => {
+  const parent = (timezone: string) => ({
+    caregiver: { name: "A", email: "a@b.co", phone: "+12025550100" },
+    parent: { name: "N", phone: "+12025550101", timezone, assistant_name: "Rosie" },
+    medications: [{ name: "Metformin", dose: "", time_of_day: "09:00", notes: "", description: "", start_date: "", end_date: "" }],
+    appointments: [],
+    family_contacts: [],
+    watch_items: [],
+    retry_after_minutes: 30,
+    max_retries: 2,
+  });
+  const timezoneRejected = (tz: string) => {
+    const r = setupFormSchema.safeParse(parent(tz));
+    return !r.success && r.error.issues.some((i) => i.path.includes("timezone"));
+  };
+
+  it("accepts every zone the setup form offers", () => {
+    // The form is the only gate on this value, so the two must not drift apart: a zone in
+    // the dropdown that the schema rejects is a setup form that cannot be submitted.
+    for (const tz of ["America/Los_Angeles", "America/New_York", "Pacific/Honolulu", "Europe/London", "Asia/Kolkata", "Asia/Dubai"]) {
+      expect(timezoneRejected(tz), tz).toBe(false);
+    }
+  });
+
+  it("rejects a string that is not a real zone", () => {
+    // The API takes JSON directly, so the select is no protection there. Everything
+    // downstream hands this to Intl, which throws on an unknown zone — one typo would be
+    // stored and then crash that household's tick forever, with no call and no alert.
+    expect(timezoneRejected("Asia/Kolkatta")).toBe(true);
+    expect(timezoneRejected("Mars/Olympus")).toBe(true);
+    expect(timezoneRejected("not a zone")).toBe(true);
+  });
+});

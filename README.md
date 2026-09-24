@@ -19,7 +19,7 @@ That single property is what makes every bug in here worse than it looks. A supp
 | **Production** | Deployed on Vercel, Twilio toll-free verification approved, SMS delivery working. Ran daily for one household — the developer's own parent — through September 2026. |
 | **Safety** | Three independent concern-detection layers: LLM extraction, a deterministic keyword backstop, and structural checks that do not ask the model at all. The model answers "what did they say"; application code decides what to do about it. |
 | **Eval suite** | 19 scored transcript cases covering falls, chest pain, prompt injection, medication refusal, watch-item suppression, and the dangerous false-positive direction. 100% concern recall, 0% false alarm rate, 100% medication accuracy on the two most recent runs. Plus 15 simulated conversations scored against the live system prompt. |
-| **Tests** | 441 in total: 323 unit tests, 33 adversarial RLS isolation checks, 10 prompt-refusal checks, 41 queue-integrity assertions against a controlled clock, and the 34 scored LLM cases above. |
+| **Tests** | 443 in total: 325 unit tests, 33 adversarial RLS isolation checks, 10 prompt-refusal checks, 41 queue-integrity assertions against a controlled clock, and the 34 scored LLM cases above. |
 | **Consent** | California all-party consent gating on the first call. Separate SMS opt-in per family contact, with carrier opt-out (STOP) honored. |
 | **Reliability** | Every duplicate-execution risk is database-enforced: `unique (parent_id, due_at)` on the slot queue, partial-index uniqueness on active calls, optimistic-concurrency claims on retries. 37 incremental migrations. |
 

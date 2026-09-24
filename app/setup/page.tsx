@@ -11,6 +11,9 @@ import type {
   Medication as DbMedication,
 } from "@/types/db";
 
+// The parent's timezone decides when 08:00-21:00 falls, and nothing else. It is the
+// parent's local time that matters, not the caregiver's — families are often split across
+// zones, which is frequently why the caregiver cannot just ring themselves.
 const TIMEZONES = [
   "America/Los_Angeles",
   "America/Denver",
@@ -18,6 +21,11 @@ const TIMEZONES = [
   "America/New_York",
   "America/Anchorage",
   "Pacific/Honolulu",
+  "America/Toronto",
+  "Europe/London",
+  "Europe/Berlin",
+  "Asia/Dubai",
+  "Asia/Kolkata",
 ];
 
 const FAMILY_ROLES: FamilyRole[] = ["son", "daughter", "spouse", "aide", "other"];
