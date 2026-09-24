@@ -1,6 +1,6 @@
 # Caregiver Check-In
 
-**A voice AI system that phones an aging parent daily, confirms their medications, and texts the family only when something needs attention. Ran in daily production for a real household through September 2026.**
+**A voice AI system that phones an aging parent daily, confirms their medications, and texts the family only when something needs attention. Deployed, and run daily for a real household through September 2026.**
 
 The parent needs nothing but a phone. No app, no device, no wearable.
 
@@ -16,10 +16,10 @@ That single property is what makes every bug in here worse than it looks. A supp
 
 | | |
 |---|---|
-| **Production** | Deployed on Vercel and run daily for one household — the developer's own parent. Twilio toll-free verification approved, SMS delivery working. |
+| **Production** | Deployed on Vercel, Twilio toll-free verification approved, SMS delivery working. Ran daily for one household — the developer's own parent — through September 2026. |
 | **Safety** | Three independent concern-detection layers: LLM extraction, a deterministic keyword backstop, and structural checks that do not ask the model at all. The model answers "what did they say"; application code decides what to do about it. |
 | **Eval suite** | 19 scored transcript cases covering falls, chest pain, prompt injection, medication refusal, watch-item suppression, and the dangerous false-positive direction. 100% concern recall, 0% false alarm rate, 100% medication accuracy. Plus 15 simulated conversations scored against the live system prompt. |
-| **Isolation** | 33 adversarial RLS checks, 10 prompt-refusal checks, 41 queue-integrity assertions, 323 unit tests. |
+| **Tests** | 441 in total: 323 unit tests, 33 adversarial RLS isolation checks, 10 prompt-refusal checks, 41 queue-integrity assertions against a controlled clock, and the 34 scored LLM cases above. |
 | **Consent** | California all-party consent gating on the first call. Separate SMS opt-in per family contact, with carrier opt-out (STOP) honored. |
 | **Reliability** | Every duplicate-execution risk is database-enforced: `unique (parent_id, due_at)` on the slot queue, partial-index uniqueness on active calls, optimistic-concurrency claims on retries. 37 incremental migrations. |
 
@@ -137,7 +137,7 @@ type checker and to every other test here.
 npm run security   # creates two throwaway caregivers, attacks one from the other, cleans up
 ```
 
-28 checks, phrased as attacks: caregiver B attempting to read, alter, or delete A's
+33 checks, phrased as attacks: caregiver B attempting to read, alter, or delete A's
 parent, medications, contacts, watch items, calls, messages and transcripts, plus the
 privilege-escalation path through the setup RPC, plus the same attempted anonymously, plus
 household deletion driven through the real transaction it uses in production.
