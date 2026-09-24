@@ -4,7 +4,7 @@
 
 The parent needs nothing but a phone. No app, no device, no wearable.
 
-[**Demo video (90 sec)**](https://drive.google.com/file/d/1GY_Czezw-mbOvIv--Q8M8FdqYpPP56ej/view?usp=drive_link) <!-- TODO: record and link -->
+[**Demo video (90 sec)**](https://drive.google.com/file/d/1GY_Czezw-mbOvIv--Q8M8FdqYpPP56ej/view?usp=drive_link)
 
 ### Why this exists
 
