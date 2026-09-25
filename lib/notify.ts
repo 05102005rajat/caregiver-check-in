@@ -320,6 +320,14 @@ export async function notifyFamilyContacts(
      * failure the note above is arguing against.
      */
     smsOnly?: boolean;
+    /**
+     * What the account holder receives instead of `body`, with its own fingerprint.
+     *
+     * For detail only the person who set the medications up can act on (a dose the call
+     * could not confirm). Its own fingerprint so that detail counts as news for them without
+     * making a repeated request or concern count as news for everyone else.
+     */
+    caregiverBody?: { body: string; fingerprint?: string };
   } = {}
 ): Promise<boolean> {
   // Don't tell the same family the same thing twice in a day. A retried call, two
@@ -353,7 +361,20 @@ export async function notifyFamilyContacts(
   // nothing about whether this alert reached everyone it was meant to.
   let reachedEveryone = (caregiverOnly || !contactsError) && !parentError;
 
+  // With a caregiver copy, the account holder's number is served by that copy alone. Dedupe is
+  // per (recipient, fingerprint), and the two copies carry different fingerprints — so a
+  // household whose caregiver is also listed as a family contact (production has exactly
+  // that) would otherwise get the same text twice, once of each version. The caregiver copy
+  // is a superset, so it is the one kept. Only under caregiverBody: every other alert keeps
+  // relying on the shared fingerprint, which already collapses the pair.
+  let caregiverPhone: string | null = null;
+  if (options.caregiverBody && parentRow?.caregiver_id) {
+    const { data: cg } = await db.from("caregivers").select("phone").eq("id", parentRow.caregiver_id).single();
+    caregiverPhone = cg?.phone ?? null;
+  }
+
   for (const contact of caregiverOnly ? [] : ((contacts ?? []) as FamilyContact[])) {
+    if (caregiverPhone && contact.phone === caregiverPhone) continue;
     if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, smsOnly ? null : contact.email, body, fingerprint, since))) {
       reachedEveryone = false;
     }
@@ -372,7 +393,20 @@ export async function notifyFamilyContacts(
       reachedEveryone = false;
     }
     if (caregiver?.phone) {
-      if (!(await sendAlert(db, parentId, callId, null, caregiver.phone, smsOnly ? null : (caregiver.email ?? null), body, fingerprint, since))) {
+      const own = options.caregiverBody;
+      if (
+        !(await sendAlert(
+          db,
+          parentId,
+          callId,
+          null,
+          caregiver.phone,
+          smsOnly ? null : (caregiver.email ?? null),
+          own?.body ?? body,
+          own ? own.fingerprint : fingerprint,
+          since
+        ))
+      ) {
         reachedEveryone = false;
       }
     }

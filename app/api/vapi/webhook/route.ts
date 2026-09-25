@@ -6,7 +6,7 @@ import { notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { SYSTEM_FAULT_CONCERN, VOICEMAIL_CONCERN, reportableFacts } from "@/lib/reportable";
-import { allClearMessage, unaccountedMedications } from "@/lib/allclear";
+import { allClearMessage, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "@/lib/allclear";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
@@ -246,11 +246,14 @@ export async function POST(request: Request) {
   // below only knew this slot's snapshot, so the answer — "yes, I took the Lisinopril" —
   // failed the check, was discarded, and the same dose was raised again on every later call
   // for the rest of the day. The feature could ask but could never hear the reply.
-  const knownMedNames = [
+  // Kept in their scheduled spelling as well, because an unaccounted one is named in a text
+  // the caregiver reads, and "couldn't confirm: metformin er" looks like a system fault.
+  const scheduledMedNames: string[] = [
     ...(call.outstanding_meds ?? []),
     ...(call.scheduled_meds ??
       (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : [])),
-  ].map((n) => n.toLowerCase());
+  ];
+  const knownMedNames = scheduledMedNames.map((n) => n.toLowerCase());
   const knownApptTitles = ((apptsRow ?? []) as Appointment[]).map((a) => a.title.toLowerCase());
 
   // Fuzzy substring match, but only above a minimum length — otherwise a short known name
@@ -489,14 +492,36 @@ export async function POST(request: Request) {
   // lookup therefore missed on a perfectly accounted-for call, every time, suppressing the
   // all-clear and logging a false warning with it.
   //
-  // `knownMedNames` rather than `scheduled_meds`, because it also covers outstanding_meds —
+  // `scheduledMedNames` rather than `scheduled_meds`, because it also covers outstanding_meds —
   // a dose carried forward from an earlier call, raised on this one. If the answer to that
   // is mangled past isKnownMed it lands in neither list and is not in scheduled_meds, so
   // scoping to the snapshot alone left the gap open in the case the guard was written for.
-  const unaccountedMeds = unaccountedMedications(knownMedNames, [...report.medsConfirmed, ...report.medsMissed]);
+  const unaccountedMeds = unaccountedMedications(scheduledMedNames, [...report.medsConfirmed, ...report.medsMissed]);
   if (unaccountedMeds.length > 0) {
     log.warn("webhook.meds_unaccounted", { call_id: call.id, parent_id: call.parent_id, meds: unaccountedMeds });
   }
+
+  // The same fact, worded for the caregiver's copy of a concern or request text. Built once so
+  // both branches suppress it under the same conditions: see unconfirmedLine for why each.
+  const unconfirmedNote = unconfirmedLine({
+    scheduled: scheduledMedNames,
+    unconfirmed: unaccountedMeds,
+    medsConfirmed: report.medsConfirmed,
+    suppress: report.notAConversation !== null || noResponse.length > 0 || extracted.mood === "unknown" || isUrgent,
+  });
+  // A caregiver copy only when there is something to add; otherwise everyone shares one body
+  // and one fingerprint, exactly as before.
+  const withNote = (body: string, fingerprint: string) =>
+    unconfirmedNote
+      ? {
+          caregiverBody: {
+            body: `${body}\n\n${unconfirmedNote}`,
+            // Its own fingerprint, so a repeated request or concern with a NEW unconfirmed dose
+            // still reaches the caregiver instead of being suppressed along with the dose.
+            fingerprint: `${fingerprint}|unconfirmed:${[...unaccountedMeds].map((m) => m.toLowerCase()).sort().join(",")}`,
+          },
+        }
+      : {};
 
   const hasConcern =
     report.notAConversation !== null || warrantsAttention({ concerns, medsMissed: report.medsMissed, mood: report.mood, urgent: isUrgent });
@@ -583,17 +608,22 @@ export async function POST(request: Request) {
 
     // Fingerprint the structured facts, not the prose: Claude rewords the same situation
     // differently every call, so body text would never match and nothing would dedupe.
+    const concernFingerprint = alertFingerprint(isUrgent ? "urgent" : "concern", [
+      ...concerns,
+      ...report.medsMissed.map((m) => `missed:${m}`),
+      ...(concerns.length === 0 && report.medsMissed.length === 0 ? [`mood:${report.mood}`] : []),
+    ]);
+    // After the header-only check above, never before it: counted as content, this line
+    // switched that check off and replaced "we couldn't make out what was said" with a
+    // pill name — blaming a tablet for a call we could not hear.
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
+      ...withNote(lines.join("\n"), concernFingerprint),
       // mood is in the fingerprint because a mood-only alert has no other facts in it: without
       // it every content-free alert fingerprints identically as "concern:", so an unreadable
       // call on Monday would suppress a "sounded low" alert on Tuesday inside the window.
       // A separate kind for urgent, so an earlier routine alert about the same facts cannot
       // suppress the one telling them to ring now.
-      fingerprint: alertFingerprint(isUrgent ? "urgent" : "concern", [
-        ...concerns,
-        ...report.medsMissed.map((m) => `missed:${m}`),
-        ...(concerns.length === 0 && report.medsMissed.length === 0 ? [`mood:${report.mood}`] : []),
-      ]),
+      fingerprint: concernFingerprint,
       // A second fall the same day is not a duplicate to collapse; a repeat pizza request is.
       severity: "safety" as const,
     });
@@ -612,8 +642,11 @@ export async function POST(request: Request) {
       "",
       ...report.requests.map((r) => `• ${r}`),
     ];
+    const requestFingerprint = alertFingerprint("request", report.requests);
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
-      fingerprint: alertFingerprint("request", report.requests),
+      // Replacing the reassurance with nothing would leave the caregiver no reason to ask.
+      ...withNote(lines.join("\n"), requestFingerprint),
+      fingerprint: requestFingerprint,
       severity: "routine" as const,
     });
   } else if (report.notAConversation === null && unaccountedMeds.length === 0) {
@@ -633,7 +666,7 @@ export async function POST(request: Request) {
     // BOTH confirmed and missed — the code already logs that it does this. With nothing in
     // medsMissed, warrantsAttention is false, and without this check a genuinely skipped
     // dose would arrive as "All good.": the exact inversion lib/allclear.ts says it must
-    // never produce. Silence is the lesser failure, so it stays silent and logs loudly.
+    // never produce. The branch below says so instead.
     await notifyFamilyContacts(
       db,
       call.parent_id,
@@ -656,8 +689,34 @@ export async function POST(request: Request) {
         smsOnly: true,
       }
     );
+  } else if (report.notAConversation === null) {
+    // A clean call that left a dose unaccounted for. This used to be silence, and silence was
+    // the lesser failure only next to a false "All good." — to the caregiver it is the same
+    // missing line as a dead scheduler, and for a household with two similarly named drugs
+    // it could happen every day. So say what is known, in the all-clear's place and on the
+    // all-clear's terms: caregiver only, SMS only, once per call.
+    await notifyFamilyContacts(
+      db,
+      call.parent_id,
+      "notify_on_concern",
+      call.id,
+      unconfirmedMessage({
+        parentName,
+        at: call.called_at ? new Date(call.called_at) : new Date(call.scheduled_for),
+        timezone: parent.timezone,
+        medsConfirmed: report.medsConfirmed,
+        unconfirmed: unaccountedMeds,
+        scheduled: scheduledMedNames,
+      }),
+      {
+        // Per call, like the all-clear, and a kind of its own so neither can suppress the other.
+        fingerprint: alertFingerprint("unconfirmed", [call.id]),
+        severity: "routine" as const,
+        caregiverOnly: true,
+        smsOnly: true,
+      }
+    );
   }
-  // Healthy call, nothing asked for: log silently, no text. No news is good news.
 
   return NextResponse.json({ ok: true });
 }

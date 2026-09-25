@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allClearMessage, unaccountedMedications } from "./allclear";
+import { allClearMessage, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "./allclear";
 
 const at = new Date("2026-09-24T15:10:00Z"); // 08:10 in Los Angeles
 const base = { parentName: "Nora", at, timezone: "America/Los_Angeles" };
@@ -52,6 +52,72 @@ describe("allClearMessage", () => {
   });
 });
 
+describe("unconfirmedMessage", () => {
+  it("says what was confirmed and names what could not be", () => {
+    const msg = unconfirmedMessage({ ...base, medsConfirmed: ["Metformin ER"], unconfirmed: ["Metformin"], scheduled: ["Metformin", "Metformin ER"] });
+    expect(msg).toBe("Nora's 8:10am check-in — Metformin ER taken. Couldn't confirm: Metformin. Worth asking.");
+  });
+
+  it("never looks like, or claims, an all-clear", () => {
+    // The point of this text is that it is sent where "All good." would have been false.
+    const msg = unconfirmedMessage({ ...base, medsConfirmed: ["Aspirin"], unconfirmed: ["Metformin"], scheduled: ["Aspirin", "Metformin"] });
+    expect(msg.startsWith("✓")).toBe(false);
+    expect(msg).not.toContain("All good");
+    expect(msg.split("\n").length).toBe(1);
+  });
+
+  it("does not read as an alarm either", () => {
+    // Usually our matching being unsure, not a skipped dose. Alarm-shaped routine texts
+    // teach a family to stop reading the real ones.
+    const msg = unconfirmedMessage({ ...base, medsConfirmed: [], unconfirmed: ["Metformin"], scheduled: ["Metformin"] });
+    expect(msg).not.toContain("needs a look");
+    expect(msg).not.toContain("URGENT");
+    expect(msg).not.toContain("•");
+  });
+
+  it("names a drug scheduled twice at one hour once when neither dose was confirmed", () => {
+    const msg = unconfirmedMessage({
+      ...base,
+      medsConfirmed: [],
+      unconfirmed: ["Metformin", "Metformin"],
+      scheduled: ["Metformin", "Metformin"],
+    });
+    expect(msg).toBe("Nora's 8:10am check-in — Couldn't confirm: Metformin. Worth asking.");
+  });
+
+  it("counts the dose when only one of two same-named rows was confirmed", () => {
+    // Found by review: the extractor collapses "the 500 and the 1000" into one "Metformin",
+    // and the plain wording read "Metformin taken. Couldn't confirm: Metformin." — a
+    // contradiction the caregiver could not act on, every day.
+    const msg = unconfirmedMessage({
+      ...base,
+      medsConfirmed: ["Metformin"],
+      unconfirmed: ["Metformin"],
+      scheduled: ["Metformin", "Metformin"],
+    });
+    expect(msg).toBe("Nora's 8:10am check-in — Metformin taken. Couldn't confirm: 1 of 2 Metformin doses. Worth asking.");
+  });
+});
+
+describe("unconfirmedLine", () => {
+  const input = { scheduled: ["Vitamin D"], unconfirmed: ["Vitamin D"], medsConfirmed: ["Vitamin D3"], suppress: false };
+
+  it("names the dose and what WAS confirmed, so a naming mismatch is visible", () => {
+    expect(unconfirmedLine(input)).toBe("Couldn't confirm: Vitamin D (confirmed: Vitamin D3)");
+  });
+
+  it("is omitted where talking about doses would mislead", () => {
+    // No answer, an unreadable call, or an URGENT text. The caller decides which; this pins
+    // that the flag is honoured, because the review found the line displacing the
+    // "we couldn't make out what was said" explanation and sitting under an URGENT header.
+    expect(unconfirmedLine({ ...input, suppress: true })).toBeNull();
+  });
+
+  it("is omitted when every dose was accounted for", () => {
+    expect(unconfirmedLine({ ...input, unconfirmed: [] })).toBeNull();
+  });
+});
+
 describe("unaccountedMedications", () => {
   it("accounts for a dose the model spelled differently", () => {
     // The reason exact equality was wrong: medsConfirmed holds the model's string.
@@ -61,8 +127,8 @@ describe("unaccountedMedications", () => {
   it("does not let one confirmed dose account for a second, similarly named one", () => {
     // The reason fuzzy-many-to-many was worse. Only the D3 was confirmed; the plain
     // Vitamin D was never mentioned and must not be rounded up into "All good".
-    expect(unaccountedMedications(["Vitamin D", "Vitamin D3"], ["vitamin d3"])).toEqual(["vitamin d"]);
-    expect(unaccountedMedications(["Metformin", "Metformin ER"], ["metformin er"])).toEqual(["metformin"]);
+    expect(unaccountedMedications(["Vitamin D", "Vitamin D3"], ["vitamin d3"])).toEqual(["Vitamin D"]);
+    expect(unaccountedMedications(["Metformin", "Metformin ER"], ["metformin er"])).toEqual(["Metformin"]);
   });
 
   it("does not let two spellings of one drug cover a second, separate dose", () => {
@@ -71,7 +137,7 @@ describe("unaccountedMedications", () => {
     // CASCADED onto the plain Vitamin D, which the call never mentioned — reporting nothing
     // outstanding and texting the family "All good." about a dose nobody spoke about.
     expect(unaccountedMedications(["Vitamin D", "Vitamin D3"], ["vitamin d3", "vitamin d3 1000 iu"])).toEqual([
-      "vitamin d",
+      "Vitamin D",
     ]);
   });
 
@@ -81,14 +147,13 @@ describe("unaccountedMedications", () => {
     // warned about the one drug that WAS confirmed and told nothing about the one that
     // wasn't. A warning naming the wrong drug is worse than no warning: it is checkable,
     // and it checks out wrong.
-    expect(unaccountedMedications(["Metformin", "Metformin ER"], ["metformin er 500mg"])).toEqual(["metformin"]);
+    expect(unaccountedMedications(["Metformin", "Metformin ER"], ["metformin er 500mg"])).toEqual(["Metformin"]);
   });
 
   it("gives a short answer the generic dose, not the most specific one", () => {
-    // Ranking by raw length is only right when the answer is MORE specific than the dose
-    // name. Here it is less: "vitamin d" fits "Vitamin D3" far better than the 18-character
-    // "Vitamin D3 1000 IU" it was being handed, which was already claimed — so the answer was
-    // spent and a dose the call did mention got reported outstanding, silencing the all-clear.
+    // "vitamin d" abbreviates Vitamin D3 and leaves nothing of it uncovered; against
+    // "Vitamin D3 1000 IU" it leaves two words uncovered. The closer name wins, and the
+    // exact answer has already taken the 1000 IU entry anyway.
     expect(
       unaccountedMedications(["Vitamin D3 1000 IU", "Vitamin D3"], ["vitamin d3 1000 iu", "vitamin d"]),
     ).toEqual([]);
@@ -107,7 +172,61 @@ describe("unaccountedMedications", () => {
   it("still reports the second row when only one of two identical doses was confirmed", () => {
     // The control for the case above. Preferring a free entry must not become "one answer
     // covers both" — that is the unsafe direction, and it is one line away from it.
-    expect(unaccountedMedications(["Metformin", "Metformin"], ["metformin"])).toEqual(["metformin"]);
+    expect(unaccountedMedications(["Metformin", "Metformin"], ["Metformin"])).toEqual(["Metformin"]);
+  });
+
+  it("does not let a second spelling of the D3 cover a plain Vitamin D nobody mentioned", () => {
+    // Found by review against the length-based ranking: "vitamin d3" is one character from
+    // "vitamin d" and eight from "vitamin d3 1000 iu", so once the exact answer took the D3
+    // row, the variant spelling claimed the plain Vitamin D — and the family was told
+    // "All good." about a dose the call never discussed. In either order.
+    const scheduled = ["Vitamin D", "Vitamin D3 1000 IU"];
+    expect(unaccountedMedications(scheduled, ["vitamin d3 1000 iu", "vitamin d3"])).toEqual(["Vitamin D"]);
+    expect(unaccountedMedications(scheduled, ["vitamin d3", "vitamin d3 1000 iu"])).toEqual(["Vitamin D"]);
+    // The same shape with a different drug, so the fix is the rule and not the vitamin.
+    expect(unaccountedMedications(["Metformin", "Metformin ER 500mg"], ["metformin er 500mg", "metformin er"])).toEqual([
+      "Metformin",
+    ]);
+  });
+
+  it("accounts for both doses whatever order the model lists them in", () => {
+    // The other half of the same review. With "vitamin d3" first, the length ranking handed
+    // it the plain Vitamin D row; the exact "vitamin d" that followed found its own entry
+    // taken, and a call that confirmed both doses went silent — naming the D3, which WAS
+    // taken, as the outstanding one.
+    const scheduled = ["Vitamin D", "Vitamin D3 1000 IU"];
+    expect(unaccountedMedications(scheduled, ["vitamin d3", "vitamin d"])).toEqual([]);
+    expect(unaccountedMedications(scheduled, ["vitamin d", "vitamin d3"])).toEqual([]);
+  });
+
+  it("accounts for nothing when an answer could be either of two different drugs", () => {
+    // A bare "vitamin" with Vitamin D and Vitamin B12 scheduled could be either. Guessing is
+    // how a family hears about a dose that was not discussed, so both stay unconfirmed.
+    expect(unaccountedMedications(["Vitamin D", "Vitamin B12"], ["vitamin"])).toEqual(["Vitamin D", "Vitamin B12"]);
+    // Control: with only one of them scheduled there is nothing to confuse it with.
+    expect(unaccountedMedications(["Vitamin D"], ["vitamin"])).toEqual([]);
+  });
+
+  it("treats a strength as detail, not as a different drug", () => {
+    // The model reports the pill it heard about ("metformin 500 mg"), not the row's name.
+    // Treating that as a contradiction would make one household's check-in say "couldn't
+    // confirm" every day.
+    expect(unaccountedMedications(["Metformin ER"], ["metformin 500 mg"])).toEqual([]);
+    // But a changed WORD is still a different drug.
+    expect(unaccountedMedications(["Vitamin D"], ["vitamin d3"])).toEqual(["Vitamin D"]);
+  });
+
+  it("treats a plural as the same drug", () => {
+    // Found by review: the word matcher needed an exact word, so "fish oils" was a different
+    // drug from Fish oil and that household got "couldn't confirm" after every call.
+    expect(unaccountedMedications(["Fish oil"], ["fish oils"])).toEqual([]);
+    expect(unaccountedMedications(["Eye drops"], ["eye drop"])).toEqual([]);
+    // Control: a plural does not blur a changed word.
+    expect(unaccountedMedications(["Vitamin D"], ["vitamin d3s"])).toEqual(["Vitamin D"]);
+  });
+
+  it("returns the scheduled spelling, because the caregiver reads it", () => {
+    expect(unaccountedMedications(["Metformin ER", "Aspirin"], ["aspirin"])).toEqual(["Metformin ER"]);
   });
 
   it("is satisfied when both are actually confirmed", () => {
@@ -115,7 +234,7 @@ describe("unaccountedMedications", () => {
   });
 
   it("reports a dose nobody mentioned at all", () => {
-    expect(unaccountedMedications(["Aspirin"], [])).toEqual(["aspirin"]);
+    expect(unaccountedMedications(["Aspirin"], [])).toEqual(["Aspirin"]);
   });
 
   it("counts a dose that was missed as accounted for — we know the answer", () => {
@@ -130,6 +249,6 @@ describe("unaccountedMedications", () => {
 
   it("does not match on a fragment shorter than the threshold", () => {
     // A three-letter name must not match everything, the same guard isKnownMed carries.
-    expect(unaccountedMedications(["Zinc"], ["zin"])).toEqual(["zinc"]);
+    expect(unaccountedMedications(["Zinc"], ["zin"])).toEqual(["Zinc"]);
   });
 });

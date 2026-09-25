@@ -39,7 +39,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33**, `npm run security:refusal` **10/10**,
-  `npm run security:queue` **41/41**, and **343 unit tests**.
+  `npm run security:queue` **41/41**, and **357 unit tests**.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
   **true** on both, `endCallPhrases` **empty** on both. The system prompt in
@@ -536,18 +536,35 @@ Two behaviours worth knowing:
 
 - Out-of-hours medication rows — see *Open work* 4.
 - Consent evidence — see *Open work* 5.
-- **`webhook.meds_unaccounted` means a clean call went silent.** When
-  `unaccountedMedications` (`lib/allclear.ts`) finds a scheduled dose that no confirmed or
-  missed answer accounts for, the webhook logs this warning and **withholds the all-clear**
-  (and drops "is doing fine" from a request text). That is the safe direction — a false
-  "All good." about an unanswered dose is the inversion this product must never produce —
-  but to the caregiver it is indistinguishable from a dead scheduler. Nothing surfaces it
-  but the log line. Known cause that recurs: two rows of the same drug at the same hour
-  (500mg + 1000mg) where the extractor collapses the answer into one "Metformin", so row
-  two is never accounted for and that household gets no all-clear on any day. Deliberately
-  *not* fixed by letting one answer cover identical names — that is the unsafe direction,
-  and a test pins against it. If this warning shows up for a household repeatedly, look at
-  its schedule and the extraction, not the matcher.
+- **`webhook.meds_unaccounted` means the caregiver got "Couldn't confirm" instead of
+  "All good."** When `unaccountedMedications` (`lib/allclear.ts`) finds a scheduled dose
+  that no confirmed or missed answer accounts for, a clean call sends `unconfirmedMessage`
+  (caregiver only, SMS only, once per call) in the all-clear's place, and the CAREGIVER's
+  copy of a concern or request text gains a "Couldn't confirm:" line (`unconfirmedLine`, via
+  `notifyFamilyContacts`' `caregiverBody`, with its own fingerprint so a repeated request
+  cannot suppress it). The line is left out on no-answer, unreadable (`mood: unknown`) and
+  URGENT texts — there it displaced the real explanation, or pointed at a pill as the
+  emergency. It used to be silence, which to the caregiver
+  is indistinguishable from a dead scheduler.
+  The matcher compares names word by word and is deliberately strict: an answer that could
+  be two different scheduled drugs accounts for neither. That trades a tidier text for
+  never sending a false "All good.". Known cause that recurs: two rows of the same drug at
+  the same hour (500mg + 1000mg) where the extractor collapses the answer into one
+  "Metformin", so row two is reported every day. Deliberately *not* fixed by letting one
+  answer cover identical names — that is the unsafe direction, and a test pins against it.
+  In synthetic runs the extractor itself marks an undiscussed or ambiguous dose as *missed*
+  (a needs-a-look text with its reason), so this branch is the backstop for a name the
+  extractor returns that cannot be tied to one scheduled dose. It was not reached end to end
+  through a live extraction; the branch is typechecked and its helpers are unit- and
+  mutation-tested. If this warning shows up for a household repeatedly, look at its schedule
+  and the extraction, not the matcher.
+  **Open gap:** the unaccounted doses are not stored on the call, so the dashboard can read
+  "doing okay" for a call whose text said "Couldn't confirm". Fixing it needs a column
+  (a migration) and `lib/alerting.ts` to read it — the "one rule, one place" invariant.
+  **Not driven end to end** in its final form: the route and `notify.ts` wiring (the note's
+  placement, its suppression, the caregiver copy, and skipping a contact who shares the
+  caregiver's number) was only read, not run — a synthetic run costs an extraction and
+  billed Twilio segments. `/verify` (`.claude/skills/verify/SKILL.md`) has the recipe.
 - The `/admin` audit reports `record_consent` as **unknown**, permanently. The assistant
   payload carries tool ids and no names, and the panel deliberately does not fetch
   `GET /tool`. `auditAssistant` accepts a `toolNamesById` map (and is tested with one) if
@@ -571,7 +588,7 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 343 unit tests
+npm test                  # 357 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family

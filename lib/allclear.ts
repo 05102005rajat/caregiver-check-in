@@ -53,6 +53,83 @@ export function allClearMessage({ parentName, at, timezone, medsConfirmed }: All
   return `✓ ${parentName}'s ${time} check-in — ${meds}All good.`;
 }
 
+export interface UnconfirmedInput extends AllClearInput {
+  /** Scheduled doses the call left without a yes or a no, in their scheduled spelling. */
+  unconfirmed: string[];
+  /** Everything the call was for, so a drug scheduled twice can be counted. */
+  scheduled: string[];
+}
+
+/**
+ * Sent INSTEAD of the all-clear when the call went fine but a dose could not be matched to
+ * anything said on it. Neither alternative is acceptable: "All good." would be a claim about
+ * a dose nobody discussed, and silence reads to the caregiver exactly like a dead scheduler
+ * on the one day they were owed a line.
+ *
+ * Shaped as the all-clear's sibling, not as an alert. One line, no tick, no "All good", and
+ * no "needs a look" — because most of the time this is our matching being unsure, not the
+ * parent skipping a dose, and a family taught that routine ambiguity is an alarm stops
+ * reading the alarms. It says what is known and hands them the one thing they can do.
+ */
+export function unconfirmedMessage({ parentName, at, timezone, medsConfirmed, unconfirmed, scheduled }: UnconfirmedInput): string {
+  const time = formatLocalTime(at, timezone);
+  const taken = medsConfirmed.length > 0 ? `${medsConfirmed.join(", ")} taken. ` : "";
+  return `${parentName}'s ${time} check-in — ${taken}Couldn't confirm: ${describeUnconfirmed(scheduled, unconfirmed)}. Worth asking.`;
+}
+
+/**
+ * The unconfirmed doses as a caregiver should read them.
+ *
+ * Two rows of one drug at the same hour (500mg and 1000mg) are one name to the reader, and
+ * the extractor routinely collapses "I took the 500 and the 1000" into a single answer. So
+ * one row is confirmed and the other is not, and naming it plainly produced "Metformin
+ * taken. Couldn't confirm: Metformin." — a sentence that contradicts itself and gives the
+ * reader nothing to ask. Counted instead: "1 of 2 Metformin doses".
+ */
+export function describeUnconfirmed(scheduled: string[], unconfirmed: string[]): string {
+  const key = (s: string) => s.trim().toLowerCase();
+  const seen = new Map<string, { name: string; count: number }>();
+  for (const name of unconfirmed) {
+    const k = key(name);
+    const entry = seen.get(k) ?? { name, count: 0 };
+    entry.count++;
+    seen.set(k, entry);
+  }
+  return [...seen.entries()]
+    .map(([k, { name, count }]) => {
+      const total = scheduled.filter((s) => key(s) === k).length;
+      return total > count ? `${count} of ${total} ${name} doses` : name;
+    })
+    .join(", ");
+}
+
+export interface UnconfirmedLineInput {
+  scheduled: string[];
+  unconfirmed: string[];
+  /** What the call DID establish, so the reader can see it is likely a naming mismatch. */
+  medsConfirmed: string[];
+  /**
+   * Set when the call is not a place to talk about doses at all: nobody answered, the call
+   * was unreadable, or the text is an emergency. "Couldn't confirm" there reads as though the
+   * parent was asked and dodged it, blames a pill for our own failure to hear, or — under an
+   * URGENT header — points the reader at a tablet as the emergency.
+   */
+  suppress: boolean;
+}
+
+/**
+ * The line appended to the CAREGIVER's copy of a concern or request text, or null.
+ *
+ * Caregiver only, like the standalone unconfirmedMessage: the account holder set the
+ * medications up and is the one who can check them. A sibling who asked to hear about
+ * concerns did not ask to referee our name matching.
+ */
+export function unconfirmedLine({ scheduled, unconfirmed, medsConfirmed, suppress }: UnconfirmedLineInput): string | null {
+  if (suppress || unconfirmed.length === 0) return null;
+  const taken = medsConfirmed.length > 0 ? ` (confirmed: ${medsConfirmed.join(", ")})` : "";
+  return `Couldn't confirm: ${describeUnconfirmed(scheduled, unconfirmed)}${taken}`;
+}
+
 /**
  * Which of the doses this call was about nobody can say yes or no to.
  *
@@ -67,76 +144,111 @@ export function allClearMessage({ parentName, at, timezone, medsConfirmed }: All
  *      Vitamin D3 accounted for a separate Vitamin D dose the call never mentioned, and the
  *      family was told "All good." Wrong in the UNSAFE direction, which is worse.
  *
- * So: one-to-one, by BEST fit rather than first fit. Each answer is scored against every
- * dose it could be about — an exact name beats a longer one, a longer one beats a shorter —
- * and claims one dose from the top-scoring group, preferring a dose nothing has claimed yet.
- * An answer whose top-scoring doses are all taken is spent, not cascaded down to a
- * worse-fitting name.
+ * 3. Best fit by name LENGTH. Closer in length is not closer in meaning: "vitamin d3" is one
+ *    character from "vitamin d" and eight from "vitamin d3 1000 iu", so a second spelling of
+ *    the D3 claimed a plain Vitamin D nobody mentioned ("All good." — unsafe), and in the
+ *    other order a correct "vitamin d3" stole the plain entry and left the real D3 reported
+ *    outstanding (silent, and the warning named the drug that WAS confirmed).
  *
- * Each half of that earns its place:
+ * So names are compared WORD BY WORD, which is how a person reads them:
  *
- *   - Best fit, not first fit, or "metformin er 500mg" lands on plain "Metformin" and the
- *     warning names the one drug that WAS confirmed.
- *   - No cascade, or two spellings of one drug ("vitamin d3", "vitamin d3 1000 iu") account
- *     for a separate Vitamin D the call never mentioned. That is the unsafe direction.
- *   - Prefer a free dose WITHIN the top group, or two rows of the same drug at the same hour
- *     (500mg and 1000mg — a real regimen) can never both be accounted for, and that
- *     household's all-clear is suppressed every day forever. That is the silent direction.
- *     This only helps when the call produced two answers. A live run showed the extractor
- *     collapsing "I took the 500 and the 1000" into a single "Metformin", which still leaves
- *     row two unaccounted and the call silent. Deduplicating identical scheduled names would
- *     paper over it by letting one answer cover both rows — the unsafe direction, pinned
- *     against by a test — so the partial fix stands and the gap is written down instead.
+ *   - An answer may add words ("metformin 500mg" is Metformin) or shorten a word to its
+ *     start ("vitamin d" could be Vitamin D3), but never CHANGE one. "d3" is not "d", so
+ *     "vitamin d3" is never about a plain Vitamin D. That single rule is what the length
+ *     heuristic kept approximating and kept getting wrong.
+ *   - At least one word must match exactly and be 4+ characters, the same floor isKnownMed
+ *     carries, so "zin" cannot anchor a match on its own.
  *
- * The trade is deliberate: an answer is never stretched across two doses, so a genuinely
- * unmentioned dose stays reported and the family gets silence rather than a false "All
- * good." Silence is the safe failure here, but it is still a failure — see the note on
- * `webhook.meds_unaccounted` in HANDOVER (Known design debt).
+ * Then, one-to-one:
+ *
+ *   1. Exact names first, across every answer, so a precise answer is never beaten to its
+ *      own entry by a looser one that happened to come first in the model's list.
+ *   2. Every remaining answer is scored against every dose it could be about: words that
+ *      line up, minus words of the dose name the answer did not cover. The top score wins.
+ *   3. If the top score is shared by two DIFFERENT names, the answer is ambiguous and
+ *      accounts for nothing. A plain "vitamin" with Vitamin D and Vitamin B12 scheduled
+ *      could be either, and guessing is how a family gets told about a dose that was not
+ *      discussed. Two rows with the SAME name (500mg and 1000mg at the same hour, a real
+ *      regimen) are not ambiguous — either answer fits either row — so it takes a free one.
+ *   4. If every top-scoring dose is already claimed, the answer is the same dose said
+ *      again. It is spent, never passed down to a worse-fitting name.
+ *
+ * Anything left over is reported, and the webhook tells the caregiver it could not be
+ * confirmed (`unconfirmedMessage`) rather than sending "All good." or nothing at all. So
+ * being strict here costs a family a slightly less tidy text, never a false one.
+ *
+ * Returns the SCHEDULED spelling, because it goes into a text the caregiver reads.
  */
 export function unaccountedMedications(scheduled: string[], accounted: string[]): string[] {
   const norm = (s: string) => s.trim().toLowerCase();
-  // Same shape as the webhook's isKnownMed: substring either way, but only once both sides
-  // are long enough that a short name cannot match everything.
-  const fuzzy = (a: string, b: string) => a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a));
+  // A plural is the same drug: "fish oils" is Fish oil, "eye drop" is Eye drops. Applied to
+  // both sides, so it only has to be consistent, not linguistically right ("-ss" is kept).
+  const singular = (w: string) => (w.length >= 4 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
+  const words = (s: string) => norm(s).split(/[^a-z0-9]+/).filter(Boolean).map(singular);
 
-  const doses = scheduled.map(norm);
+  const isStrength = (w: string) =>
+    /^\d+(\.\d+)?(mg|mcg|g|iu|ml|units?)?$/.test(w) || /^(mg|mcg|g|iu|ml|units?|tablets?|pills?|capsules?|drop)$/.test(w);
+
+  // How well an answer fits a dose name, or null if it cannot be about that dose at all.
+  const fit = (dose: string[], got: string[]): number | null => {
+    let lined = 0;
+    let anchored = false;
+    const unused = [...got];
+    for (const w of dose) {
+      const exact = unused.indexOf(w);
+      if (exact !== -1) {
+        unused.splice(exact, 1);
+        lined++;
+        if (w.length >= 4) anchored = true;
+        continue;
+      }
+      // The answer abbreviated this word ("d" for "d3"). The reverse — the answer's word is
+      // LONGER than the dose's — is a different drug, and is why this is a startsWith and
+      // not an includes.
+      const short = unused.findIndex((g) => w.startsWith(g));
+      if (short !== -1) {
+        unused.splice(short, 1);
+        lined++;
+      }
+    }
+    if (!anchored) return null;
+    // An answer may carry extra words ("metformin er 500mg" for Metformin). But once the
+    // answer has FAILED to cover a word of the dose name, a leftover word of its own is a
+    // contradiction: "vitamin d3" against "vitamin d" leaves "d" uncovered and "d3" over.
+    // Strength and units don't count as contradicting: the model routinely reports
+    // "metformin 500 mg" for a row named "Metformin ER", and treating that as a different
+    // drug would make the household's check-in say "couldn't confirm" every day.
+    const missing = dose.length - lined;
+    if (missing > 0 && unused.some((g) => !isStrength(g))) return null;
+    return lined - missing;
+  };
+
+  const doses = scheduled.map((name) => ({ name, key: norm(name), words: words(name) }));
   const claimed = new Set<number>();
+  const takeFree = (idxs: number[]) => {
+    const i = idxs.find((j) => !claimed.has(j));
+    if (i !== undefined) claimed.add(i);
+  };
 
-  for (const got of accounted.map(norm)) {
-    const candidates = doses.map((dose, i) => ({ dose, i })).filter(({ dose }) => dose === got || fuzzy(dose, got));
-    if (candidates.length === 0) continue;
-
-    // The dose this answer is MOST LIKELY about: an exact name if there is one, otherwise the
-    // most specific (longest) name it could be. Exact wins over longer, or "vitamin d" would
-    // claim the "vitamin d3" entry and leave its own unaccounted.
-    // Closeness, not raw length. "Longest wins" is right only when the answer is more
-    // specific than the dose name ("metformin er 500mg" belongs to "Metformin ER", not
-    // "Metformin") — but when the answer is SHORTER than several dose names, the most
-    // generic one is the better fit, and preferring the longest hands "vitamin d" to a
-    // "Vitamin D3 1000 IU" entry. Negative distance orders both cases correctly with one
-    // rule, and an exact name still beats every approximation.
-    const rank = ({ dose }: { dose: string }) => (dose === got ? 1e6 : 0) - Math.abs(dose.length - got.length);
-    const bestRank = Math.max(...candidates.map(rank));
-    const equallyGood = candidates.filter((c) => rank(c) === bestRank);
-
-    // Among names that fit EQUALLY well, take one that is still free. Two rows of the same
-    // drug in one slot is a real regimen (500mg and 1000mg at the same hour, and nothing in
-    // validation rejects it) — both entries are an identical, exact fit, so without this the
-    // second confirmation resolved to the first entry again, was spent, and the second row
-    // stayed unaccounted forever. That household would log a warning and take the silent
-    // branch after every clean call: no daily line, ever, and no way to tell that apart from
-    // a dead scheduler.
-    const free = equallyGood.find((c) => !claimed.has(c.i));
-
-    // But spent either way. A confirmation whose best-fitting names are ALL claimed does not
-    // fall through to a worse-fitting one — that cascade is what let two variant spellings of
-    // a single drug ("vitamin d3", "vitamin d3 1000 iu") account for a separate Vitamin D
-    // dose the call never mentioned, and told the family "All good." It is also what made the
-    // unaccounted warning name the wrong drug, by letting a generic name swallow a specific
-    // answer before the specific entry could claim it. The distinction is fit: an equally
-    // good name is the same dose said twice, a worse one is a different drug.
-    if (free) claimed.add(free.i);
+  const fuzzyAnswers: string[][] = [];
+  for (const got of accounted) {
+    const exact = doses.flatMap((d, i) => (d.key === norm(got) ? [i] : []));
+    // An exact answer whose entries are all claimed is a repeat, not a fuzzy answer.
+    if (exact.length > 0) takeFree(exact);
+    else fuzzyAnswers.push(words(got));
   }
 
-  return doses.filter((_, i) => !claimed.has(i));
+  for (const got of fuzzyAnswers) {
+    const scored = doses.flatMap((d, i) => {
+      const f = fit(d.words, got);
+      return f === null ? [] : [{ i, key: d.key, f }];
+    });
+    if (scored.length === 0) continue;
+    const best = Math.max(...scored.map((c) => c.f));
+    const top = scored.filter((c) => c.f === best);
+    if (new Set(top.map((c) => c.key)).size > 1) continue;
+    takeFree(top.map((c) => c.i));
+  }
+
+  return doses.filter((_, i) => !claimed.has(i)).map((d) => d.name);
 }
