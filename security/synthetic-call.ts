@@ -105,8 +105,20 @@ async function main() {
       }),
     });
 
-    const { data: after } = await db.from("calls").select("status,mood,summary,concerns,requests,meds_confirmed").eq("id", row!.id).single();
-    const { data: msgs } = await db.from("messages").select("channel,status,recipient,body").eq("call_id", row!.id);
+    // Checked, not merely printed. A 401 from a stale VAPI_WEBHOOK_SECRET, a 500, or a
+    // WEBHOOK_URL pointing at something that answers but isn't this route all produce
+    // `messages: 0` / `(silent)` and exit 0 — identical to a clean call that correctly stayed
+    // quiet, which is a legitimate result here. The same hazard the consent check above
+    // closes, one step later in the same function.
+    if (!res.ok) throw new Error(`webhook returned HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+
+    // And these two reads decide what the run REPORTS, so a dropped error turns a failed
+    // lookup into "the webhook did nothing" — fail-open in exactly the direction the
+    // teardown below argues against.
+    const { data: after, error: afterError } = await db.from("calls").select("status,mood,summary,concerns,requests,meds_confirmed").eq("id", row!.id).single();
+    if (afterError) throw new Error(`could not read the call back: ${afterError.message}`);
+    const { data: msgs, error: msgsError } = await db.from("messages").select("channel,status,recipient,body").eq("call_id", row!.id);
+    if (msgsError) throw new Error(`could not read the messages: ${msgsError.message}`);
     console.log(`webhook: HTTP ${res.status}`);
     console.log(`mood=${after?.mood}  concerns=${JSON.stringify(after?.concerns)}  requests=${JSON.stringify(after?.requests)}`);
     console.log(`meds: ${JSON.stringify(after?.meds_confirmed)}`);
@@ -133,17 +145,56 @@ async function main() {
       await attempt("parents", () => db.from("parents").delete().eq("id", pid));
     }
     await attempt("sms_opt_ins", () => db.from("sms_opt_ins").delete().in("phone", [CG_PHONE, PARENT_PHONE, CONTACT_PHONE]));
+
+    // The claim is only worth making if the row is actually gone — and "we could not find
+    // out" is not "it is gone". Discarding this error made the check fail OPEN: a read that
+    // errored left `count` undefined, `?? 0` read as zero rows, and the harness printed
+    // "throwaway household deleted" and exited 0 over a household that may still be there
+    // with consent, a medication and an in_progress call for the reaper to re-dial. Exactly
+    // the defect this block was added to catch, one level up in the same block.
+    //
+    // Searched by CAREGIVER, not by `pid`. `pid` is only set if the RPC's response came back;
+    // a dropped response or a client timeout on a call that already COMMITTED leaves a real
+    // household behind with `pid` still empty — every delete above is then skipped by
+    // `if (pid)`, and an id-based count would look at a sentinel UUID, find nothing, and let
+    // the harness announce that nothing was created. The caregiver id exists before the RPC
+    // is issued, so it finds the household in exactly the case the id cannot.
+    // BEFORE the caregiver is deleted, not after. `parents.caregiver_id` is
+    // `on delete cascade` (0001_init.sql:13), so deleting the caregiver row takes any
+    // surviving household with it — a count issued afterwards can only ever be zero unless
+    // that delete itself errored, which `failures` already reports. Read after the cascade,
+    // this check could not fail, and a check that cannot fail is the thing this file's
+    // header is about.
+    const { count, error: countError } = await db
+      .from("parents")
+      .select("id", { count: "exact", head: true })
+      .eq("caregiver_id", cg);
+    if (countError) failures.push(`could not confirm the parent row is gone: ${countError.message}`);
+
+    // Now the cascade parent, which cleans up anything the count just caught.
     await attempt("caregivers", () => db.from("caregivers").delete().eq("id", cg));
     const { error: userError } = await db.auth.admin.deleteUser(cg);
     if (userError) failures.push(`auth user: ${userError.message}`);
-
-    // The claim is only worth making if the row is actually gone.
-    const { count } = await db.from("parents").select("id", { count: "exact", head: true }).eq("id", pid || "00000000-0000-0000-0000-000000000000");
-    if (failures.length > 0 || (count ?? 0) > 0) {
-      console.error(`\nTEARDOWN FAILED — a live household may be left behind (parent ${pid}).`);
+    // `!pid` too: if save_parent_setup threw, the count above read a sentinel UUID, found
+    // nothing and would have printed "deleted" about a household that never existed. The
+    // whole value of this line is that it is trustworthy, so it may not be printed on a run
+    // that never got far enough to have anything to delete.
+    if (failures.length > 0 || countError || (count ?? 0) > 0) {
+      // Deliberately ahead of the !pid branch. `failures` can be non-empty WITH `pid` empty —
+      // the sms_opt_ins, caregivers and auth-user deletes all run outside `if (pid)` — and a
+      // real failure must not be swallowed by the reassuring line below.
+      console.error(`\nTEARDOWN FAILED — rows may be left behind (parent ${pid || "id unknown"}, caregiver ${cg}).`);
       for (const f of failures) console.error(`  ${f}`);
-      if ((count ?? 0) > 0) console.error("  the parent row is still readable");
+      if ((count ?? 0) > 0) console.error(`  ${count} parent row(s) still readable for this caregiver`);
       process.exitCode = 1;
+    } else if (!pid) {
+      // Setup did not hand back an id, so this run cannot say whether a household was ever
+      // created — only that none is readable for this caregiver now. Say exactly that. An
+      // earlier draft claimed "no household was created", which a mutation disproved in one
+      // run: the RPC HAD committed, and the row was gone because deleting the caregiver
+      // cascades to parents, not because nothing existed. Both end safe, and the difference
+      // matters the day only one of them is true. `main().catch` reports the real error.
+      console.error("\nno rows remain for this caregiver — nothing left behind");
     } else {
       console.log("\nthrowaway household deleted");
     }

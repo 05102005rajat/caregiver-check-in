@@ -601,7 +601,17 @@ export async function POST(request: Request) {
     // Nothing is wrong, but they asked for something and Rosie said she'd pass it on.
     // Staying silent here would quietly break a promise the person heard her make — and
     // "Mum would like a visit" is exactly what a family wants to hear, even on a good day.
-    const lines = [`${parentName} is doing fine, and asked for:`, "", ...report.requests.map((r) => `• ${r}`)];
+    // "is doing fine" is an affirmative claim about the call, and it needs the same guard the
+    // all-clear four lines down carries. A dose whose name the model mangled past isKnownMed
+    // lands in neither confirmed nor missed, so warrantsAttention is false — and this branch
+    // would then tell the family their parent is doing fine on a call that left a dose
+    // unanswered. The request still goes: Rosie promised to pass it on, and withholding it
+    // punishes the person for our own extraction failure. Only the reassurance is dropped.
+    const lines = [
+      unaccountedMeds.length === 0 ? `${parentName} is doing fine, and asked for:` : `${parentName} asked for:`,
+      "",
+      ...report.requests.map((r) => `• ${r}`),
+    ];
     await notifyFamilyContacts(db, call.parent_id, "notify_on_concern", call.id, lines.join("\n"), {
       fingerprint: alertFingerprint("request", report.requests),
       severity: "routine" as const,

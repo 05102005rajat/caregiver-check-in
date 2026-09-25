@@ -67,27 +67,76 @@ export function allClearMessage({ parentName, at, timezone, medsConfirmed }: All
  *      Vitamin D3 accounted for a separate Vitamin D dose the call never mentioned, and the
  *      family was told "All good." Wrong in the UNSAFE direction, which is worse.
  *
- * So: one-to-one. A confirmed name is consumed by the first dose it accounts for and cannot
- * account for a second. Exact matches are paired first, so "vitamin d3" claims its own
- * entry rather than swallowing the plainer one next to it.
+ * So: one-to-one, by BEST fit rather than first fit. Each answer is scored against every
+ * dose it could be about — an exact name beats a longer one, a longer one beats a shorter —
+ * and claims one dose from the top-scoring group, preferring a dose nothing has claimed yet.
+ * An answer whose top-scoring doses are all taken is spent, not cascaded down to a
+ * worse-fitting name.
+ *
+ * Each half of that earns its place:
+ *
+ *   - Best fit, not first fit, or "metformin er 500mg" lands on plain "Metformin" and the
+ *     warning names the one drug that WAS confirmed.
+ *   - No cascade, or two spellings of one drug ("vitamin d3", "vitamin d3 1000 iu") account
+ *     for a separate Vitamin D the call never mentioned. That is the unsafe direction.
+ *   - Prefer a free dose WITHIN the top group, or two rows of the same drug at the same hour
+ *     (500mg and 1000mg — a real regimen) can never both be accounted for, and that
+ *     household's all-clear is suppressed every day forever. That is the silent direction.
+ *     This only helps when the call produced two answers. A live run showed the extractor
+ *     collapsing "I took the 500 and the 1000" into a single "Metformin", which still leaves
+ *     row two unaccounted and the call silent. Deduplicating identical scheduled names would
+ *     paper over it by letting one answer cover both rows — the unsafe direction, pinned
+ *     against by a test — so the partial fix stands and the gap is written down instead.
+ *
+ * The trade is deliberate: an answer is never stretched across two doses, so a genuinely
+ * unmentioned dose stays reported and the family gets silence rather than a false "All
+ * good." Silence is the safe failure here, but it is still a failure — see the note on
+ * `webhook.meds_unaccounted` in HANDOVER (Known design debt).
  */
 export function unaccountedMedications(scheduled: string[], accounted: string[]): string[] {
   const norm = (s: string) => s.trim().toLowerCase();
-  const remaining = accounted.map(norm);
-  const take = (predicate: (got: string) => boolean): boolean => {
-    const i = remaining.findIndex(predicate);
-    if (i === -1) return false;
-    remaining.splice(i, 1);
-    return true;
-  };
-
   // Same shape as the webhook's isKnownMed: substring either way, but only once both sides
   // are long enough that a short name cannot match everything.
   const fuzzy = (a: string, b: string) => a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a));
 
-  const pending = scheduled.map(norm);
-  // Exact first, across the whole list, so a specific name claims its own match before a
-  // looser one can absorb it.
-  const stillPending = pending.filter((med) => !take((got) => got === med));
-  return stillPending.filter((med) => !take((got) => fuzzy(med, got)));
+  const doses = scheduled.map(norm);
+  const claimed = new Set<number>();
+
+  for (const got of accounted.map(norm)) {
+    const candidates = doses.map((dose, i) => ({ dose, i })).filter(({ dose }) => dose === got || fuzzy(dose, got));
+    if (candidates.length === 0) continue;
+
+    // The dose this answer is MOST LIKELY about: an exact name if there is one, otherwise the
+    // most specific (longest) name it could be. Exact wins over longer, or "vitamin d" would
+    // claim the "vitamin d3" entry and leave its own unaccounted.
+    // Closeness, not raw length. "Longest wins" is right only when the answer is more
+    // specific than the dose name ("metformin er 500mg" belongs to "Metformin ER", not
+    // "Metformin") — but when the answer is SHORTER than several dose names, the most
+    // generic one is the better fit, and preferring the longest hands "vitamin d" to a
+    // "Vitamin D3 1000 IU" entry. Negative distance orders both cases correctly with one
+    // rule, and an exact name still beats every approximation.
+    const rank = ({ dose }: { dose: string }) => (dose === got ? 1e6 : 0) - Math.abs(dose.length - got.length);
+    const bestRank = Math.max(...candidates.map(rank));
+    const equallyGood = candidates.filter((c) => rank(c) === bestRank);
+
+    // Among names that fit EQUALLY well, take one that is still free. Two rows of the same
+    // drug in one slot is a real regimen (500mg and 1000mg at the same hour, and nothing in
+    // validation rejects it) — both entries are an identical, exact fit, so without this the
+    // second confirmation resolved to the first entry again, was spent, and the second row
+    // stayed unaccounted forever. That household would log a warning and take the silent
+    // branch after every clean call: no daily line, ever, and no way to tell that apart from
+    // a dead scheduler.
+    const free = equallyGood.find((c) => !claimed.has(c.i));
+
+    // But spent either way. A confirmation whose best-fitting names are ALL claimed does not
+    // fall through to a worse-fitting one — that cascade is what let two variant spellings of
+    // a single drug ("vitamin d3", "vitamin d3 1000 iu") account for a separate Vitamin D
+    // dose the call never mentioned, and told the family "All good." It is also what made the
+    // unaccounted warning name the wrong drug, by letting a generic name swallow a specific
+    // answer before the specific entry could claim it. The distinction is fit: an equally
+    // good name is the same dose said twice, a worse one is a different drug.
+    if (free) claimed.add(free.i);
+  }
+
+  return doses.filter((_, i) => !claimed.has(i));
 }
