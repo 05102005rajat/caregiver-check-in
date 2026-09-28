@@ -103,6 +103,27 @@ export function describeUnconfirmed(scheduled: string[], unconfirmed: string[]):
     .join(", ");
 }
 
+/**
+ * This call's doses, with each carried-forward one merged into the scheduled row it names.
+ *
+ * Carried-forward names are the MODEL's wording from an earlier call ("metformin 500mg"),
+ * and the queue drops them only on an exact, case-insensitive match with this call's own —
+ * so "metformin 500mg" arrived beside "Metformin". The matcher is one-to-one, so a single
+ * "yes, I took my metformin" accounted for one of the two and the caregiver was told
+ * "Couldn't confirm: metformin 500mg" about a dose that had just been confirmed, in a
+ * spelling they never typed.
+ *
+ * Merged by the same rule the matcher uses, so "the same drug" means one thing everywhere:
+ * a carried name is dropped exactly when it would claim a scheduled row. This extends the
+ * queue's existing exact-name merge rather than changing its meaning — one answer about
+ * a drug covers that drug's carried and scheduled dose, as it already did for exact names.
+ * A carried name that fits nothing scheduled is kept: it is a different drug still owed.
+ */
+export function mergeCarriedForward(scheduled: string[], carried: string[]): string[] {
+  const kept = carried.filter((name) => unaccountedMedications(scheduled, [name]).length === scheduled.length);
+  return [...kept, ...scheduled];
+}
+
 export interface UnconfirmedLineInput {
   scheduled: string[];
   unconfirmed: string[];

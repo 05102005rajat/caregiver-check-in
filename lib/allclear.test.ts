@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allClearMessage, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "./allclear";
+import { allClearMessage, mergeCarriedForward, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "./allclear";
 
 const at = new Date("2026-09-24T15:10:00Z"); // 08:10 in Los Angeles
 const base = { parentName: "Nora", at, timezone: "America/Los_Angeles" };
@@ -250,5 +250,26 @@ describe("unaccountedMedications", () => {
   it("does not match on a fragment shorter than the threshold", () => {
     // A three-letter name must not match everything, the same guard isKnownMed carries.
     expect(unaccountedMedications(["Zinc"], ["zin"])).toEqual(["Zinc"]);
+  });
+});
+
+describe("mergeCarriedForward", () => {
+  it("merges a carried dose in the model's wording into the scheduled row it names", () => {
+    // Found by review: "metformin 500mg" carried from the morning sat beside "Metformin", one
+    // "yes" covered one of them, and the caregiver was told "Couldn't confirm: metformin
+    // 500mg" about a dose just confirmed.
+    const doses = mergeCarriedForward(["Metformin"], ["metformin 500mg"]);
+    expect(doses).toEqual(["Metformin"]);
+    expect(unaccountedMedications(doses, ["metformin"])).toEqual([]);
+  });
+
+  it("keeps a carried dose of a different drug, because it is still owed", () => {
+    expect(mergeCarriedForward(["Metformin"], ["Lisinopril"])).toEqual(["Lisinopril", "Metformin"]);
+    // And a changed word is a different drug, by the matcher's own rule.
+    expect(mergeCarriedForward(["Vitamin D"], ["vitamin d3"])).toEqual(["vitamin d3", "Vitamin D"]);
+  });
+
+  it("keeps a carried dose when nothing is scheduled on this call", () => {
+    expect(mergeCarriedForward([], ["Lisinopril"])).toEqual(["Lisinopril"]);
   });
 });

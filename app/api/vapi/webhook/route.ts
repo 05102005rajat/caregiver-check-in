@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { summarizeCall } from "@/lib/claude";
-import { notifyFamilyContacts } from "@/lib/notify";
+import { notedFingerprint, notifyFamilyContacts } from "@/lib/notify";
 import { alertFingerprint } from "@/lib/insights";
 import { warrantsAttention } from "@/lib/alerting";
 import { SYSTEM_FAULT_CONCERN, VOICEMAIL_CONCERN, reportableFacts } from "@/lib/reportable";
-import { allClearMessage, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "@/lib/allclear";
+import { allClearMessage, mergeCarriedForward, unaccountedMedications, unconfirmedLine, unconfirmedMessage } from "@/lib/allclear";
 import { log } from "@/lib/log";
 import {
   DEFAULT_CONCERN_KEYWORDS,
@@ -248,12 +248,18 @@ export async function POST(request: Request) {
   // for the rest of the day. The feature could ask but could never hear the reply.
   // Kept in their scheduled spelling as well, because an unaccounted one is named in a text
   // the caregiver reads, and "couldn't confirm: metformin er" looks like a system fault.
-  const scheduledMedNames: string[] = [
-    ...(call.outstanding_meds ?? []),
-    ...(call.scheduled_meds ??
-      (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : [])),
-  ];
-  const knownMedNames = scheduledMedNames.map((n) => n.toLowerCase());
+  const slotMedNames: string[] =
+    call.scheduled_meds ??
+    (parent ? medsAtLocalTime((medsRow ?? []) as Medication[], new Date(call.scheduled_for), parent.timezone).map((m) => m.name) : []);
+  const carriedMedNames: string[] = call.outstanding_meds ?? [];
+  // Two lists, on purpose. Validation keeps EVERY spelling, carried ones included: isKnownMed
+  // is a plain substring check, so dropping "metformin 500 mg" because it merges into
+  // "Metformin ER" threw away her "yes, the metformin 500 mg" as an unknown drug — and the
+  // caregiver was told the dose they had just heard confirmed couldn't be.
+  const knownMedNames = [...carriedMedNames, ...slotMedNames].map((n) => n.toLowerCase());
+  // What the call owes an answer about: carried doses merged into the scheduled row they
+  // name, so one "yes" is not reported as half an answer (see mergeCarriedForward).
+  const scheduledMedNames: string[] = mergeCarriedForward(slotMedNames, carriedMedNames);
   const knownApptTitles = ((apptsRow ?? []) as Appointment[]).map((a) => a.title.toLowerCase());
 
   // Fuzzy substring match, but only above a minimum length — otherwise a short known name
@@ -518,7 +524,7 @@ export async function POST(request: Request) {
             body: `${body}\n\n${unconfirmedNote}`,
             // Its own fingerprint, so a repeated request or concern with a NEW unconfirmed dose
             // still reaches the caregiver instead of being suppressed along with the dose.
-            fingerprint: `${fingerprint}|unconfirmed:${[...unaccountedMeds].map((m) => m.toLowerCase()).sort().join(",")}`,
+            fingerprint: notedFingerprint(fingerprint, unaccountedMeds),
           },
         }
       : {};

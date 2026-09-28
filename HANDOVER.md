@@ -39,7 +39,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33**, `npm run security:refusal` **10/10**,
-  `npm run security:queue` **41/41**, and **357 unit tests**.
+  `npm run security:queue` **41/41**, and **366 unit tests**.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
   **true** on both, `endCallPhrases` **empty** on both. The system prompt in
@@ -542,7 +542,18 @@ Two behaviours worth knowing:
   (caregiver only, SMS only, once per call) in the all-clear's place, and the CAREGIVER's
   copy of a concern or request text gains a "Couldn't confirm:" line (`unconfirmedLine`, via
   `notifyFamilyContacts`' `caregiverBody`, with its own fingerprint so a repeated request
-  cannot suppress it). The line is left out on no-answer, unreadable (`mood: unknown`) and
+  cannot suppress it). That fingerprint is `notedFingerprint` (plain + `|unconfirmed:…`),
+  and `alreadyNotified` also matches noted copies of a plain alert, so the same request
+  later WITHOUT a note is still a repeat. **`notifyFamilyContacts` now texts the caregiver
+  before the family contacts**: with a caregiver copy, that order is what collapses a number
+  shared by the caregiver and a contact (production's household) into one text. Pinned in
+  `lib/notify.test.ts`, which uses an in-memory fake DB and mocked channels — $0 to run.
+  Carried-forward doses are merged into the scheduled row they name (`mergeCarriedForward`)
+  before matching, or a morning "metformin 500mg" beside "Metformin" was reported
+  unconfirmed after she said yes. Merged for the OWED list only: `knownMedNames`, which
+  decides whether an extracted answer is kept, still holds every carried spelling —
+  `isKnownMed` is a substring check and would otherwise discard the answer itself. The
+  noted-copy match lives in `findAlertRow`, shared by the sent and opted-out lookups. The line is left out on no-answer, unreadable (`mood: unknown`) and
   URGENT texts — there it displaced the real explanation, or pointed at a pill as the
   emergency. It used to be silence, which to the caregiver
   is indistinguishable from a dead scheduler.
@@ -561,9 +572,9 @@ Two behaviours worth knowing:
   **Open gap:** the unaccounted doses are not stored on the call, so the dashboard can read
   "doing okay" for a call whose text said "Couldn't confirm". Fixing it needs a column
   (a migration) and `lib/alerting.ts` to read it — the "one rule, one place" invariant.
-  **Not driven end to end** in its final form: the route and `notify.ts` wiring (the note's
-  placement, its suppression, the caregiver copy, and skipping a contact who shares the
-  caregiver's number) was only read, not run — a synthetic run costs an extraction and
+  **Not driven end to end** in its final form: the route wiring (the note's placement and
+  its suppression) was only read, not run; the `notify.ts` dedupe and ordering are
+  unit-tested against a fake DB but not against real PostgREST `like` escaping — a synthetic run costs an extraction and
   billed Twilio segments. `/verify` (`.claude/skills/verify/SKILL.md`) has the recipe.
 - The `/admin` audit reports `record_consent` as **unknown**, permanently. The assistant
   payload carries tool ids and no names, and the panel deliberately does not fetch
@@ -588,7 +599,7 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 357 unit tests
+npm test                  # 366 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family

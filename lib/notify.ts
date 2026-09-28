@@ -23,6 +23,57 @@ type NotifyFlag = "notify_on_miss" | "notify_on_concern";
  * error), and the next attempt found the contact's `sent` row and stayed quiet. The person
  * who never heard anything was the account holder, and nothing surfaced that they hadn't.
  */
+/**
+ * The fingerprint of an alert's CAREGIVER copy when it carries a "Couldn't confirm" note.
+ *
+ * Its own fingerprint so a repeated request with a new unconfirmed dose still reaches the
+ * caregiver. But it must still count as the plain alert for dedupe, or the same request
+ * later in the day WITHOUT a note is not recognised as a repeat and the caregiver gets it
+ * twice. findAlertRow matches both, which is why the suffix is defined here, once.
+ */
+const NOTED = "|unconfirmed:";
+export function notedFingerprint(fingerprint: string, unconfirmed: string[]): string {
+  return `${fingerprint}${NOTED}${[...unconfirmed].map((m) => m.trim().toLowerCase()).sort().join(",")}`;
+}
+
+/**
+ * Whether a message row for this alert exists for this recipient: the exact fingerprint,
+ * or a noted copy of it (see notedFingerprint). Shared by both lookups below, because the
+ * noted-copy match was first added to one of them only, and the other — the opt-out record
+ * — then wrote a second "opted out" row for a number shared by caregiver and contact.
+ */
+async function findAlertRow(
+  db: ReturnType<typeof createAdminClient>,
+  parentId: string,
+  recipient: string,
+  fingerprint: string,
+  since: string,
+  kind: "sent" | "opted-out"
+): Promise<{ found: boolean; error: unknown }> {
+  const base = () => {
+    const q = db.from("messages").select("id").eq("parent_id", parentId).eq("recipient", recipient).gte("sent_at", since);
+    return kind === "sent"
+      ? q
+          .eq("status", "sent")
+          // NULL-safe on purpose. `NOT (delivery_status IN (...))` evaluates to NULL — i.e. no
+          // match — for the 17-of-21 rows that have no callback yet, so the previous form
+          // excluded almost every message and dedupe silently stopped suppressing anything.
+          .or("delivery_status.is.null,delivery_status.not.in.(undelivered,failed)")
+      : q.eq("status", "failed").eq("delivery_status", "undelivered");
+  };
+  const { data: exact, error: exactError } = await base().eq("fingerprint", fingerprint).limit(1).maybeSingle();
+  if (exactError) return { found: false, error: exactError };
+  if (exact) return { found: true, error: null };
+  // Escaped, because fingerprints hold free text and `%` or `_` in a concern would otherwise
+  // act as wildcards and match an unrelated alert. PostgREST also reads `*` as a wildcard in
+  // `like`, with no escape for it, so a fingerprint containing one skips this lookup: the
+  // cost is a possible duplicate, never a suppression.
+  if (fingerprint.includes("*")) return { found: false, error: null };
+  const pattern = `${fingerprint.replace(/[\\%_]/g, (c) => `\\${c}`)}${NOTED}%`;
+  const { data: noted, error: notedError } = await base().like("fingerprint", pattern).limit(1).maybeSingle();
+  return { found: Boolean(noted), error: notedError };
+}
+
 async function alreadyNotified(
   db: ReturnType<typeof createAdminClient>,
   parentId: string,
@@ -37,31 +88,17 @@ async function alreadyNotified(
   // duplicate of a message that came back `undelivered` means nobody is ever told —
   // the system has the data to know better and was not consulting it. A null
   // delivery_status (no callback yet) still counts: we have no evidence it failed.
-  const { data: recent, error: recentError } = await db
-    .from("messages")
-    .select("id")
-    .eq("parent_id", parentId)
-    .eq("fingerprint", fingerprint)
-    .eq("recipient", recipient)
-    .eq("status", "sent")
-    // NULL-safe on purpose. `NOT (delivery_status IN (...))` evaluates to NULL — i.e. no
-    // match — for the 17-of-21 rows that have no callback yet, so the previous form
-    // excluded almost every message and dedupe silently stopped suppressing anything.
-    // The comment above said nulls still count; the query did the opposite.
-    .or("delivery_status.is.null,delivery_status.not.in.(undelivered,failed)")
-    .gte("sent_at", since)
-    .limit(1)
-    .maybeSingle();
-  if (recentError) {
+  const { found, error } = await findAlertRow(db, parentId, recipient, fingerprint, since, "sent");
+  if (error) {
     // Fails OPEN, deliberately and in the opposite direction to the opt-out check above: a
     // dedupe read that errors means we cannot prove the family already heard this, and for
     // a safety alert a duplicate text is much better than a silence we cannot detect.
     // Logged because the refactor runs this two or three times per alert, so a persistent
     // read failure shows up as the same message repeating rather than as an error anywhere.
-    log.error("notify.dedupe_lookup_failed", { parent_id: parentId, recipient, fingerprint, err: recentError });
+    log.error("notify.dedupe_lookup_failed", { parent_id: parentId, recipient, fingerprint, err: error });
     return false;
   }
-  return Boolean(recent);
+  return found;
 }
 
 /**
@@ -78,24 +115,14 @@ async function alreadySuppressed(
   since: string
 ): Promise<boolean> {
   if (!fingerprint) return false;
-  const { data, error } = await db
-    .from("messages")
-    .select("id")
-    .eq("parent_id", parentId)
-    .eq("fingerprint", fingerprint)
-    .eq("recipient", recipient)
-    .eq("status", "failed")
-    .eq("delivery_status", "undelivered")
-    .gte("sent_at", since)
-    .limit(1)
-    .maybeSingle();
+  const { found, error } = await findAlertRow(db, parentId, recipient, fingerprint, since, "opted-out");
   if (error) {
     // Fails open like the dedupe check: the cost is one duplicate "opted out" row, which is
     // bookkeeping noise, never a message to anyone.
     log.error("notify.suppression_lookup_failed", { parent_id: parentId, recipient, fingerprint, err: error });
     return false;
   }
-  return Boolean(data);
+  return found;
 }
 
 async function sendAlert(
@@ -361,25 +388,6 @@ export async function notifyFamilyContacts(
   // nothing about whether this alert reached everyone it was meant to.
   let reachedEveryone = (caregiverOnly || !contactsError) && !parentError;
 
-  // With a caregiver copy, the account holder's number is served by that copy alone. Dedupe is
-  // per (recipient, fingerprint), and the two copies carry different fingerprints — so a
-  // household whose caregiver is also listed as a family contact (production has exactly
-  // that) would otherwise get the same text twice, once of each version. The caregiver copy
-  // is a superset, so it is the one kept. Only under caregiverBody: every other alert keeps
-  // relying on the shared fingerprint, which already collapses the pair.
-  let caregiverPhone: string | null = null;
-  if (options.caregiverBody && parentRow?.caregiver_id) {
-    const { data: cg } = await db.from("caregivers").select("phone").eq("id", parentRow.caregiver_id).single();
-    caregiverPhone = cg?.phone ?? null;
-  }
-
-  for (const contact of caregiverOnly ? [] : ((contacts ?? []) as FamilyContact[])) {
-    if (caregiverPhone && contact.phone === caregiverPhone) continue;
-    if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, smsOnly ? null : contact.email, body, fingerprint, since))) {
-      reachedEveryone = false;
-    }
-  }
-
   if (parentRow?.caregiver_id) {
     const { data: caregiver, error: caregiverError } = await db
       .from("caregivers")
@@ -409,6 +417,19 @@ export async function notifyFamilyContacts(
       ) {
         reachedEveryone = false;
       }
+    }
+  }
+
+  // Contacts AFTER the caregiver. A household whose caregiver is also listed as a family
+  // contact (production has exactly that) shares one number between the two sends. With a
+  // caregiver copy the fingerprints differ, so it is the noted-copy match in alreadyNotified
+  // that collapses them — and only in this order: the plain alert recognises a noted copy
+  // already sent, but a noted copy must NOT treat an earlier plain one as a repeat, or a new
+  // unconfirmed dose would never reach the caregiver. If the caregiver's text failed, the
+  // contact send is not suppressed and is the retry, with that contact's own email fallback.
+  for (const contact of caregiverOnly ? [] : ((contacts ?? []) as FamilyContact[])) {
+    if (!(await sendAlert(db, parentId, callId, contact.id, contact.phone, smsOnly ? null : contact.email, body, fingerprint, since))) {
+      reachedEveryone = false;
     }
   }
 
