@@ -524,7 +524,7 @@ export async function POST(request: Request) {
             body: `${body}\n\n${unconfirmedNote}`,
             // Its own fingerprint, so a repeated request or concern with a NEW unconfirmed dose
             // still reaches the caregiver instead of being suppressed along with the dose.
-            fingerprint: notedFingerprint(fingerprint, unaccountedMeds),
+            fingerprint: notedFingerprint(fingerprint, unaccountedMeds, call.id),
           },
         }
       : {};

@@ -32,8 +32,14 @@ type NotifyFlag = "notify_on_miss" | "notify_on_concern";
  * twice. findAlertRow matches both, which is why the suffix is defined here, once.
  */
 const NOTED = "|unconfirmed:";
-export function notedFingerprint(fingerprint: string, unconfirmed: string[]): string {
-  return `${fingerprint}${NOTED}${[...unconfirmed].map((m) => m.trim().toLowerCase()).sort().join(",")}`;
+//
+// Per CALL, not only per drug. Keyed on the drug names alone, a morning and an evening call
+// that both carried the same request and left the same dose unconfirmed produced the same
+// fingerprint, the evening copy was suppressed as a repeat, and — because a request text
+// takes the place of the standalone "Couldn't confirm" — the caregiver heard nothing about
+// the evening dose at all. The call id goes last so the plain-alert match (a prefix) holds.
+export function notedFingerprint(fingerprint: string, unconfirmed: string[], callId: string): string {
+  return `${fingerprint}${NOTED}${[...unconfirmed].map((m) => m.trim().toLowerCase()).sort().join(",")}@${callId}`;
 }
 
 /**

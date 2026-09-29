@@ -39,7 +39,7 @@ Next.js 16 · Supabase · Vapi (voice) · Twilio (SMS) · Anthropic (extraction)
     rebuilt on `created_at` by 0032. Index definitions aren't exposed, and it is a
     performance-only change with no behavioural signal. Everything else is confirmed.
 - `npm run security` is **33/33**, `npm run security:refusal` **10/10**,
-  `npm run security:queue` **41/41**, and **366 unit tests**.
+  `npm run security:queue` **41/41**, and **367 unit tests**.
 - Twilio toll-free verification **approved**; SMS delivery works.
 - Vapi: audio recording **off on both assistants**, transcripts on, `endCallFunctionEnabled`
   **true** on both, `endCallPhrases` **empty** on both. The system prompt in
@@ -542,7 +542,7 @@ Two behaviours worth knowing:
   (caregiver only, SMS only, once per call) in the all-clear's place, and the CAREGIVER's
   copy of a concern or request text gains a "Couldn't confirm:" line (`unconfirmedLine`, via
   `notifyFamilyContacts`' `caregiverBody`, with its own fingerprint so a repeated request
-  cannot suppress it). That fingerprint is `notedFingerprint` (plain + `|unconfirmed:…`),
+  cannot suppress it). That fingerprint is `notedFingerprint` (plain + `|unconfirmed:…@<call id>` — per call, or a repeated request on a later call hid that call's unconfirmed dose entirely),
   and `alreadyNotified` also matches noted copies of a plain alert, so the same request
   later WITHOUT a note is still a repeat. **`notifyFamilyContacts` now texts the caregiver
   before the family contacts**: with a caregiver copy, that order is what collapses a number
@@ -599,7 +599,7 @@ Two behaviours worth knowing:
 ## Commands
 
 ```bash
-npm test                  # 366 unit tests
+npm test                  # 367 unit tests
 npm run security:all      # all three real-database suites, below, in order
 npm run security          # 33 tenant-isolation checks against real Supabase
 npm run security:refusal  # 10 checks: an out-of-hours refusal must alert the family

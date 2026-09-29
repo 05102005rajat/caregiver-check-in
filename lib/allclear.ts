@@ -204,7 +204,16 @@ export function unaccountedMedications(scheduled: string[], accounted: string[])
   const norm = (s: string) => s.trim().toLowerCase();
   // A plural is the same drug: "fish oils" is Fish oil, "eye drop" is Eye drops. Applied to
   // both sides, so it only has to be consistent, not linguistically right ("-ss" is kept).
-  const singular = (w: string) => (w.length >= 4 && w.endsWith("s") && !w.endsWith("ss") ? w.slice(0, -1) : w);
+  // Remembered, because the 4-character anchor floor below is about the word as SAID: "Tums"
+  // is a four-letter drug name, and judging it as "tum" meant no answer could ever anchor it,
+  // so "tums 500mg taken. Couldn't confirm: Tums." went out after every call.
+  const fromPlural = new Set<string>();
+  const singular = (w: string) => {
+    if (w.length < 4 || !w.endsWith("s") || w.endsWith("ss")) return w;
+    const one = w.slice(0, -1);
+    fromPlural.add(one);
+    return one;
+  };
   const words = (s: string) => norm(s).split(/[^a-z0-9]+/).filter(Boolean).map(singular);
 
   const isStrength = (w: string) =>
@@ -220,7 +229,7 @@ export function unaccountedMedications(scheduled: string[], accounted: string[])
       if (exact !== -1) {
         unused.splice(exact, 1);
         lined++;
-        if (w.length >= 4) anchored = true;
+        if (w.length >= 4 || fromPlural.has(w)) anchored = true;
         continue;
       }
       // The answer abbreviated this word ("d" for "d3"). The reverse — the answer's word is

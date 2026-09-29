@@ -84,7 +84,7 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
     const db = fakeDb(household(SHARED));
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call1", "BODY", {
       fingerprint: plain,
-      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"]) },
+      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"], "call1") },
     });
     expect(sent).toEqual([{ to: SHARED, body: "BODY + note" }]);
   });
@@ -95,7 +95,7 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
     const db = fakeDb(household("+12025550199"));
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call1", "BODY", {
       fingerprint: plain,
-      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"]) },
+      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"], "call1") },
     });
     expect(sent).toEqual([
       { to: SHARED, body: "BODY + note" },
@@ -111,7 +111,7 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
     const db = fakeDb(tables);
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call1", "BODY", {
       fingerprint: plain,
-      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"]) },
+      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"], "call1") },
     });
     sent.length = 0;
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call2", "BODY", { fingerprint: plain });
@@ -126,7 +126,7 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
     sent.length = 0;
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call2", "BODY", {
       fingerprint: plain,
-      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"]) },
+      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"], "call1") },
     });
     expect(sent).toEqual([{ to: SHARED, body: "BODY + note" }]);
   });
@@ -141,11 +141,30 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
     const db = fakeDb(tables);
     await notifyFamilyContacts(db, "p1", "notify_on_concern", "call1", "BODY", {
       fingerprint: plain,
-      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"]) },
+      caregiverBody: { body: "BODY + note", fingerprint: notedFingerprint(plain, ["Aspirin"], "call1") },
     });
     expect(sent).toEqual([]);
     const optOutRows = tables.messages.filter((m) => m.recipient === SHARED && m.status === "failed");
     expect(optOutRows).toHaveLength(1);
+  });
+
+  it("tells the caregiver about a later call's unconfirmed dose even when the request repeats", async () => {
+    // Found by review: 9am and 7pm both carried the same request and left Metformin
+    // unconfirmed. Keyed on the drug alone, the 7pm copy matched the 9am one and was
+    // suppressed — and a request text replaces the standalone "Couldn't confirm", so the
+    // caregiver heard nothing about the evening dose.
+    const tables = household("+12025550199");
+    const db = fakeDb(tables);
+    const send = (callId: string) =>
+      notifyFamilyContacts(db, "p1", "notify_on_concern", callId, "BODY", {
+        fingerprint: plain,
+        caregiverBody: { body: `BODY + note ${callId}`, fingerprint: notedFingerprint(plain, ["Metformin"], callId) },
+      });
+    await send("morning");
+    sent.length = 0;
+    await send("evening");
+    // The caregiver gets the evening's note; the contact is still spared the repeat request.
+    expect(sent).toEqual([{ to: SHARED, body: "BODY + note evening" }]);
   });
 
   it("does not let a wildcard in the alert text match an unrelated alert", async () => {
@@ -156,7 +175,7 @@ describe("notifyFamilyContacts with a caregiver copy", () => {
       parent_id: "p1",
       recipient: SHARED,
       status: "sent",
-      fingerprint: notedFingerprint("concern:fell xn the garden", ["Aspirin"]),
+      fingerprint: notedFingerprint("concern:fell xn the garden", ["Aspirin"], "call1"),
       sent_at: new Date().toISOString(),
     });
     const db = fakeDb(tables);

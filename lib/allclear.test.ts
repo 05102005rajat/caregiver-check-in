@@ -221,6 +221,11 @@ describe("unaccountedMedications", () => {
     // drug from Fish oil and that household got "couldn't confirm" after every call.
     expect(unaccountedMedications(["Fish oil"], ["fish oils"])).toEqual([]);
     expect(unaccountedMedications(["Eye drops"], ["eye drop"])).toEqual([]);
+    // Found by review: stripping the "s" took "Tums" under the 4-character anchor floor, so
+    // an answer the webhook accepted could never count for it.
+    expect(unaccountedMedications(["Tums"], ["tums 500mg"])).toEqual([]);
+    // Control: the floor still holds for a name that was short to begin with.
+    expect(unaccountedMedications(["Zinc"], ["zin"])).toEqual(["Zinc"]);
     // Control: a plural does not blur a changed word.
     expect(unaccountedMedications(["Vitamin D"], ["vitamin d3s"])).toEqual(["Vitamin D"]);
   });
